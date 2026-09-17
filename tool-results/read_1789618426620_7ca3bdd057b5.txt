@@ -1,0 +1,562 @@
+   431→   431→  { left: "88%", top: "58%", size: 10, delay: 1.8, duration: 7 },
+   432→   432→  { left: "52%", top: "16%", size: 5, delay: 2.4, duration: 6 },
+   433→   433→  { left: "64%", top: "74%", size: 6, delay: 0.3, duration: 5.5 },
+   434→   434→];
+   435→   435→
+   436→   436→const HOW_IT_WORKS = [
+   437→   437→  {
+   438→   438→    icon: ShoppingBag,
+   439→   439→    title: "Pick a product",
+   440→   440→    text: "Browse verified trading desks, SaaS playbooks, communities and more — every listing shows pricing tiers, reviews and what you get.",
+   441→   441→  },
+   442→   442→  {
+   443→   443→    icon: CreditCard,
+   444→   444→    title: "Checkout with card, PayPal or crypto",
+   445→   445→    text: "One checkout, three gateways. Free trials, automatic renewals and cancel-anytime — no lock-in, ever.",
+   446→   446→  },
+   447→   447→  {
+   448→   448→    icon: KeyRound,
+   449→   449→    title: "Get instant access",
+   450→   450→    text: "Discord roles, Telegram channels, license keys and secure downloads are provisioned the second your payment lands.",
+   451→   451→  },
+   452→   452→];
+   453→   453→
+   454→   454→function DiscoverView() {
+   455→   455→  const params = useAppStore((s) => s.params);
+   456→   456→  const nonce = useAppStore((s) => s.nonce);
+   457→   457→  const { toast } = useToast();
+   458→   458→
+   459→   459→  const [searchText, setSearchText] = useState(params.query ?? "");
+   460→   460→  const [category, setCategory] = useState(params.category ?? "ALL");
+   461→   461→  const [sort, setSort] = useState("featured");
+   462→   462→  const [products, setProducts] = useState<ProductCardDTO[] | null>(null);
+   463→   463→  const [loading, setLoading] = useState(true);
+   464→   464→
+   465→   465→  const gridRef = useRef<HTMLDivElement>(null);
+   466→   466→  const howRef = useRef<HTMLDivElement>(null);
+   467→   467→
+   468→   468→  // Sync with external navigation params (e.g. header search).
+   469→   469→  useEffect(() => {
+   470→   470→    setSearchText(params.query ?? "");
+   471→   471→    setCategory(params.category ?? "ALL");
+   472→   472→  }, [params.query, params.category]);
+   473→   473→
+   474→   474→  // Debounced catalog fetch, driven by filters + global refresh nonce.
+   475→   475→  useEffect(() => {
+   476→   476→    let cancelled = false;
+   477→   477→    const t = setTimeout(async () => {
+   478→   478→      setLoading(true);
+   479→   479→      try {
+   480→   480→        const qs = new URLSearchParams();
+   481→   481→        const q = searchText.trim();
+   482→   482→        if (q) qs.set("q", q);
+   483→   483→        if (category !== "ALL") qs.set("category", category);
+   484→   484→        if (sort !== "featured") qs.set("sort", sort);
+   485→   485→        const suffix = qs.toString();
+   486→   486→        const res = await api<{ products: ProductCardDTO[] }>(`/api/products${suffix ? `?${suffix}` : ""}`);
+   487→   487→        if (!cancelled) setProducts(res.products);
+   488→   488→      } catch (e) {
+   489→   489→        if (!cancelled) {
+   490→   490→          setProducts([]);
+   491→   491→          toast({ title: "Could not load products", description: (e as Error).message, variant: "destructive" });
+   492→   492→        }
+   493→   493→      } finally {
+   494→   494→        if (!cancelled) setLoading(false);
+   495→   495→      }
+   496→   496→    }, 320);
+   497→   497→    return () => {
+   498→   498→      cancelled = true;
+   499→   499→      clearTimeout(t);
+   500→   500→    };
+   501→   501→  }, [searchText, category, sort, nonce, toast]);
+   502→   502→
+   503→   503→  const featured = useMemo(() => (products ?? []).filter((p) => p.featured), [products]);
+   504→   504→  const hasFilters = searchText.trim() !== "" || category !== "ALL";
+   505→   505→  const totalMembers = (products ?? []).reduce((s, p) => s + p.membersCount, 0);
+   506→   506→  const avgRating = products && products.length > 0 ? products.reduce((s, p) => s + p.rating, 0) / products.length : 0;
+   507→   507→  const resultCount = products?.length ?? 0;
+   508→   508→
+   509→   509→  function clearFilters() {
+   510→   510→    setSearchText("");
+   511→   511→    setCategory("ALL");
+   512→   512→  }
+   513→   513→
+   514→   514→  return (
+   515→   515→    <div>
+   516→   516→      {/* ------------------------------ Hero ------------------------------ */}
+   517→   517→      <section className="relative overflow-hidden border-b">
+   518→   518→        <div aria-hidden className="pointer-events-none absolute inset-0">
+   519→   519→          <div className="absolute inset-0 bg-gradient-to-br from-emerald-500/[0.08] via-teal-500/[0.05] to-cyan-500/[0.09]" />
+   520→   520→          <div className="absolute inset-0 [background-image:linear-gradient(to_right,rgba(16,185,129,0.07)_1px,transparent_1px),linear-gradient(to_bottom,rgba(16,185,129,0.07)_1px,transparent_1px)] [background-size:36px_36px] [mask-image:radial-gradient(ellipse_70%_70%_at_50%_30%,black_20%,transparent_75%)]" />
+   521→   521→          <div className="absolute -top-24 left-1/4 h-72 w-72 rounded-full bg-emerald-400/20 blur-3xl" />
+   522→   522→          <div className="absolute right-1/5 top-8 h-64 w-64 rounded-full bg-cyan-400/15 blur-3xl" />
+   523→   523→          {HERO_PARTICLES.map((p, i) => (
+   524→   524→            <motion.span
+   525→   525→              key={i}
+   526→   526→              className="absolute rounded-full bg-emerald-500/40"
+   527→   527→              style={{ left: p.left, top: p.top, width: p.size, height: p.size }}
+   528→   528→              animate={{ y: [0, -14, 0], opacity: [0.25, 0.6, 0.25] }}
+   529→   529→              transition={{ duration: p.duration, delay: p.delay, repeat: Infinity, ease: "easeInOut" }}
+   530→   530→            />
+   531→   531→          ))}
+   532→   532→        </div>
+   533→   533→
+   534→   534→        <div className="container relative mx-auto max-w-7xl px-4 py-16 md:py-24">
+   535→   535→          <motion.div
+   536→   536→            initial={{ opacity: 0, y: 18 }}
+   537→   537→            animate={{ opacity: 1, y: 0 }}
+   538→   538→            transition={{ duration: 0.5, ease: "easeOut" }}
+   539→   539→            className="mx-auto max-w-3xl text-center"
+   540→   540→          >
+   541→   541→            <span className="inline-flex items-center gap-1.5 rounded-full border border-primary/25 bg-primary/10 px-3.5 py-1.5 text-xs font-semibold text-primary">
+   542→   542→              <Sparkles className="h-3.5 w-3.5" />
+   543→   543→              The all-in-one membership marketplace
+   544→   544→            </span>
+   545→   545→            <h1 className="mt-5 text-balance text-3xl font-extrabold leading-tight tracking-tight sm:text-4xl md:text-5xl">
+   546→   546→              Everything you need to{" "}
+   547→   547→              <span className="bg-gradient-to-r from-emerald-600 via-teal-600 to-cyan-600 bg-clip-text text-transparent">sell, buy and run memberships</span>
+   548→   548→            </h1>
+   549→   549→            <p className="mx-auto mt-4 max-w-2xl text-balance text-base leading-relaxed text-muted-foreground md:text-lg">
+   550→   550→              Recurring billing across Stripe, PayPal and crypto — with automatic license keys, secure file delivery and
+   551→   551→              instant Discord &amp; Telegram access automation.
+   552→   552→            </p>
+   553→   553→            <div className="mt-7 flex flex-col items-center justify-center gap-3 sm:flex-row">
+   554→   554→              <Button
+   555→   555→                size="lg"
+   556→   556→                className="h-12 rounded-full px-8 text-base"
+   557→   557→                onClick={() => gridRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })}
+   558→   558→              >
+   559→   559→                <ShoppingBag className="h-4.5 w-4.5" />
+   560→   560→                Browse products
+   561→   561→              </Button>
+   562→   562→              <Button
+   563→   563→                size="lg"
+   564→   564→                variant="outline"
+   565→   565→                className="h-12 rounded-full px-8 text-base"
+   566→   566→                onClick={() => howRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })}
+   567→   567→              >
+   568→   568→                How it works
+   569→   569→              </Button>
+   570→   570→            </div>
+   571→   571→
+   572→   572→            <dl className="mx-auto mt-10 flex max-w-xl flex-wrap items-center justify-center gap-x-10 gap-y-4">
+   573→   573→              <div className="text-center">
+   574→   574→                <dt className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Products</dt>
+   575→   575→                <dd className="mt-0.5 text-xl font-bold tabular-nums">
+   576→   576→                  {products === null ? <Skeleton className="mx-auto h-6 w-10" /> : resultCount}
+   577→   577→                </dd>
+   578→   578→              </div>
+   579→   579→              <div className="text-center">
+   580→   580→                <dt className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Members</dt>
+   581→   581→                <dd className="mt-0.5 text-xl font-bold tabular-nums">
+   582→   582→                  {products === null ? <Skeleton className="mx-auto h-6 w-14" /> : fmtCompact(totalMembers)}
+   583→   583→                </dd>
+   584→   584→              </div>
+   585→   585→              <div className="text-center">
+   586→   586→                <dt className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Avg rating</dt>
+   587→   587→                <dd className="mt-0.5 inline-flex items-center gap-1.5 text-xl font-bold tabular-nums">
+   588→   588→                  {products === null ? <Skeleton className="h-6 w-10" /> : <>{avgRating.toFixed(1)}<Star className="h-4 w-4 fill-amber-400 text-amber-400" /></>}
+   589→   589→                </dd>
+   590→   590→              </div>
+   591→   591→            </dl>
+   592→   592→          </motion.div>
+   593→   593→        </div>
+   594→   594→      </section>
+   595→   595→
+   596→   596→      {/* ------------------------- Catalog + filters ------------------------ */}
+   597→   597→      <section ref={gridRef} className="container mx-auto max-w-7xl scroll-mt-20 px-4 py-10" aria-label="Product catalog">
+   598→   598→        <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
+   599→   599→          <div className="relative flex-1">
+   600→   600→            <Search className="absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+   601→   601→            <Input
+   602→   602→              value={searchText}
+   603→   603→              onChange={(e) => setSearchText(e.target.value)}
+   604→   604→              placeholder="Search products, communities, SaaS…"
+   605→   605→              aria-label="Search products"
+   606→   606→              className={cn("h-11 rounded-full border-muted bg-muted/40 pl-10", searchText && "pr-10")}
+   607→   607→            />
+   608→   608→            {searchText && (
+   609→   609→              <button
+   610→   610→                type="button"
+   611→   611→                onClick={() => setSearchText("")}
+   612→   612→                aria-label="Clear search"
+   613→   613→                className="absolute right-2 top-1/2 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+   614→   614→              >
+   615→   615→                <X className="h-4 w-4" />
+   616→   616→              </button>
+   617→   617→            )}
+   618→   618→          </div>
+   619→   619→          <Select value={sort} onValueChange={setSort}>
+   620→   620→            <SelectTrigger aria-label="Sort products" className="h-11 w-full rounded-full sm:w-48">
+   621→   621→              <SelectValue />
+   622→   622→            </SelectTrigger>
+   623→   623→            <SelectContent>
+   624→   624→              <SelectItem value="featured">Featured</SelectItem>
+   625→   625→              <SelectItem value="members">Most members</SelectItem>
+   626→   626→              <SelectItem value="rating">Top rated</SelectItem>
+   627→   627→              <SelectItem value="price">Price: low to high</SelectItem>
+   628→   628→            </SelectContent>
+   629→   629→          </Select>
+   630→   630→        </div>
+   631→   631→
+   632→   632→        <div className="mt-4 flex gap-2 overflow-x-auto pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden" aria-label="Filter by category">
+   633→   633→          <CategoryChip active={category === "ALL"} onClick={() => setCategory("ALL")} icon={<Sparkles className="h-4 w-4" />} label="All" />
+   634→   634→          {CATEGORIES.map((c) => (
+   635→   635→            <CategoryChip
+   636→   636→              key={c.key}
+   637→   637→              active={category === c.key}
+   638→   638→              onClick={() => setCategory(c.key)}
+   639→   639→              icon={<CategoryIcon category={c.key} className="h-4 w-4" />}
+   640→   640→              label={c.label}
+   641→   641→            />
+   642→   642→          ))}
+   643→   643→        </div>
+   644→   644→
+   645→   645→        {/* Featured — only without active filters */}
+   646→   646→        {!hasFilters && featured.length > 0 && !loading && (
+   647→   647→          <div className="mt-9">
+   648→   648→            <SectionHeader title="Featured" description="Hand-picked by the Vendly team" />
+   649→   649→            <div className="grid gap-5 sm:grid-cols-2">
+   650→   650→              {featured.map((p, i) => (
+   651→   651→                <ProductCard key={p.id} product={p} featured index={i} />
+   652→   652→              ))}
+   653→   653→            </div>
+   654→   654→          </div>
+   655→   655→        )}
+   656→   656→
+   657→   657→        {/* All products */}
+   658→   658→        <div className="mt-10">
+   659→   659→          <SectionHeader
+   660→   660→            title={hasFilters ? `${resultCount} ${resultCount === 1 ? "product" : "products"}` : "All products"}
+   661→   661→            description={
+   662→   662→              hasFilters
+   663→   663→                ? `Matching ${searchText.trim() ? `“${searchText.trim()}”` : ""}${searchText.trim() && category !== "ALL" ? " · " : ""}${category !== "ALL" ? categoryLabel(category) : ""}`
+   664→   664→                : "Everything the marketplace has to offer"
+   665→   665→            }
+   666→   666→            action={
+   667→   667→              hasFilters ? (
+   668→   668→                <Button variant="ghost" size="sm" onClick={clearFilters} className="text-muted-foreground">
+   669→   669→                  <X className="h-3.5 w-3.5" /> Clear filters
+   670→   670→                </Button>
+   671→   671→              ) : undefined
+   672→   672→            }
+   673→   673→          />
+   674→   674→          {loading && !products ? (
+   675→   675→            <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
+   676→   676→              {Array.from({ length: 6 }, (_, i) => (
+   677→   677→                <ProductCardSkeleton key={i} />
+   678→   678→              ))}
+   679→   679→            </div>
+   680→   680→          ) : resultCount > 0 ? (
+   681→   681→            <div className={cn("grid gap-5 sm:grid-cols-2 lg:grid-cols-3", loading && "pointer-events-none opacity-50 transition-opacity")}>
+   682→   682→              {products?.map((p, i) => <ProductCard key={p.id} product={p} index={i} />)}
+   683→   683→            </div>
+   684→   684→          ) : (
+   685→   685→            <EmptyState
+   686→   686→              icon={SearchX}
+   687→   687→              title="No products found"
+   688→   688→              description="Try a different search term or clear the filters to see everything."
+   689→   689→              action={
+   690→   690→                hasFilters ? (
+   691→   691→                  <Button variant="outline" onClick={clearFilters}>
+   692→   692→                    Clear filters
+   693→   693→                  </Button>
+   694→   694→                ) : undefined
+   695→   695→              }
+   696→   696→            />
+   697→   697→          )}
+   698→   698→        </div>
+   699→   699→      </section>
+   700→   700→
+   701→   701→      {/* ---------------------------- How it works -------------------------- */}
+   702→   702→      <section ref={howRef} id="how-it-works" className="scroll-mt-20 border-t bg-muted/30">
+   703→   703→        <div className="container mx-auto max-w-7xl px-4 py-14">
+   704→   704→          <motion.div
+   705→   705→            initial={{ opacity: 0, y: 16 }}
+   706→   706→            whileInView={{ opacity: 1, y: 0 }}
+   707→   707→            viewport={{ once: true, margin: "-80px" }}
+   708→   708→            transition={{ duration: 0.45 }}
+   709→   709→          >
+   710→   710→            <div className="mx-auto max-w-2xl text-center">
+   711→   711→              <h2 className="text-2xl font-extrabold tracking-tight md:text-3xl">How Vendly works</h2>
+   712→   712→              <p className="mt-2 text-muted-foreground">From browsing to instant access in three steps.</p>
+   713→   713→            </div>
+   714→   714→            <ol className="mt-10 grid gap-5 md:grid-cols-3">
+   715→   715→              {HOW_IT_WORKS.map((step, i) => (
+   716→   716→                <motion.li
+   717→   717→                  key={step.title}
+   718→   718→                  initial={{ opacity: 0, y: 16 }}
+   719→   719→                  whileInView={{ opacity: 1, y: 0 }}
+   720→   720→                  viewport={{ once: true, margin: "-60px" }}
+   721→   721→                  transition={{ duration: 0.4, delay: i * 0.12 }}
+   722→   722→                  className="relative rounded-2xl border bg-card p-6 shadow-sm"
+   723→   723→                >
+   724→   724→                  <span className="absolute right-5 top-4 font-mono text-xs font-semibold text-primary/40">0{i + 1}</span>
+   725→   725→                  <span className="flex h-11 w-11 items-center justify-center rounded-2xl bg-primary/10 text-primary">
+   726→   726→                    <step.icon className="h-5 w-5" />
+   727→   727→                  </span>
+   728→   728→                  <h3 className="mt-4 font-bold">{step.title}</h3>
+   729→   729→                  <p className="mt-1.5 text-sm leading-relaxed text-muted-foreground">{step.text}</p>
+   730→   730→                </motion.li>
+   731→   731→              ))}
+   732→   732→            </ol>
+   733→   733→          </motion.div>
+   734→   734→        </div>
+   735→   735→      </section>
+   736→   736→    </div>
+   737→   737→  );
+   738→   738→}
+   739→   739→
+   740→   740→// ---------------------------------------------------------------------------
+   741→   741→// PRODUCT DETAIL VIEW
+   742→   742→// ---------------------------------------------------------------------------
+   743→   743→
+   744→   744→function AssetRow({ asset }: { asset: AssetDTO }) {
+   745→   745→  return (
+   746→   746→    <li className="flex items-center gap-3 rounded-xl border bg-card p-3.5">
+   747→   747→      <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+   748→   748→        <FileDown className="h-5 w-5" />
+   749→   749→      </span>
+   750→   750→      <div className="min-w-0 flex-1">
+   751→   751→        <p className="truncate text-sm font-medium">{asset.name}</p>
+   752→   752→        <p className="text-xs text-muted-foreground">
+   753→   753→          v{asset.version} · {fmtBytes(asset.sizeBytes)} · {fmtCompact(asset.downloadCount)} downloads
+   754→   754→        </p>
+   755→   755→      </div>
+   756→   756→      {asset.requiresLicense ? (
+   757→   757→        <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-amber-500/25 bg-amber-500/10 px-2.5 py-1 text-[11px] font-medium text-amber-700 dark:text-amber-400">
+   758→   758→          <Lock className="h-3 w-3" />
+   759→   759→          Included with membership
+   760→   760→        </span>
+   761→   761→      ) : (
+   762→   762→        <span className="inline-flex shrink-0 items-center gap-1 rounded-full border bg-muted px-2.5 py-1 text-[11px] font-medium text-muted-foreground">
+   763→   763→          Instant download
+   764→   764→        </span>
+   765→   765→      )}
+   766→   766→    </li>
+   767→   767→  );
+   768→   768→}
+   769→   769→
+   770→   770→function ReviewDialog({
+   771→   771→  product,
+   772→   772→  open,
+   773→   773→  onOpenChange,
+   774→   774→  onSubmitted,
+   775→   775→}: {
+   776→   776→  product: ProductDetailDTO;
+   777→   777→  open: boolean;
+   778→   778→  onOpenChange: (v: boolean) => void;
+   779→   779→  onSubmitted: () => void;
+   780→   780→}) {
+   781→   781→  const { toast } = useToast();
+   782→   782→  const [rating, setRating] = useState(5);
+   783→   783→  const [comment, setComment] = useState("");
+   784→   784→  const [busy, setBusy] = useState(false);
+   785→   785→
+   786→   786→  useEffect(() => {
+   787→   787→    if (open) {
+   788→   788→      setRating(5);
+   789→   789→      setComment("");
+   790→   790→    }
+   791→   791→  }, [open]);
+   792→   792→
+   793→   793→  async function submit() {
+   794→   794→    if (comment.trim().length < 4) {
+   795→   795→      toast({ title: "Review too short", description: "Write at least a few words about your experience.", variant: "destructive" });
+   796→   796→      return;
+   797→   797→    }
+   798→   798→    setBusy(true);
+   799→   799→    try {
+   800→   800→      await api(`/api/products/${product.id}/reviews`, { json: { rating, comment: comment.trim() } });
+   801→   801→      toast({ title: "Review posted", description: "Thanks for sharing your experience!" });
+   802→   802→      onOpenChange(false);
+   803→   803→      onSubmitted();
+   804→   804→    } catch (e) {
+   805→   805→      toast({ title: "Could not post review", description: (e as Error).message, variant: "destructive" });
+   806→   806→    } finally {
+   807→   807→      setBusy(false);
+   808→   808→    }
+   809→   809→  }
+   810→   810→
+   811→   811→  return (
+   812→   812→    <Dialog open={open} onOpenChange={onOpenChange}>
+   813→   813→      <DialogContent className="sm:max-w-md">
+   814→   814→        <DialogHeader>
+   815→   815→          <DialogTitle>Review {product.title}</DialogTitle>
+   816→   816→          <DialogDescription>Share your experience to help other buyers decide.</DialogDescription>
+   817→   817→        </DialogHeader>
+   818→   818→        <div className="space-y-5">
+   819→   819→          <div>
+   820→   820→            <Label className="text-sm font-medium">Your rating</Label>
+   821→   821→            <RadioGroup value={String(rating)} onValueChange={(v) => setRating(Number(v))} className="mt-2.5 flex gap-1">
+   822→   822→              {[1, 2, 3, 4, 5].map((i) => (
+   823→   823→                <div key={i} className="relative flex items-center">
+   824→   824→                  <RadioGroupItem value={String(i)} id={`star-${i}`} className="peer sr-only" />
+   825→   825→                  <Label
+   826→   826→                    htmlFor={`star-${i}`}
+   827→   827→                    aria-label={`${i} star${i > 1 ? "s" : ""}`}
+   828→   828→                    className="cursor-pointer rounded-lg p-2 transition-colors hover:bg-muted peer-focus-visible:ring-2 peer-focus-visible:ring-ring"
+   829→   829→                  >
+   830→   830→                    <Star className={cn("h-7 w-7 transition-colors", i <= rating ? "fill-amber-400 text-amber-400" : "text-muted-foreground/30")} />
+   831→   831→                  </Label>
+   832→   832→                </div>
+   833→   833→              ))}
+   834→   834→            </RadioGroup>
+   835→   835→          </div>
+   836→   836→          <div>
+   837→   837→            <Label htmlFor="review-comment" className="text-sm font-medium">
+   838→   838→              Your review
+   839→   839→            </Label>
+   840→   840→            <Textarea
+   841→   841→              id="review-comment"
+   842→   842→              value={comment}
+   843→   843→              onChange={(e) => setComment(e.target.value)}
+   844→   844→              rows={4}
+   845→   845→              maxLength={600}
+   846→   846→              placeholder="What did you like? What could be better?"
+   847→   847→              className="mt-2"
+   848→   848→            />
+   849→   849→            <p className="mt-1 text-right text-xs text-muted-foreground">{comment.length}/600</p>
+   850→   850→          </div>
+   851→   851→        </div>
+   852→   852→        <DialogFooter>
+   853→   853→          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={busy}>
+   854→   854→            Cancel
+   855→   855→          </Button>
+   856→   856→          <Button onClick={submit} disabled={busy}>
+   857→   857→            {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <PenLine className="h-4 w-4" />}
+   858→   858→            Post review
+   859→   859→          </Button>
+   860→   860→        </DialogFooter>
+   861→   861→      </DialogContent>
+   862→   862→    </Dialog>
+   863→   863→  );
+   864→   864→}
+   865→   865→
+   866→   866→function DetailSkeleton() {
+   867→   867→  return (
+   868→   868→    <div className="container mx-auto max-w-7xl px-4 py-8" aria-busy="true" aria-label="Loading product">
+   869→   869→      <Skeleton className="mb-4 h-8 w-28" />
+   870→   870→      <Skeleton className="h-40 w-full rounded-3xl md:h-56" />
+   871→   871→      <div className="mt-6 space-y-3">
+   872→   872→        <Skeleton className="h-9 w-2/3" />
+   873→   873→        <Skeleton className="h-5 w-1/2" />
+   874→   874→        <Skeleton className="h-5 w-40" />
+   875→   875→      </div>
+   876→   876→      <div className="mt-10 grid gap-10 lg:grid-cols-[1fr_360px]">
+   877→   877→        <div className="space-y-4">
+   878→   878→          {Array.from({ length: 5 }, (_, i) => (
+   879→   879→            <Skeleton key={i} className="h-4 w-full" />
+   880→   880→          ))}
+   881→   881→          <Skeleton className="h-28 w-full rounded-2xl" />
+   882→   882→        </div>
+   883→   883→        <Skeleton className="h-[26rem] w-full rounded-3xl" />
+   884→   884→      </div>
+   885→   885→    </div>
+   886→   886→  );
+   887→   887→}
+   888→   888→
+   889→   889→function ProductDetailView() {
+   890→   890→  const params = useAppStore((s) => s.params);
+   891→   891→  const navigate = useAppStore((s) => s.navigate);
+   892→   892→  const nonce = useAppStore((s) => s.nonce);
+   893→   893→
+   894→   894→  const [product, setProduct] = useState<ProductDetailDTO | null>(null);
+   895→   895→  const [loading, setLoading] = useState(true);
+   896→   896→  const [notFound, setNotFound] = useState(false);
+   897→   897→  const [selectedPlanId, setSelectedPlanId] = useState<string | null>(null);
+   898→   898→  const [reviewOpen, setReviewOpen] = useState(false);
+   899→   899→
+   900→   900→  const load = useCallback(async () => {
+   901→   901→    if (!params.productId) {
+   902→   902→      setNotFound(true);
+   903→   903→      setLoading(false);
+   904→   904→      return;
+   905→   905→    }
+   906→   906→    setLoading(true);
+   907→   907→    setNotFound(false);
+   908→   908→    try {
+   909→   909→      const res = await api<{ product: ProductDetailDTO }>(`/api/products/${params.productId}`);
+   910→   910→      setProduct(res.product);
+   911→   911→    } catch {
+   912→   912→      setProduct(null);
+   913→   913→      setNotFound(true);
+   914→   914→    } finally {
+   915→   915→      setLoading(false);
+   916→   916→    }
+   917→   917→  }, [params.productId]);
+   918→   918→
+   919→   919→  useEffect(() => {
+   920→   920→    void load();
+   921→   921→  }, [load, nonce]);
+   922→   922→
+   923→   923→  const plans = product ? product.plans : EMPTY_PLANS;
+   924→   924→  const selectedPlan = useMemo(() => {
+   925→   925→    if (selectedPlanId) {
+   926→   926→      const p = plans.find((x) => x.id === selectedPlanId);
+   927→   927→      if (p) return p;
+   928→   928→    }
+   929→   929→    return plans.find((p) => p.badge === "Most Popular") ?? plans[0] ?? null;
+   930→   930→  }, [selectedPlanId, plans]);
+   931→   931→
+   932→   932→  if (loading && !product) return <DetailSkeleton />;
+   933→   933→  if (notFound || !product) {
+   934→   934→    return (
+   935→   935→      <div className="container mx-auto max-w-2xl px-4 py-16">
+   936→   936→        <EmptyState
+   937→   937→          icon={PackageOpen}
+   938→   938→          title="Product not found"
+   939→   939→          description="This product may have been removed or the link is incorrect."
+   940→   940→          action={<Button onClick={() => navigate("discover")}>Back to Discover</Button>}
+   941→   941→        />
+   942→   942→      </div>
+   943→   943→    );
+   944→   944→  }
+   945→   945→
+   946→   946→  return (
+   947→   947→    <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.35, ease: "easeOut" }} className="container mx-auto max-w-7xl px-4 py-8">
+   948→   948→      <Button
+   949→   949→        variant="ghost"
+   950→   950→        size="sm"
+   951→   951→        className="-ml-2 mb-4 gap-1.5 text-muted-foreground hover:text-foreground"
+   952→   952→        onClick={() => navigate("discover")}
+   953→   953→        aria-label="Back to Discover"
+   954→   954→      >
+   955→   955→        <ArrowLeft className="h-4 w-4" /> Discover
+   956→   956→      </Button>
+   957→   957→
+   958→   958→      <ProductCover
+   959→   959→        theme={product.coverTheme}
+   960→   960→        category={product.category}
+   961→   961→        title={product.title}
+   962→   962→        className="h-40 w-full rounded-3xl md:h-56"
+   963→   963→        iconClassName="h-32 w-32 md:h-40 md:w-40"
+   964→   964→      />
+   965→   965→
+   966→   966→      {/* Header */}
+   967→   967→      <div className="mt-6 flex flex-col gap-5 md:flex-row md:items-start md:justify-between">
+   968→   968→        <div className="min-w-0">
+   969→   969→          <div className="flex flex-wrap items-center gap-2">
+   970→   970→            <Badge variant="outline" className="gap-1.5 border-primary/25 bg-primary/10 text-primary">
+   971→   971→              <CategoryIcon category={product.category} className="h-3.5 w-3.5" />
+   972→   972→              {categoryLabel(product.category)}
+   973→   973→            </Badge>
+   974→   974→            {product.status !== "ACTIVE" && <StatusBadge status={product.status} />}
+   975→   975→          </div>
+   976→   976→          <h1 className="mt-3 text-2xl font-extrabold tracking-tight md:text-4xl">{product.title}</h1>
+   977→   977→          {product.tagline && <p className="mt-2 max-w-2xl text-base text-muted-foreground md:text-lg">{product.tagline}</p>}
+   978→   978→          <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2 text-sm text-muted-foreground">
+   979→   979→            <Stars value={product.rating} count={product.reviewCount} starClass="h-4 w-4" />
+   980→   980→            <span className="inline-flex items-center gap-1.5">
+   981→   981→              <Users className="h-4 w-4" />
+   982→   982→              {fmtCompact(product.membersCount)} members
+   983→   983→            </span>
+   984→   984→            <span className="inline-flex items-center gap-1.5">
+   985→   985→              <CalendarDays className="h-4 w-4" />
+   986→   986→              Launched {fmtDate(product.createdAt)}
+   987→   987→            </span>
+   988→   988→          </div>
+   989→   989→          <div className="mt-3 flex flex-wrap gap-1.5">
+   990→   990→            {product.accessType.map((a) => (
+
+[showing lines 431-990 of 2002; use offset=991 with limit to continue reading]

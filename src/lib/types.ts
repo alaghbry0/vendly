@@ -1,0 +1,254 @@
+// Shared types used by both server APIs and client views
+
+export type View = "discover" | "product" | "checkout" | "portal" | "creator";
+
+export type Role = "CUSTOMER" | "CREATOR";
+
+export interface SessionUser {
+  id: string;
+  email: string;
+  name: string | null;
+  role: Role;
+  bio: string | null;
+  avatarColor: string;
+  discordHandle: string | null;
+  telegramHandle: string | null;
+  createdAt: string;
+}
+
+export interface DemoUser extends SessionUser {
+  productCount?: number;
+  activeSubs?: number;
+}
+
+export interface PlanDTO {
+  id: string;
+  productId: string;
+  name: string;
+  description: string | null;
+  priceCents: number;
+  currency: string;
+  interval: "month" | "year";
+  trialDays: number;
+  badge: string | null;
+  features: string[];
+  sortOrder: number;
+  active: boolean;
+}
+
+export interface AssetDTO {
+  id: string;
+  name: string;
+  fileName: string;
+  mimeType: string;
+  sizeBytes: number;
+  version: string;
+  requiresLicense: boolean;
+  downloadCount: number;
+}
+
+export interface ReviewDTO {
+  id: string;
+  authorName: string;
+  rating: number;
+  comment: string;
+  createdAt: string;
+}
+
+export interface ProductCardDTO {
+  id: string;
+  slug: string;
+  title: string;
+  tagline: string | null;
+  category: string;
+  coverTheme: string;
+  accessType: string[];
+  status: string;
+  featured: boolean;
+  membersCount: number;
+  rating: number;
+  reviewCount: number;
+  fromPriceCents: number | null;
+  intervals: string[];
+  creator: { id: string; name: string | null; avatarColor: string };
+  plans: PlanDTO[];
+}
+
+export interface ProductDetailDTO extends ProductCardDTO {
+  description: string;
+  discordRoleName: string | null;
+  telegramChannel: string | null;
+  createdAt: string;
+  assets: AssetDTO[];
+  reviews: ReviewDTO[];
+  creator: { id: string; name: string | null; avatarColor: string; bio: string | null };
+  hasAccess: boolean;
+}
+
+export interface SubscriptionDTO {
+  id: string;
+  status: string;
+  gateway: string;
+  cancelAtPeriodEnd: boolean;
+  currentPeriodStart: string;
+  currentPeriodEnd: string;
+  trialEndsAt: string | null;
+  dunningAttempts: number;
+  createdAt: string;
+  product: { id: string; title: string; coverTheme: string; category: string; accessType: string[]; creator: { name: string | null } };
+  plan: PlanDTO;
+  paymentMethod: PaymentMethodDTO | null;
+  invoiceCount: number;
+  totalPaidCents: number;
+}
+
+export interface PaymentMethodDTO {
+  id: string;
+  type: string;
+  gateway: string;
+  brand: string | null;
+  last4: string | null;
+  expMonth: number | null;
+  expYear: number | null;
+  email: string | null;
+  walletAddress: string | null;
+  chain: string | null;
+  isDefault: boolean;
+}
+
+export interface InvoiceDTO {
+  id: string;
+  number: string;
+  description: string;
+  amountCents: number;
+  status: string;
+  gateway: string | null;
+  createdAt: string;
+  paidAt: string | null;
+  periodStart: string | null;
+  periodEnd: string | null;
+  product: { id: string; title: string; coverTheme: string } | null;
+}
+
+export interface LicenseDTO {
+  id: string;
+  key: string;
+  status: string;
+  planName: string | null;
+  activations: number;
+  maxActivations: number;
+  activatedAt: string | null;
+  lastUsedAt: string | null;
+  createdAt: string;
+  product: { id: string; title: string; coverTheme: string };
+}
+
+export interface GrantDTO {
+  id: string;
+  provider: string;
+  role: string | null;
+  status: string;
+  grantedAt: string;
+  revokedAt: string | null;
+  product: { id: string; title: string; coverTheme: string };
+}
+
+export interface WebhookEndpointDTO {
+  id: string;
+  name: string;
+  provider: string;
+  url: string;
+  secret: string;
+  events: string[];
+  isActive: boolean;
+  createdAt: string;
+  deliveryCount: number;
+}
+
+export interface WebhookDeliveryDTO {
+  id: string;
+  eventType: string;
+  status: string;
+  attempts: number;
+  responseCode: number | null;
+  createdAt: string;
+  deliveredAt: string | null;
+  payload: Record<string, unknown>;
+  endpoint: { id: string; name: string; provider: string };
+}
+
+export interface AnalyticsDTO {
+  mrrCents: number;
+  arrCents: number;
+  activeSubscriptions: number;
+  trialingCount: number;
+  pastDueCount: number;
+  canceled30d: number;
+  churnRate: number;
+  totalRevenueCents: number;
+  revenue30dCents: number;
+  avgRevenuePerUserCents: number;
+  subscriberSeries: { date: string; active: number; new: number; canceled: number }[];
+  revenueSeries: { date: string; revenue: number; count: number }[];
+  mrrSeries: { date: string; mrr: number }[];
+  topProducts: { id: string; title: string; coverTheme: string; members: number; mrrCents: number; revenueCents: number }[];
+  gatewayBreakdown: { gateway: string; count: number; revenueCents: number }[];
+  recentActivity: { id: string; type: string; message: string; amountCents: number | null; at: string }[];
+}
+
+export interface ClockDTO {
+  simulated: boolean;
+  now: string;
+  label: string;
+}
+
+export interface BillingRunResult {
+  advancedDays: number;
+  newNow: string;
+  renewals: number;
+  renewalsFailed: number;
+  canceled: number;
+  trialsConverted: number;
+  invoicesCreated: number;
+  events: string[];
+}
+
+export const CATEGORIES = [
+  { key: "TRADING", label: "Trading", icon: "candlestick" },
+  { key: "CRYPTO", label: "Crypto", icon: "bitcoin" },
+  { key: "SAAS", label: "SaaS", icon: "rocket" },
+  { key: "FITNESS", label: "Fitness", icon: "dumbbell" },
+  { key: "DESIGN", label: "Design", icon: "palette" },
+  { key: "EDUCATION", label: "Education", icon: "graduation" },
+  { key: "GAMING", label: "Gaming", icon: "gamepad" },
+  { key: "OTHER", label: "Other", icon: "sparkles" },
+] as const;
+
+export const WEBHOOK_EVENTS = [
+  "subscription.created",
+  "subscription.renewed",
+  "subscription.canceled",
+  "subscription.past_due",
+  "invoice.paid",
+  "invoice.payment_failed",
+  "license_key.created",
+  "license_key.revoked",
+  "access.granted",
+  "access.revoked",
+] as const;
+
+export const STATUS_META: Record<string, { label: string; tone: string }> = {
+  ACTIVE: { label: "Active", tone: "success" },
+  TRIALING: { label: "Trialing", tone: "info" },
+  PAST_DUE: { label: "Past due", tone: "warning" },
+  CANCELED: { label: "Canceled", tone: "muted" },
+  PENDING: { label: "Pending", tone: "warning" },
+  PAID: { label: "Paid", tone: "success" },
+  FAILED: { label: "Failed", tone: "destructive" },
+  REFUNDED: { label: "Refunded", tone: "muted" },
+  OPEN: { label: "Open", tone: "info" },
+  DELIVERED: { label: "Delivered", tone: "success" },
+  REVOKED: { label: "Revoked", tone: "destructive" },
+  SYNCED: { label: "Synced", tone: "success" },
+  EXPIRED: { label: "Expired", tone: "muted" },
+};

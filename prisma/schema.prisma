@@ -1,0 +1,259 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ============ Users ============
+model User {
+  id             String   @id @default(cuid())
+  email          String   @unique
+  name           String?
+  role           String   @default("CUSTOMER") // CUSTOMER | CREATOR
+  bio            String?
+  avatarColor    String   @default("emerald") // gradient key for avatar
+  discordHandle  String?
+  telegramHandle String?
+  isDemo         Boolean  @default(false)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  products         Product[]
+  subscriptions    Subscription[]
+  paymentMethods   PaymentMethod[]
+  invoices         Invoice[]
+  licenses         LicenseKey[]
+  accessGrants     AccessGrant[]
+  downloadTokens   DownloadToken[]
+  webhookEndpoints WebhookEndpoint[]
+}
+
+// ============ Catalog ============
+model Product {
+  id           String   @id @default(cuid())
+  creatorId    String
+  creator      User     @relation(fields: [creatorId], references: [id])
+  slug         String   @unique
+  title        String
+  tagline      String?
+  description  String
+  category     String   @default("OTHER") // TRADING | SAAS | CRYPTO | FITNESS | DESIGN | EDUCATION | GAMING | OTHER
+  coverTheme   String   @default("emerald") // gradient theme key
+  accessType   String   @default("LINK") // comma list: DISCORD,TELEGRAM,LICENSE,FILE
+  status       String   @default("ACTIVE") // ACTIVE | PAUSED
+  featured     Boolean  @default(false)
+  membersCount Int      @default(0)
+  rating       Float    @default(0)
+  reviewCount  Int      @default(0)
+  discordRoleName String?
+  telegramChannel String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  plans         Plan[]
+  subscriptions Subscription[]
+  licenses      LicenseKey[]
+  assets        DigitalAsset[]
+  accessGrants  AccessGrant[]
+  reviews       Review[]
+}
+
+model Plan {
+  id          String   @id @default(cuid())
+  productId   String
+  product     Product  @relation(fields: [productId], references: [id])
+  name        String
+  description String?
+  priceCents  Int
+  currency    String   @default("usd")
+  interval    String   @default("month") // month | year
+  trialDays   Int      @default(0)
+  badge       String?
+  features    String   @default("[]") // JSON array of strings
+  sortOrder   Int      @default(0)
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now())
+
+  subscriptions Subscription[]
+}
+
+// ============ Billing ============
+model Subscription {
+  id                String    @id @default(cuid())
+  userId            String
+  user              User      @relation(fields: [userId], references: [id])
+  planId            String
+  plan              Plan      @relation(fields: [planId], references: [id])
+  productId         String
+  product           Product   @relation(fields: [productId], references: [id])
+  status            String    @default("ACTIVE") // TRIALING | ACTIVE | PAST_DUE | CANCELED | PENDING
+  gateway           String    // STRIPE | PAYPAL | CRYPTO
+  paymentMethodId   String?
+  paymentMethod     PaymentMethod? @relation(fields: [paymentMethodId], references: [id])
+  currentPeriodStart DateTime  @default(now())
+  currentPeriodEnd  DateTime
+  cancelAtPeriodEnd Boolean   @default(false)
+  canceledAt        DateTime?
+  trialEndsAt       DateTime?
+  dunningAttempts   Int       @default(0)
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  invoices Invoice[]
+  licenses LicenseKey[]
+}
+
+model PaymentMethod {
+  id            String   @id @default(cuid())
+  userId        String
+  user          User     @relation(fields: [userId], references: [id])
+  type          String   // CARD | PAYPAL | CRYPTO
+  gateway       String   // STRIPE | PAYPAL | CRYPTO
+  brand         String?
+  last4         String?
+  expMonth      Int?
+  expYear       Int?
+  email         String?
+  walletAddress String?
+  chain         String?
+  isDefault     Boolean  @default(false)
+  createdAt     DateTime @default(now())
+
+  subscriptions Subscription[]
+}
+
+model Invoice {
+  id             String    @id @default(cuid())
+  number         String    @unique // INV-1001
+  userId         String
+  user           User      @relation(fields: [userId], references: [id])
+  subscriptionId String?
+  subscription   Subscription? @relation(fields: [subscriptionId], references: [id])
+  productId      String?
+  description    String
+  amountCents    Int
+  currency       String    @default("usd")
+  status         String    @default("PAID") // PAID | FAILED | REFUNDED | OPEN
+  gateway        String?
+  periodStart    DateTime?
+  periodEnd      DateTime?
+  paidAt         DateTime?
+  refundedAt     DateTime?
+  createdAt      DateTime  @default(now())
+}
+
+// ============ Fulfillment ============
+model LicenseKey {
+  id             String    @id @default(cuid())
+  key            String    @unique
+  userId         String
+  user           User      @relation(fields: [userId], references: [id])
+  productId      String
+  product        Product   @relation(fields: [productId], references: [id])
+  subscriptionId String?
+  subscription   Subscription? @relation(fields: [subscriptionId], references: [id])
+  status         String    @default("ACTIVE") // ACTIVE | REVOKED | EXPIRED
+  planName       String?
+  activations    Int       @default(0)
+  maxActivations Int       @default(3)
+  activatedAt    DateTime?
+  lastUsedAt     DateTime?
+  revokedAt      DateTime?
+  createdAt      DateTime  @default(now())
+}
+
+model DigitalAsset {
+  id              String   @id @default(cuid())
+  productId       String
+  product         Product  @relation(fields: [productId], references: [id])
+  name            String
+  fileName        String
+  mimeType        String   @default("text/plain")
+  sizeBytes       Int      @default(2048)
+  content         String   @default("")
+  version         String   @default("1.0")
+  requiresLicense Boolean  @default(false)
+  downloadCount   Int      @default(0)
+  createdAt       DateTime @default(now())
+
+  tokens DownloadToken[]
+}
+
+model DownloadToken {
+  id        String       @id @default(cuid())
+  token     String       @unique
+  assetId   String
+  asset     DigitalAsset @relation(fields: [assetId], references: [id])
+  userId    String
+  user      User         @relation(fields: [userId], references: [id])
+  expiresAt DateTime
+  uses      Int          @default(0)
+  maxUses   Int          @default(3)
+  createdAt DateTime     @default(now())
+}
+
+model AccessGrant {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id])
+  productId String
+  product   Product   @relation(fields: [productId], references: [id])
+  provider  String    // DISCORD | TELEGRAM | LICENSE | FILE
+  role      String?
+  status    String    @default("SYNCED") // PENDING | SYNCED | REVOKED | FAILED
+  grantedAt DateTime  @default(now())
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+}
+
+// ============ Webhooks ============
+model WebhookEndpoint {
+  id        String   @id @default(cuid())
+  creatorId String
+  creator   User     @relation(fields: [creatorId], references: [id])
+  name      String
+  provider  String   @default("GENERIC") // DISCORD_BOT | TELEGRAM_BOT | GENERIC
+  url       String
+  secret    String
+  events    String   @default("[]") // JSON array of event types
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  deliveries WebhookDelivery[]
+}
+
+model WebhookDelivery {
+  id           String         @id @default(cuid())
+  endpointId   String
+  endpoint     WebhookEndpoint @relation(fields: [endpointId], references: [id])
+  eventType    String
+  payload      String         @default("{}")
+  status       String         @default("PENDING") // PENDING | DELIVERED | FAILED
+  attempts     Int            @default(0)
+  responseCode Int?
+  signature    String?
+  createdAt    DateTime       @default(now())
+  deliveredAt  DateTime?
+}
+
+model Review {
+  id         String   @id @default(cuid())
+  productId  String
+  product    Product  @relation(fields: [productId], references: [id])
+  userId     String
+  authorName String
+  rating     Int
+  comment    String
+  createdAt  DateTime @default(now())
+}
+
+// ============ System ============
+model SystemClock {
+  id          String    @id @default("main")
+  simulatedNow DateTime?
+  label       String    @default("Live")
+  updatedAt   DateTime  @updatedAt
+}

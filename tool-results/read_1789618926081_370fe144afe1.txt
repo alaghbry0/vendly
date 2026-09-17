@@ -1,0 +1,2002 @@
+     1→"use client";
+     2→
+     3→// CUSTOMER SELF-SERVICE BILLING PORTAL — "My Hub".
+     4→// Owned by Task 2-b. Rendered when store.view === "portal".
+     5→// Internal tab system (synced from params.portalTab): overview | subscriptions |
+     6→// licenses | downloads | invoices | payment-methods | settings.
+     7→
+     8→import { useCallback, useEffect, useMemo, useRef, useState, type ComponentProps, type FormEvent } from "react";
+     9→import { AnimatePresence, motion, type Variants } from "framer-motion";
+    10→import { useAppStore } from "@/lib/store";
+    11→import { api, ApiError } from "@/lib/api";
+    12→import type {
+    13→  GrantDTO,
+    14→  InvoiceDTO,
+    15→  LicenseDTO,
+    16→  PaymentMethodDTO,
+    17→  PlanDTO,
+    18→  ProductDetailDTO,
+    19→  SessionUser,
+    20→  SubscriptionDTO,
+    21→} from "@/lib/types";
+    22→import { fmtBytes, fmtDate, fmtDateTime, fmtMoney, timeAgo, timeUntil } from "@/lib/format";
+    23→import {
+    24→  CopyButton,
+    25→  EmptyState,
+    26→  GatewayBadge,
+    27→  ProductCover,
+    28→  ProviderBadge,
+    29→  SectionHeader,
+    30→  StatCard,
+    31→  StatusBadge,
+    32→  UserAvatar,
+    33→} from "@/components/shared";
+    34→import { Badge } from "@/components/ui/badge";
+    35→import { Button } from "@/components/ui/button";
+    36→import {
+    37→  Dialog,
+    38→  DialogContent,
+    39→  DialogDescription,
+    40→  DialogFooter,
+    41→  DialogHeader,
+    42→  DialogTitle,
+    43→} from "@/components/ui/dialog";
+    44→import {
+    45→  AlertDialog,
+    46→  AlertDialogAction,
+    47→  AlertDialogCancel,
+    48→  AlertDialogContent,
+    49→  AlertDialogDescription,
+    50→  AlertDialogFooter,
+    51→  AlertDialogHeader,
+    52→  AlertDialogTitle,
+    53→} from "@/components/ui/alert-dialog";
+    54→import {
+    55→  DropdownMenu,
+    56→  DropdownMenuContent,
+    57→  DropdownMenuItem,
+    58→  DropdownMenuSeparator,
+    59→  DropdownMenuTrigger,
+    60→} from "@/components/ui/dropdown-menu";
+    61→import { Input } from "@/components/ui/input";
+    62→import { Label } from "@/components/ui/label";
+    63→import { Progress } from "@/components/ui/progress";
+    64→import {
+    65→  Select,
+    66→  SelectContent,
+    67→  SelectItem,
+    68→  SelectTrigger,
+    69→  SelectValue,
+    70→} from "@/components/ui/select";
+    71→import { Skeleton } from "@/components/ui/skeleton";
+    72→import { Switch } from "@/components/ui/switch";
+    73→import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+    74→import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+    75→import { Textarea } from "@/components/ui/textarea";
+    76→import { useToast } from "@/hooks/use-toast";
+    77→import { cn } from "@/lib/utils";
+    78→import {
+    79→  ArrowLeftRight,
+    80→  AtSign,
+    81→  BadgeCheck,
+    82→  Ban,
+    83→  Bitcoin,
+    84→  CalendarClock,
+    85→  CalendarRange,
+    86→  CalendarX,
+    87→  ChevronDown,
+    88→  ChevronRight,
+    89→  CircleCheck,
+    90→  CircleX,
+    91→  Clock,
+    92→  CreditCard,
+    93→  Download,
+    94→  Eye,
+    95→  EyeOff,
+    96→  FileArchive,
+    97→  FileAudio,
+    98→  FileCode,
+    99→  FileDown,
+   100→  FileImage,
+   101→  FileText,
+   102→  FileVideo,
+   103→  Info,
+   104→  KeyRound,
+   105→  LayoutDashboard,
+   106→  Loader2,
+   107→  Lock,
+   108→  MonitorSmartphone,
+   109→  Plus,
+   110→  ReceiptText,
+   111→  Repeat,
+   112→  RotateCcw,
+   113→  Settings,
+   114→  ShieldAlert,
+   115→  ShieldCheck,
+   116→  Store,
+   117→  Timer,
+   118→  Trash2,
+   119→  TriangleAlert,
+   120→  Wallet,
+   121→  type LucideIcon,
+   122→} from "lucide-react";
+   123→
+   124→// ============================================================================
+   125→// Constants, types & helpers
+   126→// ============================================================================
+   127→
+   128→type PortalTab =
+   129→  | "overview"
+   130→  | "subscriptions"
+   131→  | "licenses"
+   132→  | "downloads"
+   133→  | "invoices"
+   134→  | "payment-methods"
+   135→  | "settings";
+   136→
+   137→const PORTAL_TABS: { key: PortalTab; label: string; icon: LucideIcon }[] = [
+   138→  { key: "overview", label: "Overview", icon: LayoutDashboard },
+   139→  { key: "subscriptions", label: "Memberships", icon: Repeat },
+   140→  { key: "licenses", label: "Licenses", icon: KeyRound },
+   141→  { key: "downloads", label: "Downloads", icon: Download },
+   142→  { key: "invoices", label: "Invoices", icon: ReceiptText },
+   143→  { key: "payment-methods", label: "Payment methods", icon: Wallet },
+   144→  { key: "settings", label: "Settings", icon: Settings },
+   145→];
+   146→
+   147→const ACTIVE_STATUSES = ["ACTIVE", "TRIALING", "PAST_DUE"];
+   148→const STATUS_ORDER: Record<string, number> = { PAST_DUE: 0, TRIALING: 1, ACTIVE: 2, CANCELED: 3 };
+   149→
+   150→interface PortalData {
+   151→  subs: SubscriptionDTO[];
+   152→  invoices: InvoiceDTO[];
+   153→  methods: PaymentMethodDTO[];
+   154→  licenses: LicenseDTO[];
+   155→  grants: GrantDTO[];
+   156→}
+   157→
+   158→const stagger: Variants = { hidden: {}, show: { transition: { staggerChildren: 0.06 } } };
+   159→const fadeUp: Variants = {
+   160→  hidden: { opacity: 0, y: 12 },
+   161→  show: { opacity: 1, y: 0, transition: { duration: 0.3, ease: "easeOut" } },
+   162→};
+   163→
+   164→function monthlyCents(plan: PlanDTO): number {
+   165→  return plan.interval === "year" ? Math.round(plan.priceCents / 12) : plan.priceCents;
+   166→}
+   167→
+   168→function shortWallet(addr: string): string {
+   169→  return addr.length > 12 ? `${addr.slice(0, 6)}…${addr.slice(-4)}` : addr;
+   170→}
+   171→
+   172→function pmShort(pm: PaymentMethodDTO): string {
+   173→  if (pm.type === "CARD") return `${pm.brand || "Card"} ••••${pm.last4}`;
+   174→  if (pm.type === "PAYPAL") return pm.email || "PayPal account";
+   175→  return shortWallet(pm.walletAddress || "");
+   176→}
+   177→
+   178→function maskKey(key: string): string {
+   179→  const parts = key.split("-");
+   180→  return parts.map((p, i) => (i === 0 || i === parts.length - 1 ? p : "•".repeat(Math.max(4, p.length)))).join("-");
+   181→}
+   182→
+   183→function fileIcon(mime: string): LucideIcon {
+   184→  if (mime.startsWith("image/")) return FileImage;
+   185→  if (mime.startsWith("video/")) return FileVideo;
+   186→  if (mime.startsWith("audio/")) return FileAudio;
+   187→  if (mime.includes("zip") || mime.includes("compressed") || mime.includes("tar")) return FileArchive;
+   188→  if (mime.includes("json") || mime.includes("javascript") || mime.includes("html")) return FileCode;
+   189→  return FileText;
+   190→}
+   191→
+   192→/** One-line summary of the next billing event for a subscription. */
+   193→function nextChargeLine(sub: SubscriptionDTO): string {
+   194→  if (sub.status === "PAST_DUE") return "Payment failed — update payment method";
+   195→  if (sub.status === "CANCELED") return `Ended ${fmtDate(sub.currentPeriodEnd)}`;
+   196→  if (sub.status === "TRIALING") return `Trial ends ${fmtDate(sub.trialEndsAt)}`;
+   197→  if (sub.cancelAtPeriodEnd) return `Cancels ${fmtDate(sub.currentPeriodEnd)}`;
+   198→  return `Next charge ${fmtMoney(sub.plan.priceCents)} on ${fmtDate(sub.currentPeriodEnd)}`;
+   199→}
+   200→
+   201→function sortSubs(subs: SubscriptionDTO[]): SubscriptionDTO[] {
+   202→  return [...subs].sort(
+   203→    (a, b) =>
+   204→      (STATUS_ORDER[a.status] ?? 9) - (STATUS_ORDER[b.status] ?? 9) ||
+   205→      +new Date(a.currentPeriodEnd) - +new Date(b.currentPeriodEnd)
+   206→  );
+   207→}
+   208→
+   209→/** Card-style panel used across the portal (full control over padding). */
+   210→function Panel({ className, children, ...props }: ComponentProps<"div">) {
+   211→  return (
+   212→    <div className={cn("rounded-2xl border bg-card shadow-sm", className)} {...props}>
+   213→      {children}
+   214→    </div>
+   215→  );
+   216→}
+   217→
+   218→// ============================================================================
+   219→// Data loading
+   220→// ============================================================================
+   221→
+   222→function usePortalData() {
+   223→  const nonce = useAppStore((s) => s.nonce);
+   224→  const [data, setData] = useState<PortalData | null>(null);
+   225→  const [error, setError] = useState<string | null>(null);
+   226→
+   227→  useEffect(() => {
+   228→    if (!useAppStore.getState().user) return;
+   229→    let alive = true;
+   230→    const load = async () => {
+   231→      try {
+   232→        const [subsRes, invoicesRes, methodsRes, licensesRes, grantsRes] = await Promise.all([
+   233→          api<{ subscriptions: SubscriptionDTO[] }>("/api/subscriptions"),
+   234→          api<{ invoices: InvoiceDTO[] }>("/api/invoices"),
+   235→          api<{ paymentMethods: PaymentMethodDTO[] }>("/api/payment-methods"),
+   236→          api<{ licenses: LicenseDTO[] }>("/api/licenses"),
+   237→          api<{ grants: GrantDTO[] }>("/api/grants"),
+   238→        ]);
+   239→        if (!alive) return;
+   240→        setData({
+   241→          subs: subsRes.subscriptions,
+   242→          invoices: invoicesRes.invoices,
+   243→          methods: methodsRes.paymentMethods,
+   244→          licenses: licensesRes.licenses,
+   245→          grants: grantsRes.grants,
+   246→        });
+   247→        setError(null);
+   248→      } catch (e) {
+   249→        if (alive) setError(e instanceof Error ? e.message : "Failed to load your hub.");
+   250→      }
+   251→    };
+   252→    void load();
+   253→    return () => {
+   254→      alive = false;
+   255→    };
+   256→  }, [nonce]);
+   257→
+   258→  return { data, error, loading: !data && !error };
+   259→}
+   260→
+   261→// ============================================================================
+   262→// Root component
+   263→// ============================================================================
+   264→
+   265→export function PortalViews() {
+   266→  const user = useAppStore((s) => s.user);
+   267→  const refresh = useAppStore((s) => s.refresh);
+   268→  const navigate = useAppStore((s) => s.navigate);
+   269→  const rawTab = useAppStore((s) => s.params.portalTab);
+   270→  const { data, error } = usePortalData();
+   271→
+   272→  // The active tab is fully store-driven: internal tab clicks write the param
+   273→  // via navigate(), and deep links from other views are picked up for free.
+   274→  const tab: PortalTab = PORTAL_TABS.some((t) => t.key === rawTab) ? (rawTab as PortalTab) : "overview";
+   275→  const [invoiceSubFilter, setInvoiceSubFilter] = useState<string>("all");
+   276→
+   277→  const goToTab = useCallback(
+   278→    (next: PortalTab) => {
+   279→      navigate("portal", { portalTab: next });
+   280→    },
+   281→    [navigate]
+   282→  );
+   283→  const goToInvoices = useCallback(
+   284→    (subId: string) => {
+   285→      setInvoiceSubFilter(subId);
+   286→      goToTab("invoices");
+   287→    },
+   288→    [goToTab]
+   289→  );
+   290→
+   291→  if (!user) {
+   292→    return (
+   293→      <div className="container mx-auto max-w-7xl px-4 py-16">
+   294→        <EmptyState
+   295→          icon={Wallet}
+   296→          title="Sign in to view your hub"
+   297→          description="Switch to a demo account from the avatar menu in the header to explore the billing portal."
+   298→        />
+   299→      </div>
+   300→    );
+   301→  }
+   302→
+   303→  if (!data) {
+   304→    if (error) {
+   305→      return (
+   306→        <div className="container mx-auto max-w-7xl px-4 py-16">
+   307→          <EmptyState
+   308→            icon={TriangleAlert}
+   309→            title="Couldn't load your hub"
+   310→            description={error}
+   311→            action={
+   312→              <Button onClick={() => refresh()} className="rounded-xl">
+   313→                <RotateCcw className="h-4 w-4" /> Try again
+   314→              </Button>
+   315→            }
+   316→          />
+   317→        </div>
+   318→      );
+   319→    }
+   320→    return <PortalSkeleton />;
+   321→  }
+   322→
+   323→  return (
+   324→    <motion.div
+   325→      className="container mx-auto max-w-7xl px-4 py-8 sm:py-10"
+   326→      initial={{ opacity: 0 }}
+   327→      animate={{ opacity: 1 }}
+   328→      transition={{ duration: 0.3 }}
+   329→    >
+   330→      <div className="grid gap-8 lg:grid-cols-[14rem_1fr]">
+   331→        {/* ---------- Sidebar (desktop) ---------- */}
+   332→        <aside className="hidden lg:block">
+   333→          <nav className="sticky top-24 w-56" aria-label="Portal sections">
+   334→            <div className="mb-4 flex items-center gap-3 rounded-2xl border bg-card p-3 shadow-sm">
+   335→              <UserAvatar name={user.name} color={user.avatarColor} />
+   336→              <div className="min-w-0">
+   337→                <p className="truncate text-sm font-semibold">{user.name || "Member"}</p>
+   338→                <p className="truncate text-[11px] text-muted-foreground">My Hub · {user.email}</p>
+   339→              </div>
+   340→            </div>
+   341→            <ul className="flex flex-col gap-1">
+   342→              {PORTAL_TABS.map((t) => {
+   343→                const active = tab === t.key;
+   344→                return (
+   345→                  <li key={t.key}>
+   346→                    <button
+   347→                      onClick={() => goToTab(t.key)}
+   348→                      aria-current={active ? "page" : undefined}
+   349→                      className={cn(
+   350→                        "flex w-full items-center gap-2.5 rounded-xl px-3 py-2.5 text-left text-sm font-medium transition-colors",
+   351→                        active
+   352→                          ? "bg-primary text-primary-foreground shadow-sm"
+   353→                          : "text-muted-foreground hover:bg-muted hover:text-foreground"
+   354→                      )}
+   355→                    >
+   356→                      <t.icon className="h-4 w-4 shrink-0" />
+   357→                      {t.label}
+   358→                    </button>
+   359→                  </li>
+   360→                );
+   361→              })}
+   362→            </ul>
+   363→            <div className="mt-6 rounded-2xl border border-dashed p-4">
+   364→              <p className="text-xs font-semibold">Need help?</p>
+   365→              <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
+   366→                Manage memberships, license keys, secure downloads and billing — all in one place.
+   367→              </p>
+   368→            </div>
+   369→          </nav>
+   370→        </aside>
+   371→
+   372→        {/* ---------- Mobile pill nav ---------- */}
+   373→        <div className="lg:hidden">
+   374→          <div
+   375→            className="-mx-4 overflow-x-auto px-4 pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+   376→            role="tablist"
+   377→            aria-label="Portal sections"
+   378→          >
+   379→            <div className="flex gap-2">
+   380→              {PORTAL_TABS.map((t) => {
+   381→                const active = tab === t.key;
+   382→                return (
+   383→                  <button
+   384→                    key={t.key}
+   385→                    role="tab"
+   386→                    aria-selected={active}
+   387→                    onClick={() => goToTab(t.key)}
+   388→                    className={cn(
+   389→                      "flex h-10 shrink-0 items-center gap-2 rounded-full border px-4 text-sm font-medium transition-colors",
+   390→                      active
+   391→                        ? "border-primary bg-primary text-primary-foreground shadow-sm"
+   392→                        : "bg-card text-muted-foreground hover:text-foreground"
+   393→                    )}
+   394→                  >
+   395→                    <t.icon className="h-4 w-4" />
+   396→                    {t.label}
+   397→                  </button>
+   398→                );
+   399→              })}
+   400→            </div>
+   401→          </div>
+   402→        </div>
+   403→
+   404→        {/* ---------- Tab content ---------- */}
+   405→        <div className="min-w-0">
+   406→          <AnimatePresence mode="wait">
+   407→            <motion.div
+   408→              key={tab}
+   409→              initial={{ opacity: 0, y: 10 }}
+   410→              animate={{ opacity: 1, y: 0 }}
+   411→              exit={{ opacity: 0, y: -8 }}
+   412→              transition={{ duration: 0.22, ease: "easeOut" }}
+   413→            >
+   414→              {tab === "overview" && <OverviewTab user={user} data={data} goToTab={goToTab} />}
+   415→              {tab === "subscriptions" && (
+   416→                <SubscriptionsTab data={data} reload={refresh} goToInvoices={goToInvoices} />
+   417→              )}
+   418→              {tab === "licenses" && <LicensesTab licenses={data.licenses} reload={refresh} />}
+   419→              {tab === "downloads" && <DownloadsTab subs={data.subs} />}
+   420→              {tab === "invoices" && (
+   421→                <InvoicesTab
+   422→                  invoices={data.invoices}
+   423→                  subs={data.subs}
+   424→                  subFilter={invoiceSubFilter}
+   425→                  onSubFilterChange={setInvoiceSubFilter}
+   426→                  user={user}
+   427→                />
+   428→              )}
+   429→              {tab === "payment-methods" && (
+   430→                <PaymentMethodsTab methods={data.methods} subs={data.subs} reload={refresh} />
+   431→              )}
+   432→              {tab === "settings" && <SettingsTab user={user} />}
+   433→            </motion.div>
+   434→          </AnimatePresence>
+   435→        </div>
+   436→      </div>
+   437→    </motion.div>
+   438→  );
+   439→}
+   440→
+   441→function PortalSkeleton() {
+   442→  return (
+   443→    <div className="container mx-auto max-w-7xl px-4 py-8 sm:py-10" aria-busy="true" aria-label="Loading portal">
+   444→      <div className="grid gap-8 lg:grid-cols-[14rem_1fr]">
+   445→        <div className="hidden w-56 space-y-2 lg:block">
+   446→          <Skeleton className="h-16 rounded-2xl" />
+   447→          {PORTAL_TABS.map((t) => (
+   448→            <Skeleton key={t.key} className="h-11 rounded-xl" />
+   449→          ))}
+   450→        </div>
+   451→        <div className="space-y-6">
+   452→          <Skeleton className="h-24 rounded-2xl" />
+   453→          <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+   454→            {[0, 1, 2, 3].map((i) => (
+   455→              <Skeleton key={i} className="h-28 rounded-2xl" />
+   456→            ))}
+   457→          </div>
+   458→          <Skeleton className="h-72 rounded-2xl" />
+   459→          <Skeleton className="h-48 rounded-2xl" />
+   460→        </div>
+   461→      </div>
+   462→    </div>
+   463→  );
+   464→}
+   465→
+   466→// ============================================================================
+   467→// Tab: Overview
+   468→// ============================================================================
+   469→
+   470→function OverviewTab({
+   471→  user,
+   472→  data,
+   473→  goToTab,
+   474→}: {
+   475→  user: SessionUser;
+   476→  data: PortalData;
+   477→  goToTab: (t: PortalTab) => void;
+   478→}) {
+   479→  const { subs, invoices, grants } = data;
+   480→  const activeSubs = subs.filter((s) => s.status === "ACTIVE");
+   481→  const trialSubs = subs.filter((s) => s.status === "TRIALING");
+   482→  const monthlySpend = activeSubs.reduce((sum, s) => sum + monthlyCents(s.plan), 0);
+   483→  const paidInvoices = invoices.filter((i) => i.status === "PAID");
+   484→  const lifetimePaid = paidInvoices.reduce((sum, i) => sum + i.amountCents, 0);
+   485→  const activeGrants = grants.filter((g) => g.status === "SYNCED" && !g.revokedAt);
+   486→  const topSubs = sortSubs(subs).slice(0, 4);
+   487→  const recentInvoices = invoices.slice(0, 5);
+   488→  const firstName = (user.name || "there").split(" ")[0];
+   489→
+   490→  return (
+   491→    <motion.section variants={stagger} initial="hidden" animate="show" className="space-y-6">
+   492→      {/* Welcome header */}
+   493→      <motion.header
+   494→        variants={fadeUp}
+   495→        className="flex flex-wrap items-center gap-4 rounded-2xl border bg-card p-5 shadow-sm sm:p-6"
+   496→      >
+   497→        <UserAvatar name={user.name} color={user.avatarColor} size="lg" />
+   498→        <div className="min-w-0">
+   499→          <h1 className="text-xl font-bold tracking-tight sm:text-2xl">Welcome back, {firstName}</h1>
+   500→          <p className="mt-0.5 text-sm text-muted-foreground">
+   501→            Member since {fmtDate(user.createdAt)} · {user.email}
+   502→          </p>
+   503→        </div>
+   504→        <Button size="sm" className="ml-auto rounded-xl" onClick={() => goToTab("subscriptions")}>
+   505→          Manage billing <ChevronRight className="h-4 w-4" />
+   506→        </Button>
+   507→      </motion.header>
+   508→
+   509→      {/* Stats */}
+   510→      <motion.div variants={fadeUp} className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+   511→        <StatCard
+   512→          label="Active memberships"
+   513→          value={String(activeSubs.length + trialSubs.length)}
+   514→          sub={`${activeSubs.length} paid · ${trialSubs.length} trialing`}
+   515→          icon={BadgeCheck}
+   516→        />
+   517→        <StatCard
+   518→          label="Monthly spend"
+   519→          value={fmtMoney(monthlySpend)}
+   520→          sub={activeSubs.length ? `across ${activeSubs.length} membership${activeSubs.length === 1 ? "" : "s"}` : "no recurring charges"}
+   521→          icon={Wallet}
+   522→        />
+   523→        <StatCard
+   524→          label="Lifetime paid"
+   525→          value={fmtMoney(lifetimePaid)}
+   526→          sub={`${paidInvoices.length} paid invoice${paidInvoices.length === 1 ? "" : "s"}`}
+   527→          icon={ReceiptText}
+   528→        />
+   529→        <StatCard
+   530→          label="Trial running"
+   531→          value={trialSubs.length ? String(trialSubs.length) : "—"}
+   532→          sub={trialSubs.length ? `first charge ${fmtDate(trialSubs[0].trialEndsAt)}` : "no trials running"}
+   533→          icon={Timer}
+   534→        />
+   535→      </motion.div>
+   536→
+   537→      <div className="grid gap-6 lg:grid-cols-5">
+   538→        {/* Memberships */}
+   539→        <motion.div variants={fadeUp} className="overflow-hidden lg:col-span-3">
+   540→          <Panel className="h-full">
+   541→            <div className="flex items-center justify-between gap-3 border-b p-5">
+   542→              <div>
+   543→                <h2 className="font-bold tracking-tight">Your memberships</h2>
+   544→                <p className="text-xs text-muted-foreground">{subs.length} total</p>
+   545→              </div>
+   546→              <Button variant="ghost" size="sm" onClick={() => goToTab("subscriptions")}>
+   547→                View all <ChevronRight className="h-4 w-4" />
+   548→              </Button>
+   549→            </div>
+   550→            {topSubs.length === 0 ? (
+   551→              <div className="p-5">
+   552→                <EmptyState
+   553→                  icon={Repeat}
+   554→                  title="No memberships yet"
+   555→                  description="Browse the marketplace to join your first community."
+   556→                  action={
+   557→                    <Button className="rounded-xl" onClick={() => goToTab("subscriptions")}>
+   558→                      <Store className="h-4 w-4" /> Browse marketplace
+   559→                    </Button>
+   560→                  }
+   561→                />
+   562→              </div>
+   563→            ) : (
+   564→              <ul className="divide-y">
+   565→                {topSubs.map((s) => (
+   566→                  <li key={s.id} className="flex items-center gap-3 p-4 sm:px-5">
+   567→                    <ProductCover
+   568→                      theme={s.product.coverTheme}
+   569→                      category={s.product.category}
+   570→                      title={s.product.title}
+   571→                      className="h-11 w-11 shrink-0 rounded-xl"
+   572→                      iconClassName="h-14 w-14"
+   573→                    />
+   574→                    <div className="min-w-0 flex-1">
+   575→                      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+   576→                        <p className="truncate text-sm font-semibold">{s.product.title}</p>
+   577→                        <StatusBadge status={s.status} />
+   578→                      </div>
+   579→                      <p className="mt-0.5 truncate text-xs text-muted-foreground">
+   580→                        {s.plan.name} · {nextChargeLine(s)}
+   581→                      </p>
+   582→                    </div>
+   583→                    <Button
+   584→                      variant="outline"
+   585→                      size="sm"
+   586→                      className="shrink-0 rounded-xl"
+   587→                      onClick={() => goToTab("subscriptions")}
+   588→                      aria-label={`Manage ${s.product.title} membership`}
+   589→                    >
+   590→                      Manage
+   591→                    </Button>
+   592→                  </li>
+   593→                ))}
+   594→              </ul>
+   595→            )}
+   596→          </Panel>
+   597→        </motion.div>
+   598→
+   599→        {/* Access & roles */}
+   600→        <motion.div variants={fadeUp} className="lg:col-span-2">
+   601→          <Panel className="h-full p-5">
+   602→            <h2 className="font-bold tracking-tight">Access &amp; roles</h2>
+   603→            <p className="mt-0.5 text-xs text-muted-foreground">
+   604→              Community roles synced automatically by creator bots
+   605→            </p>
+   606→            {activeGrants.length === 0 ? (
+   607→              <p className="mt-6 rounded-xl border border-dashed p-4 text-sm text-muted-foreground">
+   608→                No active community roles yet. They appear here when you join a product with Discord or
+   609→                Telegram access.
+   610→              </p>
+   611→            ) : (
+   612→              <ul className="mt-4 space-y-2.5">
+   613→                {activeGrants.map((g) => (
+   614→                  <li
+   615→                    key={g.id}
+   616→                    className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-xl border bg-muted/30 px-3 py-2.5"
+   617→                  >
+   618→                    <ProviderBadge provider={g.provider} />
+   619→                    {g.role && <span className="text-sm font-medium">{g.role}</span>}
+   620→                    <span className="min-w-0 truncate text-xs text-muted-foreground">{g.product.title}</span>
+   621→                    <span className="ml-auto flex shrink-0 items-center gap-1 text-xs font-medium text-emerald-600 dark:text-emerald-400">
+   622→                      <CircleCheck className="h-3.5 w-3.5" aria-hidden />
+   623→                      {g.status.charAt(0) + g.status.slice(1).toLowerCase()}
+   624→                    </span>
+   625→                  </li>
+   626→                ))}
+   627→              </ul>
+   628→            )}
+   629→          </Panel>
+   630→        </motion.div>
+   631→      </div>
+   632→
+   633→      {/* Recent invoices */}
+   634→      <motion.div variants={fadeUp}>
+   635→        <Panel className="overflow-hidden">
+   636→          <div className="flex items-center justify-between gap-3 border-b p-5">
+   637→            <div>
+   638→              <h2 className="font-bold tracking-tight">Recent invoices</h2>
+   639→              <p className="text-xs text-muted-foreground">Last {recentInvoices.length} of {invoices.length}</p>
+   640→            </div>
+   641→            <Button variant="ghost" size="sm" onClick={() => goToTab("invoices")}>
+   642→              View all <ChevronRight className="h-4 w-4" />
+   643→            </Button>
+   644→          </div>
+   645→          {recentInvoices.length === 0 ? (
+   646→            <p className="p-5 text-sm text-muted-foreground">No invoices yet.</p>
+   647→          ) : (
+   648→            <ul className="divide-y">
+   649→              {recentInvoices.map((inv) => (
+   650→                <li key={inv.id} className="flex items-center gap-3 px-5 py-3.5">
+   651→                  <div className="min-w-0 flex-1">
+   652→                    <p className="truncate text-sm font-medium">{inv.product?.title || "Vendly"}</p>
+   653→                    <p className="truncate font-mono text-xs text-muted-foreground">
+   654→                      {inv.number} · {fmtDate(inv.createdAt)}
+   655→                    </p>
+   656→                  </div>
+   657→                  <span className="shrink-0 text-sm font-semibold tabular-nums">
+   658→                    {fmtMoney(inv.amountCents, { cents: true })}
+   659→                  </span>
+   660→                  <StatusBadge status={inv.status} />
+   661→                </li>
+   662→              ))}
+   663→            </ul>
+   664→          )}
+   665→        </Panel>
+   666→      </motion.div>
+   667→    </motion.section>
+   668→  );
+   669→}
+   670→
+   671→// ============================================================================
+   672→// Tab: Subscriptions
+   673→// ============================================================================
+   674→
+   675→interface SubCardProps {
+   676→  sub: SubscriptionDTO;
+   677→  methods: PaymentMethodDTO[];
+   678→  busy: boolean;
+   679→  onAction: (sub: SubscriptionDTO, action: string, extra?: Record<string, unknown>) => Promise<boolean>;
+   680→  onChangePayment: (sub: SubscriptionDTO, pmId: string) => Promise<void>;
+   681→  onOpenTier: () => void;
+   682→  onCancel: (mode: "period_end" | "now") => void;
+   683→  onInvoices: () => void;
+   684→}
+   685→
+   686→function SubscriptionCard({
+   687→  sub,
+   688→  methods,
+   689→  busy,
+   690→  onAction,
+   691→  onChangePayment,
+   692→  onOpenTier,
+   693→  onCancel,
+   694→  onInvoices,
+   695→}: SubCardProps) {
+   696→  const navigate = useAppStore((s) => s.navigate);
+   697→  const isActive = ACTIVE_STATUSES.includes(sub.status);
+   698→  const isTrial = sub.status === "TRIALING";
+   699→  const isCanceled = sub.status === "CANCELED";
+   700→  const isPastDue = sub.status === "PAST_DUE";
+   701→  const pm = sub.paymentMethod;
+   702→
+   703→  return (
+   704→    <article
+   705→      className={cn(
+   706→        "overflow-hidden rounded-2xl border bg-card shadow-sm transition-opacity",
+   707→        isCanceled && "bg-muted/40 opacity-75 shadow-none",
+   708→        isPastDue && "border-destructive/35"
+   709→      )}
+   710→    >
+   711→      <div className="flex flex-col gap-5 p-5 sm:p-6">
+   712→        {/* Header */}
+   713→        <div className="flex flex-wrap items-start gap-4">
+   714→          <ProductCover
+   715→            theme={sub.product.coverTheme}
+   716→            category={sub.product.category}
+   717→            title={sub.product.title}
+   718→            className="h-14 w-14 shrink-0 rounded-xl"
+   719→            iconClassName="h-20 w-20"
+   720→          />
+   721→          <div className="min-w-0 flex-1">
+   722→            <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+   723→              <h3 className="text-base font-bold tracking-tight">{sub.product.title}</h3>
+   724→              <StatusBadge status={sub.status} />
+   725→              {isTrial && sub.trialEndsAt && (
+   726→                <Badge
+   727→                  variant="outline"
+   728→                  className="gap-1 border-teal-500/25 bg-teal-500/10 text-teal-700 dark:text-teal-400"
+   729→                >
+   730→                  <Timer className="h-3 w-3" aria-hidden />
+   731→                  Trial: {timeUntil(sub.trialEndsAt)} left
+   732→                </Badge>
+   733→              )}
+   734→            </div>
+   735→            <p className="mt-1 text-sm text-muted-foreground">
+   736→              by {sub.product.creator.name || "Independent creator"} · {sub.plan.name} plan · member since{" "}
+   737→              {fmtDate(sub.createdAt)}
+   738→            </p>
+   739→            <div className="mt-2 flex flex-wrap items-center gap-1.5">
+   740→              <GatewayBadge gateway={sub.gateway} />
+   741→              {sub.product.accessType.map((a) => (
+   742→                <ProviderBadge key={a} provider={a} />
+   743→              ))}
+   744→            </div>
+   745→          </div>
+   746→          <div className="text-left sm:text-right">
+   747→            <p className="text-xl font-bold tabular-nums tracking-tight">{fmtMoney(sub.plan.priceCents)}</p>
+   748→            <p className="text-xs text-muted-foreground">per {sub.plan.interval}</p>
+   749→          </div>
+   750→        </div>
+   751→
+   752→        {/* Period + payment method */}
+   753→        {isActive && (
+   754→          <div className="grid gap-3 sm:grid-cols-2">
+   755→            <div className="space-y-2.5 rounded-xl border bg-muted/30 p-4">
+   756→              <div className="flex items-center gap-2 text-sm">
+   757→                <CalendarRange className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+   758→                <span className="text-muted-foreground">Current period</span>
+   759→                <span className="ml-auto font-medium tabular-nums">
+   760→                  {fmtDate(sub.currentPeriodStart)} → {fmtDate(sub.currentPeriodEnd)}
+   761→                </span>
+   762→              </div>
+   763→              {isTrial ? (
+   764→                <div className="flex items-center gap-2 text-sm">
+   765→                  <Timer className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+   766→                  <span className="text-muted-foreground">First charge</span>
+   767→                  <span className="ml-auto font-medium tabular-nums">
+   768→                    {fmtMoney(sub.plan.priceCents)} · {fmtDate(sub.trialEndsAt)}
+   769→                  </span>
+   770→                </div>
+   771→              ) : (
+   772→                <div className="flex items-center gap-2 text-sm">
+   773→                  <CalendarClock className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+   774→                  <span className="text-muted-foreground">Next charge</span>
+   775→                  <span className="ml-auto font-medium tabular-nums">
+   776→                    {fmtMoney(sub.plan.priceCents)} on {fmtDate(sub.currentPeriodEnd)}
+   777→                  </span>
+   778→                </div>
+   779→              )}
+   780→            </div>
+   781→
+   782→            <div className="rounded-xl border bg-muted/30 p-4">
+   783→              <div className="flex items-center justify-between gap-2">
+   784→                <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+   785→                  <CreditCard className="h-3.5 w-3.5" aria-hidden /> Payment method
+   786→                </p>
+   787→                {isPastDue && <span className="text-xs font-semibold text-destructive">Action needed</span>}
+   788→              </div>
+   789→              <div className="mt-2.5 flex flex-wrap items-center gap-2">
+   790→                <span className="text-sm font-medium">{pm ? pmShort(pm) : "No method on file"}</span>
+   791→                {methods.length > 0 && (
+   792→                  <Select value={pm?.id ?? ""} onValueChange={(v) => onChangePayment(sub, v)}>
+   793→                    <SelectTrigger
+   794→                      size="sm"
+   795→                      className="ml-auto h-8 rounded-lg text-xs"
+   796→                      aria-label={`Change payment method for ${sub.product.title}`}
+   797→                      disabled={busy}
+   798→                    >
+   799→                      <SelectValue placeholder="Select method" />
+   800→                    </SelectTrigger>
+   801→                    <SelectContent>
+   802→                      {methods.map((m) => (
+   803→                        <SelectItem key={m.id} value={m.id}>
+   804→                          {pmShort(m)}
+   805→                          {m.isDefault ? " · default" : ""}
+   806→                        </SelectItem>
+   807→                      ))}
+   808→                    </SelectContent>
+   809→                  </Select>
+   810→                )}
+   811→              </div>
+   812→              <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground">
+   813→                {isPastDue
+   814→                  ? "Switch to a working method — the next billing run retries this charge automatically."
+   815→                  : "Changing the method applies to future renewals."}
+   816→              </p>
+   817→            </div>
+   818→          </div>
+   819→        )}
+   820→
+   821→        {/* Banners */}
+   822→        {sub.cancelAtPeriodEnd && isActive && (
+   823→          <div className="flex flex-wrap items-center gap-3 rounded-xl border border-amber-500/30 bg-amber-500/10 p-4 text-sm">
+   824→            <TriangleAlert className="h-4.5 w-4.5 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden />
+   825→            <p className="min-w-0 flex-1 text-amber-800 dark:text-amber-300">
+   826→              <span className="font-semibold">Cancels at period end.</span> Access continues until{" "}
+   827→              {fmtDate(sub.currentPeriodEnd)}.
+   828→            </p>
+   829→            <Button
+   830→              size="sm"
+   831→              variant="outline"
+   832→              className="rounded-lg border-amber-500/40 bg-transparent text-amber-800 hover:bg-amber-500/15 dark:text-amber-300"
+   833→              disabled={busy}
+   834→              onClick={() => onAction(sub, "resume")}
+   835→            >
+   836→              <RotateCcw className="h-3.5 w-3.5" /> Resume
+   837→            </Button>
+   838→          </div>
+   839→        )}
+   840→        {isPastDue && (
+   841→          <div className="flex flex-wrap items-center gap-3 rounded-xl border border-destructive/30 bg-destructive/10 p-4 text-sm">
+   842→            <TriangleAlert className="h-4.5 w-4.5 shrink-0 text-destructive" aria-hidden />
+   843→            <p className="min-w-0 flex-1 text-destructive">
+   844→              <span className="font-semibold">Payment failed.</span> {sub.dunningAttempts} dunning attempt
+   845→              {sub.dunningAttempts === 1 ? "" : "s"} so far — update the payment method above to retry.
+   846→            </p>
+   847→          </div>
+   848→        )}
+   849→        {isCanceled && (
+   850→          <p className="flex items-center gap-2 rounded-xl border bg-muted/40 p-3 text-sm text-muted-foreground">
+   851→            <CalendarX className="h-4 w-4 shrink-0" aria-hidden />
+   852→            Ended {fmtDate(sub.currentPeriodEnd)} — access and licenses were revoked.
+   853→          </p>
+   854→        )}
+   855→
+   856→        {/* Footer */}
+   857→        <div className="flex flex-wrap items-center justify-between gap-3 border-t pt-4">
+   858→          <p className="text-xs text-muted-foreground">
+   859→            {sub.invoiceCount} invoice{sub.invoiceCount === 1 ? "" : "s"} ·{" "}
+   860→            <span className="font-medium tabular-nums">{fmtMoney(sub.totalPaidCents)}</span> lifetime on this
+   861→            membership
+   862→          </p>
+   863→          {isCanceled ? (
+   864→            <Button
+   865→              size="sm"
+   866→              className="rounded-xl"
+   867→              onClick={() => navigate("product", { productId: sub.product.id })}
+   868→            >
+   869→              <Store className="h-4 w-4" /> Re-subscribe
+   870→            </Button>
+   871→          ) : (
+   872→            <DropdownMenu>
+   873→              <DropdownMenuTrigger asChild>
+   874→                <Button variant="outline" size="sm" className="rounded-xl" disabled={busy}>
+   875→                  {busy ? (
+   876→                    <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+   877→                  ) : (
+   878→                    <Settings className="h-4 w-4" aria-hidden />
+   879→                  )}
+   880→                  Manage
+   881→                  <ChevronDown className="h-3.5 w-3.5 opacity-60" aria-hidden />
+   882→                </Button>
+   883→              </DropdownMenuTrigger>
+   884→              <DropdownMenuContent align="end" className="w-56">
+   885→                <DropdownMenuItem className="gap-2" onClick={onOpenTier}>
+   886→                  <ArrowLeftRight className="h-4 w-4" aria-hidden /> Change tier…
+   887→                </DropdownMenuItem>
+   888→                <DropdownMenuItem className="gap-2" onClick={onInvoices}>
+   889→                  <ReceiptText className="h-4 w-4" aria-hidden /> View invoices
+   890→                </DropdownMenuItem>
+   891→                {sub.cancelAtPeriodEnd ? (
+   892→                  <DropdownMenuItem className="gap-2" onClick={() => onAction(sub, "resume")}>
+   893→                    <RotateCcw className="h-4 w-4" aria-hidden /> Resume subscription
+   894→                  </DropdownMenuItem>
+   895→                ) : (
+   896→                  <DropdownMenuItem className="gap-2" onClick={() => onCancel("period_end")}>
+   897→                    <CalendarX className="h-4 w-4" aria-hidden /> Cancel at period end…
+   898→                  </DropdownMenuItem>
+   899→                )}
+   900→                <DropdownMenuSeparator />
+   901→                <DropdownMenuItem className="gap-2 text-destructive focus:text-destructive" onClick={() => onCancel("now")}>
+   902→                  <Ban className="h-4 w-4" aria-hidden /> Cancel immediately…
+   903→                </DropdownMenuItem>
+   904→              </DropdownMenuContent>
+   905→            </DropdownMenu>
+   906→          )}
+   907→        </div>
+   908→      </div>
+   909→    </article>
+   910→  );
+   911→}
+   912→
+   913→function SubscriptionsTab({
+   914→  data,
+   915→  reload,
+   916→  goToInvoices,
+   917→}: {
+   918→  data: PortalData;
+   919→  reload: () => void;
+   920→  goToInvoices: (subId: string) => void;
+   921→}) {
+   922→  const { toast } = useToast();
+   923→  const navigate = useAppStore((s) => s.navigate);
+   924→  const { subs, methods } = data;
+   925→
+   926→  const [busyKey, setBusyKey] = useState<string | null>(null);
+   927→  const [tierSub, setTierSub] = useState<SubscriptionDTO | null>(null);
+   928→  const [tierPlans, setTierPlans] = useState<PlanDTO[] | null>(null);
+   929→  const [tierPlanId, setTierPlanId] = useState<string | null>(null);
+   930→  const [cancelMode, setCancelMode] = useState<{ sub: SubscriptionDTO; mode: "period_end" | "now" } | null>(null);
+   931→  const plansCache = useRef<Record<string, PlanDTO[]>>({});
+   932→
+   933→  // Invalidate plan cache whenever subscription data refreshes.
+   934→  useEffect(() => {
+   935→    plansCache.current = {};
+   936→  }, [subs]);
+   937→
+   938→  function openTier(sub: SubscriptionDTO) {
+   939→    setTierPlanId(null);
+   940→    setTierPlans(plansCache.current[sub.product.id] ?? null);
+   941→    setTierSub(sub);
+   942→  }
+   943→
+   944→  function closeTier() {
+   945→    setTierSub(null);
+   946→    setTierPlans(null);
+   947→    setTierPlanId(null);
+   948→  }
+   949→
+   950→  // Fetch plans for the "Change tier" dialog when a cache miss was staged.
+   951→  useEffect(() => {
+   952→    if (!tierSub || tierPlans) return;
+   953→    const pid = tierSub.product.id;
+   954→    let alive = true;
+   955→    const load = async () => {
+   956→      try {
+   957→        const res = await api<{ product: ProductDetailDTO }>(`/api/products/${pid}`);
+   958→        if (!alive) return;
+   959→        plansCache.current[pid] = res.product.plans;
+   960→        setTierPlans(res.product.plans);
+   961→      } catch {
+   962→        if (!alive) return;
+   963→        toast({ title: "Couldn't load plans", description: "Please try again.", variant: "destructive" });
+   964→        closeTier();
+   965→      }
+   966→    };
+   967→    void load();
+   968→    return () => {
+   969→      alive = false;
+   970→    };
+   971→  }, [tierSub, tierPlans, toast]);
+   972→
+   973→  async function runSubAction(
+   974→    sub: SubscriptionDTO,
+   975→    action: string,
+   976→    extra: Record<string, unknown> = {},
+   977→    successTitle = "Subscription updated"
+   978→  ): Promise<boolean> {
+   979→    setBusyKey(`${sub.id}:${action}`);
+   980→    try {
+   981→      const res = await api<{ ok: boolean; message: string }>(`/api/subscriptions/${sub.id}`, {
+   982→        method: "PATCH",
+   983→        json: { action, ...extra },
+   984→      });
+   985→      toast({ title: successTitle, description: res.message });
+   986→      reload();
+   987→      return true;
+   988→    } catch (e) {
+   989→      toast({
+   990→        title: "Action failed",
+   991→        description: e instanceof Error ? e.message : "Please try again.",
+   992→        variant: "destructive",
+   993→      });
+   994→      return false;
+   995→    } finally {
+   996→      setBusyKey(null);
+   997→    }
+   998→  }
+   999→
+  1000→  async function changePaymentMethod(sub: SubscriptionDTO, pmId: string) {
+  1001→    if (pmId === sub.paymentMethod?.id) return;
+  1002→    setBusyKey(`${sub.id}:update_payment`);
+  1003→    try {
+  1004→      const res = await api<{ ok: boolean; message: string }>(`/api/subscriptions/${sub.id}`, {
+  1005→        method: "PATCH",
+  1006→        json: { action: "update_payment", paymentMethodId: pmId },
+  1007→      });
+  1008→      toast({
+  1009→        title: "Payment method updated",
+  1010→        description:
+  1011→          sub.status === "PAST_DUE"
+  1012→            ? `${res.message} The next billing run will retry the failed charge automatically.`
+  1013→            : res.message,
+  1014→      });
+  1015→      reload();
+  1016→    } catch (e) {
+  1017→      toast({
+  1018→        title: "Couldn't update payment method",
+  1019→        description: e instanceof Error ? e.message : "Please try again.",
+  1020→        variant: "destructive",
+  1021→      });
+  1022→    } finally {
+  1023→      setBusyKey(null);
+  1024→    }
+  1025→  }
+  1026→
+  1027→  const activeCount = subs.filter((s) => s.status === "ACTIVE").length;
+  1028→  const trialCount = subs.filter((s) => s.status === "TRIALING").length;
+  1029→  const sorted = useMemo(() => sortSubs(subs), [subs]);
+  1030→
+  1031→  return (
+  1032→    <motion.section variants={stagger} initial="hidden" animate="show" className="space-y-5">
+  1033→      <motion.div variants={fadeUp}>
+  1034→        <SectionHeader
+  1035→          title="Memberships"
+  1036→          description={`${activeCount} active · ${trialCount} trialing · ${subs.length - activeCount - trialCount} ended`}
+  1037→        />
+  1038→      </motion.div>
+  1039→
+  1040→      {sorted.map((sub) => (
+  1041→        <motion.div key={sub.id} variants={fadeUp}>
+  1042→          <SubscriptionCard
+  1043→            sub={sub}
+  1044→            methods={methods}
+  1045→            busy={!!busyKey && busyKey.startsWith(`${sub.id}:`)}
+  1046→            onAction={runSubAction}
+  1047→            onChangePayment={changePaymentMethod}
+  1048→            onOpenTier={() => openTier(sub)}
+  1049→            onCancel={(mode) => setCancelMode({ sub, mode })}
+  1050→            onInvoices={() => goToInvoices(sub.id)}
+  1051→          />
+  1052→        </motion.div>
+  1053→      ))}
+  1054→
+  1055→      {subs.length === 0 && (
+  1056→        <motion.div variants={fadeUp}>
+  1057→          <EmptyState
+  1058→            icon={Repeat}
+  1059→            title="No memberships yet"
+  1060→            description="Browse the marketplace and join your first community or grab a digital product."
+  1061→            action={
+  1062→              <Button className="rounded-xl" onClick={() => navigate("discover")}>
+  1063→                <Store className="h-4 w-4" /> Browse marketplace
+  1064→              </Button>
+  1065→            }
+  1066→          />
+  1067→        </motion.div>
+  1068→      )}
+  1069→
+  1070→      {/* ---- Change tier dialog ---- */}
+  1071→      <Dialog open={!!tierSub} onOpenChange={(o) => !o && closeTier()}>
+  1072→        <DialogContent className="sm:max-w-lg">
+  1073→          <DialogHeader>
+  1074→            <DialogTitle>Change tier</DialogTitle>
+  1075→            <DialogDescription>
+  1076→              {tierSub
+  1077→                ? `${tierSub.product.title} — pick a new plan. Unused time on your current plan is credited via proration.`
+  1078→                : ""}
+  1079→            </DialogDescription>
+  1080→          </DialogHeader>
+  1081→          {!tierPlans ? (
+  1082→            <div className="space-y-2">
+  1083→              {[0, 1, 2].map((i) => (
+  1084→                <Skeleton key={i} className="h-[88px] rounded-xl" />
+  1085→              ))}
+  1086→            </div>
+  1087→          ) : tierPlans.filter((p) => p.id !== tierSub?.plan.id).length === 0 ? (
+  1088→            <p className="rounded-xl border border-dashed p-6 text-center text-sm text-muted-foreground">
+  1089→              This product only offers one tier right now.
+  1090→            </p>
+  1091→          ) : (
+  1092→            <div className="grid gap-2" role="radiogroup" aria-label="Available plans">
+  1093→              {tierPlans.map((plan) => {
+  1094→                const current = plan.id === tierSub?.plan.id;
+  1095→                const selected = plan.id === tierPlanId;
+  1096→                return (
+  1097→                  <button
+  1098→                    key={plan.id}
+  1099→                    type="button"
+  1100→                    role="radio"
+  1101→                    aria-checked={selected}
+  1102→                    disabled={current}
+  1103→                    onClick={() => setTierPlanId(plan.id)}
+  1104→                    className={cn(
+  1105→                      "rounded-xl border p-4 text-left transition-all",
+  1106→                      selected ? "border-primary bg-primary/5 ring-2 ring-primary/25" : "hover:bg-muted/40",
+  1107→                      current && "cursor-default opacity-60"
+  1108→                    )}
+  1109→                  >
+  1110→                    <div className="flex items-center justify-between gap-2">
+  1111→                      <div className="flex flex-wrap items-center gap-2">
+  1112→                        <span className="text-sm font-semibold">{plan.name}</span>
+  1113→                        {current && (
+  1114→                          <Badge variant="secondary" className="text-[10px]">
+  1115→                            Current
+  1116→                          </Badge>
+  1117→                        )}
+  1118→                        {plan.badge && (
+  1119→                          <Badge variant="outline" className="border-primary/30 text-[10px] text-primary">
+  1120→                            {plan.badge}
+  1121→                          </Badge>
+  1122→                        )}
+  1123→                      </div>
+  1124→                      <span className="text-sm font-bold tabular-nums">
+  1125→                        {fmtMoney(plan.priceCents)}
+  1126→                        <span className="text-xs font-normal text-muted-foreground">/{plan.interval}</span>
+  1127→                      </span>
+  1128→                    </div>
+  1129→                    {plan.description && <p className="mt-1 text-xs text-muted-foreground">{plan.description}</p>}
+  1130→                    {plan.features.length > 0 && (
+  1131→                      <p className="mt-1.5 text-[11px] text-muted-foreground">
+  1132→                        {plan.features.slice(0, 3).join(" · ")}
+  1133→                      </p>
+  1134→                    )}
+  1135→                  </button>
+  1136→                );
+  1137→              })}
+  1138→            </div>
+  1139→          )}
+  1140→          <DialogFooter>
+  1141→            <Button variant="outline" onClick={closeTier}>
+  1142→              Close
+  1143→            </Button>
+  1144→            <Button
+  1145→              disabled={!tierPlanId || !!busyKey}
+  1146→              onClick={async () => {
+  1147→                if (!tierSub || !tierPlanId) return;
+  1148→                const ok = await runSubAction(tierSub, "change_plan", { planId: tierPlanId }, "Tier changed");
+  1149→                if (ok) closeTier();
+  1150→              }}
+  1151→            >
+  1152→              Confirm change
+  1153→            </Button>
+  1154→          </DialogFooter>
+  1155→        </DialogContent>
+  1156→      </Dialog>
+  1157→
+  1158→      {/* ---- Cancel dialog ---- */}
+  1159→      <AlertDialog open={!!cancelMode} onOpenChange={(o) => !o && setCancelMode(null)}>
+  1160→        <AlertDialogContent>
+  1161→          <AlertDialogHeader>
+  1162→            <AlertDialogTitle>
+  1163→              {cancelMode?.mode === "now" ? "Cancel immediately?" : "Cancel at period end?"}
+  1164→            </AlertDialogTitle>
+  1165→            <AlertDialogDescription>
+  1166→              {cancelMode?.mode === "now"
+  1167→                ? `${cancelMode.sub.product.title} — this ends your membership right now. You will instantly lose access to communities, files and downloads, and your license keys for this product will be revoked. This cannot be undone.`
+  1168→                : `${cancelMode?.sub.product.title} — your membership stays active until ${fmtDate(
+  1169→                    cancelMode?.sub.currentPeriodEnd ?? null
+  1170→                  )}, then cancels automatically. You keep full access until then.`}
+  1171→            </AlertDialogDescription>
+  1172→          </AlertDialogHeader>
+  1173→          <AlertDialogFooter>
+  1174→            <AlertDialogCancel>Keep membership</AlertDialogCancel>
+  1175→            <AlertDialogAction
+  1176→              className="bg-destructive text-white hover:bg-destructive/90"
+  1177→              onClick={async (e) => {
+  1178→                e.preventDefault(); // stay open until the request finishes
+  1179→                if (!cancelMode) return;
+  1180→                const ok = await runSubAction(
+  1181→                  cancelMode.sub,
+  1182→                  cancelMode.mode === "now" ? "cancel_now" : "cancel",
+  1183→                  {},
+  1184→                  cancelMode.mode === "now" ? "Membership canceled" : "Cancellation scheduled"
+  1185→                );
+  1186→                if (ok) setCancelMode(null);
+  1187→              }}
+  1188→            >
+  1189→              {cancelMode?.mode === "now" ? "Cancel now" : "Schedule cancellation"}
+  1190→            </AlertDialogAction>
+  1191→          </AlertDialogFooter>
+  1192→        </AlertDialogContent>
+  1193→      </AlertDialog>
+  1194→    </motion.section>
+  1195→  );
+  1196→}
+  1197→
+  1198→// ============================================================================
+  1199→// Tab: Licenses
+  1200→// ============================================================================
+  1201→
+  1202→type ValidateOK = {
+  1203→  valid: true;
+  1204→  product: { id: string; title: string };
+  1205→  plan: string | null;
+  1206→  activations: number;
+  1207→  maxActivations: number;
+  1208→  lastUsedAt: string | null;
+  1209→};
+  1210→type ValidateResult = ValidateOK | { valid: false; reason: string };
+  1211→
+  1212→const VALIDATE_REASONS: Record<string, string> = {
+  1213→  NOT_FOUND: "No license matches this key — check for typos.",
+  1214→  REVOKED: "This license was revoked by the customer.",
+  1215→  SUBSCRIPTION_INACTIVE: "The membership linked to this key is no longer active.",
+  1216→};
+  1217→
+  1218→function LicensesTab({ licenses, reload }: { licenses: LicenseDTO[]; reload: () => void }) {
+  1219→  const { toast } = useToast();
+  1220→  const [keyInput, setKeyInput] = useState("");
+  1221→  const [validating, setValidating] = useState(false);
+  1222→  const [result, setResult] = useState<ValidateResult | null>(null);
+  1223→  const [revealedId, setRevealedId] = useState<string | null>(null);
+  1224→  const [busyId, setBusyId] = useState<string | null>(null);
+  1225→  const [revokeTarget, setRevokeTarget] = useState<LicenseDTO | null>(null);
+  1226→
+  1227→  async function handleValidate(e: FormEvent) {
+  1228→    e.preventDefault();
+  1229→    const key = keyInput.trim().toUpperCase();
+  1230→    if (!key) return;
+  1231→    setValidating(true);
+  1232→    setResult(null);
+  1233→    try {
+  1234→      const res = await api<ValidateOK | { valid: false; reason: string }>("/api/licenses/validate", {
+  1235→        json: { key },
+  1236→      });
+  1237→      setResult(res.valid ? res : { valid: false, reason: res.reason });
+  1238→    } catch (err) {
+  1239→      if (err instanceof ApiError && err.status === 404) {
+  1240→        setResult({ valid: false, reason: "NOT_FOUND" });
+  1241→      } else {
+  1242→        toast({
+  1243→          title: "Validation failed",
+  1244→          description: err instanceof Error ? err.message : "Please try again.",
+  1245→          variant: "destructive",
+  1246→        });
+  1247→      }
+  1248→    } finally {
+  1249→      setValidating(false);
+  1250→    }
+  1251→  }
+  1252→
+  1253→  async function activate(lic: LicenseDTO) {
+  1254→    setBusyId(lic.id);
+  1255→    try {
+  1256→      const res = await api<{ ok: boolean; activations: number; maxActivations: number; device: string }>(
+  1257→        `/api/licenses/${lic.id}/activate`,
+  1258→        { method: "POST", json: {} }
+  1259→      );
+  1260→      toast({
+  1261→        title: `Activated on ${res.device}`,
+  1262→        description: `${res.activations} of ${res.maxActivations} device activations used.`,
+  1263→      });
+  1264→      reload();
+  1265→    } catch (e) {
+  1266→      toast({
+  1267→        title: "Activation failed",
+  1268→        description: e instanceof Error ? e.message : "Please try again.",
+  1269→        variant: "destructive",
+  1270→      });
+  1271→    } finally {
+  1272→      setBusyId(null);
+  1273→    }
+  1274→  }
+  1275→
+  1276→  async function revoke() {
+  1277→    if (!revokeTarget) return;
+  1278→    setBusyId(revokeTarget.id);
+  1279→    try {
+  1280→      await api(`/api/licenses/${revokeTarget.id}/activate`, { method: "DELETE" });
+  1281→      toast({
+  1282→        title: "License revoked",
+  1283→        description: `${revokeTarget.product.title} — the key no longer validates.`,
+  1284→      });
+  1285→      setRevokeTarget(null);
+  1286→      reload();
+  1287→    } catch (e) {
+  1288→      toast({
+  1289→        title: "Revoke failed",
+  1290→        description: e instanceof Error ? e.message : "Please try again.",
+  1291→        variant: "destructive",
+  1292→      });
+  1293→    } finally {
+  1294→      setBusyId(null);
+  1295→    }
+  1296→  }
+  1297→
+  1298→  return (
+  1299→    <motion.section variants={stagger} initial="hidden" animate="show" className="space-y-5">
+  1300→      <motion.div variants={fadeUp}>
+  1301→        <SectionHeader
+  1302→          title="License keys"
+  1303→          description="Software keys issued with your memberships — activate devices, validate installs, revoke anytime."
+  1304→        />
+  1305→      </motion.div>
+  1306→
+  1307→      {/* ---- Validate a key (public API demo) ---- */}
+  1308→      <motion.div variants={fadeUp}>
+  1309→        <Panel className="p-5">
+  1310→          <div className="flex items-start gap-3">
+  1311→            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-primary/10">
+  1312→              <ShieldCheck className="h-4.5 w-4.5 text-primary" aria-hidden />
+  1313→            </div>
+  1314→            <div className="min-w-0">
+  1315→              <h2 className="text-sm font-bold tracking-tight">Validate a key</h2>
+  1316→              <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">
+  1317→                This calls the same public endpoint (<code className="font-mono">POST /api/licenses/validate</code>)
+  1318→                that a downloaded app would use to verify an install.
+  1319→              </p>
+  1320→            </div>
+  1321→          </div>
+  1322→          <form onSubmit={handleValidate} className="mt-4 flex flex-col gap-2 sm:flex-row">
+  1323→            <Input
+  1324→              value={keyInput}
+  1325→              onChange={(e) => setKeyInput(e.target.value.toUpperCase())}
+  1326→              placeholder="WHPL-XXXX-XXXX-XXXX"
+  1327→              className="rounded-xl font-mono tracking-wider"
+  1328→              aria-label="License key to validate"
+  1329→            />
+  1330→            <Button type="submit" className="rounded-xl" disabled={validating || !keyInput.trim()}>
+  1331→              {validating ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <KeyRound className="h-4 w-4" aria-hidden />}
+  1332→              Validate
+  1333→            </Button>
+  1334→          </form>
+  1335→          {result && (
+  1336→            <div
+  1337→              className={cn(
+  1338→                "mt-4 rounded-xl border p-4",
+  1339→                result.valid
+  1340→                  ? "border-emerald-500/30 bg-emerald-500/10"
+  1341→                  : "border-destructive/30 bg-destructive/10"
+  1342→              )}
+  1343→              role="status"
+  1344→            >
+  1345→              <p
+  1346→                className={cn(
+  1347→                  "flex items-center gap-2 text-sm font-semibold",
+  1348→                  result.valid ? "text-emerald-700 dark:text-emerald-400" : "text-destructive"
+  1349→                )}
+  1350→              >
+  1351→                {result.valid ? (
+  1352→                  <>
+  1353→                    <CircleCheck className="h-4 w-4" aria-hidden /> Valid license
+  1354→                  </>
+  1355→                ) : (
+  1356→                  <>
+  1357→                    <CircleX className="h-4 w-4" aria-hidden /> Invalid license
+  1358→                  </>
+  1359→                )}
+  1360→              </p>
+  1361→              {result.valid ? (
+  1362→                <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 text-xs sm:grid-cols-4">
+  1363→                  <div>
+  1364→                    <dt className="text-muted-foreground">Product</dt>
+  1365→                    <dd className="mt-0.5 font-medium">{result.product.title}</dd>
+  1366→                  </div>
+  1367→                  <div>
+  1368→                    <dt className="text-muted-foreground">Plan</dt>
+  1369→                    <dd className="mt-0.5 font-medium">{result.plan || "—"}</dd>
+  1370→                  </div>
+  1371→                  <div>
+  1372→                    <dt className="text-muted-foreground">Activations</dt>
+  1373→                    <dd className="mt-0.5 font-medium tabular-nums">
+  1374→                      {result.activations} of {result.maxActivations}
+  1375→                    </dd>
+  1376→                  </div>
+  1377→                  <div>
+  1378→                    <dt className="text-muted-foreground">Last used</dt>
+  1379→                    <dd className="mt-0.5 font-medium">{result.lastUsedAt ? timeAgo(result.lastUsedAt) : "never"}</dd>
+  1380→                  </div>
+  1381→                </dl>
+  1382→              ) : (
+  1383→                <p className="mt-1.5 text-xs text-destructive">
+  1384→                  {VALIDATE_REASONS[result.reason] || result.reason}
+  1385→                </p>
+  1386→              )}
+  1387→            </div>
+  1388→          )}
+  1389→        </Panel>
+  1390→      </motion.div>
+  1391→
+  1392→      {/* ---- License cards ---- */}
+  1393→      {licenses.length === 0 ? (
+  1394→        <motion.div variants={fadeUp}>
+  1395→          <EmptyState
+  1396→            icon={KeyRound}
+  1397→            title="No license keys yet"
+  1398→            description="Keys are issued automatically when you purchase a product with license-key access."
+  1399→          />
+  1400→        </motion.div>
+  1401→      ) : (
+  1402→        licenses.map((lic) => {
+  1403→          const revealed = revealedId === lic.id;
+  1404→          const pct = Math.min(100, Math.round((lic.activations / Math.max(1, lic.maxActivations)) * 100));
+  1405→          const revoked = lic.status === "REVOKED";
+  1406→          return (
+  1407→            <motion.div key={lic.id} variants={fadeUp}>
+  1408→              <Panel className={cn("p-5 sm:p-6", revoked && "border-destructive/30 bg-destructive/5")}>
+  1409→                <div className="flex flex-wrap items-start gap-4">
+  1410→                  <ProductCover
+  1411→                    theme={lic.product.coverTheme}
+  1412→                    category="OTHER"
+  1413→                    title={lic.product.title}
+  1414→                    className="h-12 w-12 shrink-0 rounded-xl"
+  1415→                    iconClassName="h-16 w-16"
+  1416→                  />
+  1417→                  <div className="min-w-0 flex-1">
+  1418→                    <div className="flex flex-wrap items-center gap-2">
+  1419→                      <h3 className="text-base font-bold tracking-tight">{lic.product.title}</h3>
+  1420→                      <StatusBadge status={lic.status} />
+  1421→                    </div>
+  1422→                    <p className="mt-0.5 text-sm text-muted-foreground">
+  1423→                      {lic.planName || "Licensed product"} · issued {fmtDate(lic.createdAt)}
+  1424→                    </p>
+  1425→                  </div>
+  1426→                  <div className="text-left text-xs text-muted-foreground sm:text-right">
+  1427→                    <p>Activated {lic.activatedAt ? fmtDate(lic.activatedAt) : "never"}</p>
+  1428→                    <p className="mt-0.5">Last used {lic.lastUsedAt ? timeAgo(lic.lastUsedAt) : "never"}</p>
+  1429→                  </div>
+  1430→                </div>
+  1431→
+  1432→                {/* Key with reveal + copy */}
+  1433→                <div className="mt-4 flex flex-wrap items-center gap-2 rounded-xl border bg-muted/40 px-3 py-2.5">
+  1434→                  <KeyRound className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+  1435→                  <code className="min-w-0 flex-1 truncate font-mono text-sm tracking-wider">
+  1436→                    {revealed ? lic.key : maskKey(lic.key)}
+  1437→                  </code>
+  1438→                  <Button
+  1439→                    variant="ghost"
+  1440→                    size="icon"
+  1441→                    className="h-7 w-7"
+  1442→                    onClick={() => setRevealedId(revealed ? null : lic.id)}
+  1443→                    aria-label={revealed ? "Hide license key" : "Reveal license key"}
+  1444→                  >
+  1445→                    {revealed ? <EyeOff className="h-4 w-4" aria-hidden /> : <Eye className="h-4 w-4" aria-hidden />}
+  1446→                  </Button>
+  1447→                  {revealed && <CopyButton value={lic.key} label="Copy" />}
+  1448→                </div>
+  1449→
+  1450→                {/* Activations */}
+  1451→                {!revoked && (
+  1452→                  <div className="mt-4">
+  1453→                    <div className="flex items-center justify-between text-xs">
+  1454→                      <span className="text-muted-foreground">
+  1455→                        {lic.activations} of {lic.maxActivations} device activations used
+  1456→                      </span>
+  1457→                      <span className="font-semibold tabular-nums">{pct}%</span>
+  1458→                    </div>
+  1459→                    <Progress value={pct} className="mt-1.5 h-2" aria-label="Device activation usage" />
+  1460→                  </div>
+  1461→                )}
+  1462→
+  1463→                {/* Actions */}
+  1464→                <div className="mt-5 flex flex-wrap items-center gap-2 border-t pt-4">
+  1465→                  {!revoked ? (
+  1466→                    <>
+  1467→                      <Button
+  1468→                        size="sm"
+  1469→                        variant="outline"
+  1470→                        className="rounded-xl"
+  1471→                        disabled={busyId === lic.id || lic.activations >= lic.maxActivations}
+  1472→                        onClick={() => activate(lic)}
+  1473→                      >
+  1474→                        {busyId === lic.id ? (
+  1475→                          <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+  1476→                        ) : (
+  1477→                          <MonitorSmartphone className="h-4 w-4" aria-hidden />
+  1478→                        )}
+  1479→                        Activate on new device
+  1480→                      </Button>
+  1481→                      <Button
+  1482→                        size="sm"
+  1483→                        variant="ghost"
+  1484→                        className="rounded-xl text-destructive hover:bg-destructive/10 hover:text-destructive"
+  1485→                        disabled={busyId === lic.id}
+  1486→                        onClick={() => setRevokeTarget(lic)}
+  1487→                      >
+  1488→                        <Ban className="h-4 w-4" aria-hidden /> Revoke license
+  1489→                      </Button>
+  1490→                      {lic.activations >= lic.maxActivations && (
+  1491→                        <span className="text-xs text-amber-600 dark:text-amber-400">
+  1492→                          Device limit reached — revoke or upgrade to activate more.
+  1493→                        </span>
+  1494→                      )}
+  1495→                    </>
+  1496→                  ) : (
+  1497→                    <p className="text-xs text-destructive">
+  1498→                      This key was revoked and no longer validates. Re-purchase the product to get a new one.
+  1499→                    </p>
+  1500→                  )}
+  1501→                </div>
+  1502→              </Panel>
+  1503→            </motion.div>
+  1504→          );
+  1505→        })
+  1506→      )}
+  1507→
+  1508→      {/* ---- Revoke confirm ---- */}
+  1509→      <AlertDialog open={!!revokeTarget} onOpenChange={(o) => !o && setRevokeTarget(null)}>
+  1510→        <AlertDialogContent>
+  1511→          <AlertDialogHeader>
+  1512→            <AlertDialogTitle>Revoke this license?</AlertDialogTitle>
+  1513→            <AlertDialogDescription>
+  1514→              {revokeTarget
+  1515→                ? `${revokeTarget.product.title} — the key ${maskKey(revokeTarget.key)} will stop validating immediately. Apps using it will lose access. This cannot be undone.`
+  1516→                : ""}
+  1517→            </AlertDialogDescription>
+  1518→          </AlertDialogHeader>
+  1519→          <AlertDialogFooter>
+  1520→            <AlertDialogCancel>Keep license</AlertDialogCancel>
+  1521→            <AlertDialogAction
+  1522→              className="bg-destructive text-white hover:bg-destructive/90"
+  1523→              disabled={busyId === revokeTarget?.id}
+  1524→              onClick={(e) => {
+  1525→                e.preventDefault();
+  1526→                void revoke();
+  1527→              }}
+  1528→            >
+  1529→              {busyId === revokeTarget?.id ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : null}
+  1530→              Revoke key
+  1531→            </AlertDialogAction>
+  1532→          </AlertDialogFooter>
+  1533→        </AlertDialogContent>
+  1534→      </AlertDialog>
+  1535→    </motion.section>
+  1536→  );
+  1537→}
+  1538→
+  1539→// ============================================================================
+  1540→// Tab: Downloads
+  1541→// ============================================================================
+  1542→
+  1543→function DownloadsTab({ subs }: { subs: SubscriptionDTO[] }) {
+  1544→  const { toast } = useToast();
+  1545→  const navigate = useAppStore((s) => s.navigate);
+  1546→  const [products, setProducts] = useState<Record<string, ProductDetailDTO>>({});
+  1547→  const [loading, setLoading] = useState(true);
+  1548→  const [downloadingId, setDownloadingId] = useState<string | null>(null);
+  1549→
+  1550→  const eligible = useMemo(() => subs.filter((s) => ["ACTIVE", "TRIALING"].includes(s.status)), [subs]);
+  1551→
+  1552→  // Fetch product details (incl. assets) for every active membership.
+  1553→  // All state updates happen asynchronously (after the fetch settles).
+  1554→  useEffect(() => {
+  1555→    let alive = true;
+  1556→    const ids = [...new Set(eligible.map((s) => s.product.id))];
+  1557→    const load = async () => {
+  1558→      if (ids.length === 0) {
+  1559→        if (!alive) return;
+  1560→        setProducts({});
+  1561→        setLoading(false);
+  1562→        return;
+  1563→      }
+  1564→      const list = await Promise.all(
+  1565→        ids.map((id) =>
+  1566→          api<{ product: ProductDetailDTO }>(`/api/products/${id}`)
+  1567→            .then((r) => r.product)
+  1568→            .catch(() => null)
+  1569→        )
+  1570→      );
+  1571→      if (!alive) return;
+  1572→      const map: Record<string, ProductDetailDTO> = {};
+  1573→      list.forEach((p) => {
+  1574→        if (p) map[p.id] = p;
+  1575→      });
+  1576→      setProducts(map);
+  1577→      setLoading(false);
+  1578→    };
+  1579→    void load();
+  1580→    return () => {
+  1581→      alive = false;
+  1582→    };
+  1583→  }, [eligible]);
+  1584→
+  1585→  const groups = eligible
+  1586→    .map((sub) => ({ sub, product: products[sub.product.id] }))
+  1587→    .filter((g) => g.product && g.product.assets.length > 0);
+  1588→
+  1589→  async function download(assetId: string, productId: string) {
+  1590→    setDownloadingId(assetId);
+  1591→    try {
+  1592→      const res = await api<{ url: string; expiresIn: number; maxUses: number; fileName: string }>(
+  1593→        `/api/assets/${assetId}/link`,
+  1594→        { method: "POST", json: {} }
+  1595→      );
+  1596→      window.open(res.url, "_blank");
+  1597→      toast({
+  1598→        title: "Secure link opened",
+  1599→        description: `${res.fileName} — valid 10 min, up to ${res.maxUses} uses.`,
+  1600→      });
+  1601→      // Refresh the product so the download counter updates.
+  1602→      try {
+  1603→        const fresh = await api<{ product: ProductDetailDTO }>(`/api/products/${productId}`);
+  1604→        setProducts((prev) => ({ ...prev, [productId]: fresh.product }));
+  1605→      } catch {
+  1606→        /* counter refresh is best-effort */
+  1607→      }
+  1608→    } catch (e) {
+  1609→      toast({
+  1610→        title: "Download blocked",
+  1611→        description: e instanceof Error ? e.message : "Please try again.",
+  1612→        variant: "destructive",
+  1613→      });
+  1614→    } finally {
+  1615→      setDownloadingId(null);
+  1616→    }
+  1617→  }
+  1618→
+  1619→  return (
+  1620→    <motion.section variants={stagger} initial="hidden" animate="show" className="space-y-5">
+  1621→      <motion.div variants={fadeUp}>
+  1622→        <SectionHeader
+  1623→          title="Downloads"
+  1624→          description="Secure digital asset delivery for your active memberships."
+  1625→        />
+  1626→      </motion.div>
+  1627→
+  1628→      <motion.div
+  1629→        variants={fadeUp}
+  1630→        className="flex items-start gap-3 rounded-2xl border border-emerald-500/25 bg-emerald-500/10 p-4"
+  1631→      >
+  1632→        <ShieldCheck className="mt-0.5 h-5 w-5 shrink-0 text-emerald-600 dark:text-emerald-400" aria-hidden />
+  1633→        <p className="text-sm leading-relaxed text-emerald-900 dark:text-emerald-200">
+  1634→          <span className="font-semibold">Secure delivery.</span> Every download mints a single-use expiring
+  1635→          token tied to your membership — links stay valid for 10 minutes and up to 3 uses.
+  1636→        </p>
+  1637→      </motion.div>
+  1638→
+  1639→      {loading ? (
+  1640→        <div className="space-y-4">
+  1641→          {[0, 1].map((i) => (
+  1642→            <Skeleton key={i} className="h-56 rounded-2xl" />
+  1643→          ))}
+  1644→        </div>
+  1645→      ) : eligible.length === 0 ? (
+  1646→        <motion.div variants={fadeUp}>
+  1647→          <EmptyState
+  1648→            icon={Download}
+  1649→            title="No active memberships"
+  1650→            description="Files unlock as soon as you join a product with file access."
+  1651→            action={
+  1652→              <Button className="rounded-xl" onClick={() => navigate("discover")}>
+  1653→                <Store className="h-4 w-4" /> Browse marketplace
+  1654→              </Button>
+  1655→            }
+  1656→          />
+  1657→        </motion.div>
+  1658→      ) : groups.length === 0 ? (
+  1659→        <motion.div variants={fadeUp}>
+  1660→          <EmptyState
+  1661→            icon={FileDown}
+  1662→            title="No files in your memberships yet"
+  1663→            description="Your current memberships don't include file downloads. Products with a file vault will appear here."
+  1664→            action={
+  1665→              <Button className="rounded-xl" onClick={() => navigate("discover")}>
+  1666→                <Store className="h-4 w-4" /> Browse marketplace
+  1667→              </Button>
+  1668→            }
+  1669→          />
+  1670→        </motion.div>
+  1671→      ) : (
+  1672→        groups.map(({ sub, product }) => (
+  1673→          <motion.div key={sub.id} variants={fadeUp}>
+  1674→            <Panel className="overflow-hidden">
+  1675→              <div className="flex flex-wrap items-center gap-3 border-b p-5">
+  1676→                <ProductCover
+  1677→                  theme={product.coverTheme}
+  1678→                  category={product.category}
+  1679→                  title={product.title}
+  1680→                  className="h-11 w-11 shrink-0 rounded-xl"
+  1681→                  iconClassName="h-14 w-14"
+  1682→                />
+  1683→                <div className="min-w-0">
+  1684→                  <div className="flex flex-wrap items-center gap-2">
+  1685→                    <h3 className="text-sm font-bold tracking-tight">{product.title}</h3>
+  1686→                    <StatusBadge status={sub.status} />
+  1687→                  </div>
+  1688→                  <p className="text-xs text-muted-foreground">
+  1689→                    {sub.plan.name} · {product.assets.length} file{product.assets.length === 1 ? "" : "s"}
+  1690→                  </p>
+  1691→                </div>
+  1692→              </div>
+  1693→              <ul className="divide-y">
+  1694→                {product.assets.map((asset) => {
+  1695→                  const Icon = fileIcon(asset.mimeType);
+  1696→                  return (
+  1697→                    <li key={asset.id} className="flex flex-wrap items-center gap-3 p-4 sm:px-5">
+  1698→                      <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-muted">
+  1699→                        <Icon className="h-5 w-5 text-muted-foreground" aria-hidden />
+  1700→                      </div>
+  1701→                      <div className="min-w-0 flex-1">
+  1702→                        <div className="flex flex-wrap items-center gap-2">
+  1703→                          <p className="truncate text-sm font-medium">{asset.name}</p>
+  1704→                          <Badge variant="outline" className="text-[10px] tabular-nums">
+  1705→                            v{asset.version}
+  1706→                          </Badge>
+  1707→                          {asset.requiresLicense && (
+  1708→                            <Badge
+  1709→                              variant="outline"
+  1710→                              className="gap-1 border-amber-500/25 bg-amber-500/10 text-[10px] text-amber-700 dark:text-amber-400"
+  1711→                            >
+  1712→                              <Lock className="h-3 w-3" aria-hidden /> License required
+  1713→                            </Badge>
+  1714→                          )}
+  1715→                        </div>
+  1716→                        <p className="mt-0.5 truncate text-xs text-muted-foreground">
+  1717→                          {asset.fileName} · {fmtBytes(asset.sizeBytes)} · downloaded{" "}
+  1718→                          <span className="tabular-nums">{asset.downloadCount}</span>{" "}
+  1719→                          {asset.downloadCount === 1 ? "time" : "times"}
+  1720→                        </p>
+  1721→                      </div>
+  1722→                      <Button
+  1723→                        size="sm"
+  1724→                        variant="outline"
+  1725→                        className="shrink-0 rounded-xl"
+  1726→                        disabled={downloadingId === asset.id}
+  1727→                        onClick={() => download(asset.id, product.id)}
+  1728→                        aria-label={`Download ${asset.name}`}
+  1729→                      >
+  1730→                        {downloadingId === asset.id ? (
+  1731→                          <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+  1732→                        ) : (
+  1733→                          <Download className="h-4 w-4" aria-hidden />
+  1734→                        )}
+  1735→                        Download
+  1736→                      </Button>
+  1737→                    </li>
+  1738→                  );
+  1739→                })}
+  1740→              </ul>
+  1741→            </Panel>
+  1742→          </motion.div>
+  1743→        ))
+  1744→      )}
+  1745→    </motion.section>
+  1746→  );
+  1747→}
+  1748→
+  1749→// ============================================================================
+  1750→// Tab: Invoices
+  1751→// ============================================================================
+  1752→
+  1753→function downloadReceipt(inv: InvoiceDTO, email: string | null) {
+  1754→  const money = fmtMoney(inv.amountCents, { cents: true });
+  1755→  const lines = [
+  1756→    "================================================",
+  1757→    "  VENDLY - PAYMENT RECEIPT",
+  1758→    "================================================",
+  1759→    "",
+  1760→    `Invoice number : ${inv.number}`,
+  1761→    `Status         : ${inv.status}`,
+  1762→    `Description    : ${inv.description}`,
+  1763→    `Product        : ${inv.product?.title ?? "-"}`,
+  1764→    `Amount         : ${money}`,
+  1765→    `Gateway        : ${inv.gateway ?? "-"}`,
+  1766→    `Issued         : ${fmtDateTime(inv.createdAt)}`,
+  1767→    `Paid           : ${inv.paidAt ? fmtDateTime(inv.paidAt) : "-"}`,
+  1768→    `Period         : ${
+  1769→      inv.periodStart ? `${fmtDate(inv.periodStart)} - ${fmtDate(inv.periodEnd)}` : "-"
+  1770→    }`,
+  1771→    `Billed to      : ${email ?? "-"}`,
+  1772→    "",
+  1773→    "Payments are simulated in this demo environment.",
+  1774→    "No real charges were made.",
+  1775→    "",
+  1776→    "Thank you for being a Vendly member!",
+  1777→    "================================================",
+  1778→  ];
+  1779→  const blob = new Blob([lines.join("\n")], { type: "text/plain;charset=utf-8" });
+  1780→  const url = URL.createObjectURL(blob);
+  1781→  const a = document.createElement("a");
+  1782→  a.href = url;
+  1783→  a.download = `vendly-receipt-${inv.number}.txt`;
+  1784→  document.body.appendChild(a);
+  1785→  a.click();
+  1786→  a.remove();
+  1787→  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  1788→}
+  1789→
+  1790→function InvoicesTab({
+  1791→  invoices,
+  1792→  subs,
+  1793→  subFilter,
+  1794→  onSubFilterChange,
+  1795→  user,
+  1796→}: {
+  1797→  invoices: InvoiceDTO[];
+  1798→  subs: SubscriptionDTO[];
+  1799→  subFilter: string;
+  1800→  onSubFilterChange: (v: string) => void;
+  1801→  user: SessionUser;
+  1802→}) {
+  1803→  const clockNow = useAppStore((s) => s.clock.now);
+  1804→  const [statusFilter, setStatusFilter] = useState("ALL");
+  1805→  const [selected, setSelected] = useState<InvoiceDTO | null>(null);
+  1806→
+  1807→  const paid = invoices.filter((i) => i.status === "PAID");
+  1808→  const lifetimePaid = paid.reduce((sum, i) => sum + i.amountCents, 0);
+  1809→  const year = new Date(clockNow).getFullYear();
+  1810→  const thisYear = paid
+  1811→    .filter((i) => new Date(i.createdAt).getFullYear() === year)
+  1812→    .reduce((sum, i) => sum + i.amountCents, 0);
+  1813→  const failedCount = invoices.filter((i) => i.status === "FAILED").length;
+  1814→
+  1815→  const filterSub = subs.find((s) => s.id === subFilter);
+  1816→  const filtered = invoices.filter((inv) => {
+  1817→    if (statusFilter !== "ALL" && inv.status !== statusFilter) return false;
+  1818→    if (filterSub && inv.product?.id !== filterSub.product.id) return false;
+  1819→    return true;
+  1820→  });
+  1821→
+  1822→  return (
+  1823→    <motion.section variants={stagger} initial="hidden" animate="show" className="space-y-5">
+  1824→      <motion.div variants={fadeUp}>
+  1825→        <SectionHeader
+  1826→          title="Invoices"
+  1827→          description="Your complete billing history across every membership."
+  1828→        />
+  1829→      </motion.div>
+  1830→
+  1831→      {/* Summary stats */}
+  1832→      <motion.div variants={fadeUp} className="grid gap-4 sm:grid-cols-3">
+  1833→        <StatCard label="Total paid lifetime" value={fmtMoney(lifetimePaid)} sub={`${paid.length} paid invoices`} icon={ReceiptText} />
+  1834→        <StatCard label={`Paid in ${year}`} value={fmtMoney(thisYear)} icon={CalendarRange} />
+  1835→        <StatCard label="Failed payments" value={String(failedCount)} sub={failedCount ? "retry from Memberships" : "all clear"} icon={TriangleAlert} />
+  1836→      </motion.div>
+  1837→
+  1838→      {/* Filters */}
+  1839→      <motion.div variants={fadeUp} className="flex flex-wrap items-center gap-2">
+  1840→        <Select value={statusFilter} onValueChange={setStatusFilter}>
+  1841→          <SelectTrigger className="h-9 rounded-xl" aria-label="Filter invoices by status">
+  1842→            <SelectValue />
+  1843→          </SelectTrigger>
+  1844→          <SelectContent>
+  1845→            <SelectItem value="ALL">All statuses</SelectItem>
+  1846→            <SelectItem value="PAID">Paid</SelectItem>
+  1847→            <SelectItem value="FAILED">Failed</SelectItem>
+  1848→            <SelectItem value="REFUNDED">Refunded</SelectItem>
+  1849→          </SelectContent>
+  1850→        </Select>
+  1851→        <Select value={subFilter} onValueChange={onSubFilterChange}>
+  1852→          <SelectTrigger className="h-9 min-w-44 rounded-xl" aria-label="Filter invoices by membership">
+  1853→            <SelectValue />
+  1854→          </SelectTrigger>
+  1855→          <SelectContent>
+  1856→            <SelectItem value="all">All memberships</SelectItem>
+  1857→            {subs.map((s) => (
+  1858→              <SelectItem key={s.id} value={s.id}>
+  1859→                {s.product.title}
+  1860→              </SelectItem>
+  1861→            ))}
+  1862→          </SelectContent>
+  1863→        </Select>
+  1864→        {filterSub && (
+  1865→          <Button
+  1866→            variant="ghost"
+  1867→            size="sm"
+  1868→            className="rounded-full text-xs text-muted-foreground"
+  1869→            onClick={() => onSubFilterChange("all")}
+  1870→          >
+  1871→            Clear filter <CircleX className="h-3.5 w-3.5" aria-hidden />
+  1872→          </Button>
+  1873→        )}
+  1874→        <span className="ml-auto text-xs text-muted-foreground tabular-nums">
+  1875→          {filtered.length} invoice{filtered.length === 1 ? "" : "s"}
+  1876→        </span>
+  1877→      </motion.div>
+  1878→
+  1879→      {/* Table */}
+  1880→      <motion.div variants={fadeUp}>
+  1881→        {filtered.length === 0 ? (
+  1882→          <EmptyState
+  1883→            icon={ReceiptText}
+  1884→            title="No invoices match"
+  1885→            description="Try a different status or membership filter."
+  1886→          />
+  1887→        ) : (
+  1888→          <Panel className="overflow-hidden">
+  1889→            <div className="overflow-x-auto">
+  1890→              <Table>
+  1891→                <TableHeader>
+  1892→                  <TableRow className="hover:bg-transparent">
+  1893→                    <TableHead className="pl-5">Invoice</TableHead>
+  1894→                    <TableHead>Description</TableHead>
+  1895→                    <TableHead className="hidden md:table-cell">Date</TableHead>
+  1896→                    <TableHead className="hidden lg:table-cell">Period</TableHead>
+  1897→                    <TableHead className="hidden sm:table-cell">Method</TableHead>
+  1898→                    <TableHead className="text-right">Amount</TableHead>
+  1899→                    <TableHead>Status</TableHead>
+  1900→                    <TableHead className="w-10 pr-5" aria-label="Open invoice" />
+  1901→                  </TableRow>
+  1902→                </TableHeader>
+  1903→                <TableBody>
+  1904→                  {filtered.map((inv) => (
+  1905→                    <TableRow
+  1906→                      key={inv.id}
+  1907→                      className="cursor-pointer"
+  1908→                      onClick={() => setSelected(inv)}
+  1909→                      aria-label={`View invoice ${inv.number}`}
+  1910→                    >
+  1911→                      <TableCell className="py-3.5 pl-5 font-mono text-xs font-medium">{inv.number}</TableCell>
+  1912→                      <TableCell className="max-w-56">
+  1913→                        <p className="truncate text-sm font-medium">{inv.product?.title || "Vendly"}</p>
+  1914→                        <p className="truncate text-xs text-muted-foreground">{inv.description}</p>
+  1915→                      </TableCell>
+  1916→                      <TableCell className="hidden text-sm tabular-nums md:table-cell">
+  1917→                        {fmtDate(inv.createdAt)}
+  1918→                      </TableCell>
+  1919→                      <TableCell className="hidden text-xs tabular-nums text-muted-foreground lg:table-cell">
+  1920→                        {inv.periodStart ? `${fmtDate(inv.periodStart)} – ${fmtDate(inv.periodEnd)}` : "—"}
+  1921→                      </TableCell>
+  1922→                      <TableCell className="hidden sm:table-cell">
+  1923→                        {inv.gateway ? <GatewayBadge gateway={inv.gateway} /> : "—"}
+  1924→                      </TableCell>
+  1925→                      <TableCell className="text-right text-sm font-semibold tabular-nums">
+  1926→                        {fmtMoney(inv.amountCents, { cents: true })}
+  1927→                      </TableCell>
+  1928→                      <TableCell>
+  1929→                        <StatusBadge status={inv.status} />
+  1930→                      </TableCell>
+  1931→                      <TableCell className="pr-5">
+  1932→                        <ChevronRight className="h-4 w-4 text-muted-foreground" aria-hidden />
+  1933→                      </TableCell>
+  1934→                    </TableRow>
+  1935→                  ))}
+  1936→                </TableBody>
+  1937→              </Table>
+  1938→            </div>
+  1939→          </Panel>
+  1940→        )}
+  1941→      </motion.div>
+  1942→
+  1943→      {/* ---- Invoice detail dialog ---- */}
+  1944→      <Dialog open={!!selected} onOpenChange={(o) => !o && setSelected(null)}>
+  1945→        <DialogContent className="sm:max-w-md">
+  1946→          <DialogHeader>
+  1947→            <DialogTitle className="flex flex-wrap items-center gap-2">
+  1948→              Invoice <span className="font-mono text-base">{selected?.number}</span>
+  1949→              {selected && <StatusBadge status={selected.status} />}
+  1950→            </DialogTitle>
+  1951→            <DialogDescription>{selected?.description}</DialogDescription>
+  1952→          </DialogHeader>
+  1953→          {selected && (
+  1954→            <dl className="grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
+  1955→              <div>
+  1956→                <dt className="text-xs text-muted-foreground">Product</dt>
+  1957→                <dd className="mt-0.5 font-medium">{selected.product?.title || "—"}</dd>
+  1958→              </div>
+  1959→              <div>
+  1960→                <dt className="text-xs text-muted-foreground">Amount</dt>
+  1961→                <dd className="mt-0.5 font-semibold tabular-nums">
+  1962→                  {fmtMoney(selected.amountCents, { cents: true })}
+  1963→                </dd>
+  1964→              </div>
+  1965→              <div>
+  1966→                <dt className="text-xs text-muted-foreground">Issued</dt>
+  1967→                <dd className="mt-0.5 font-medium">{fmtDateTime(selected.createdAt)}</dd>
+  1968→              </div>
+  1969→              <div>
+  1970→                <dt className="text-xs text-muted-foreground">Paid</dt>
+  1971→                <dd className="mt-0.5 font-medium">{selected.paidAt ? fmtDateTime(selected.paidAt) : "—"}</dd>
+  1972→              </div>
+  1973→              <div>
+  1974→                <dt className="text-xs text-muted-foreground">Billing period</dt>
+  1975→                <dd className="mt-0.5 font-medium tabular-nums">
+  1976→                  {selected.periodStart
+  1977→                    ? `${fmtDate(selected.periodStart)} – ${fmtDate(selected.periodEnd)}`
+  1978→                    : "—"}
+  1979→                </dd>
+  1980→              </div>
+  1981→              <div>
+  1982→                <dt className="text-xs text-muted-foreground">Gateway</dt>
+  1983→                <dd className="mt-0.5">{selected.gateway ? <GatewayBadge gateway={selected.gateway} /> : "—"}</dd>
+  1984→              </div>
+  1985→              <div className="col-span-2">
+  1986→                <dt className="text-xs text-muted-foreground">Billed to</dt>
+  1987→                <dd className="mt-0.5 font-medium">{user.email}</dd>
+  1988→              </div>
+  1989→            </dl>
+  1990→          )}
+  1991→          <DialogFooter>
+  1992→            <Button variant="outline" className="rounded-xl" onClick={() => downloadReceipt(selected, user.email)}>
+  1993→              <FileDown className="h-4 w-4" aria-hidden /> Download receipt
+  1994→            </Button>
+  1995→            <Button onClick={() => setSelected(null)}>Close</Button>
+  1996→          </DialogFooter>
+  1997→        </DialogContent>
+  1998→      </Dialog>
+  1999→
+  2000→    </motion.section>
+
+[showing lines 1-2000 of 2604; use offset=2001 with limit to continue reading]

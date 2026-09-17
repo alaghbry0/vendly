@@ -1,0 +1,552 @@
+   401→   401→          </div>
+   402→   402→        </div>
+   403→   403→
+   404→   404→        {/* ---------- Tab content ---------- */}
+   405→   405→        <div className="min-w-0">
+   406→   406→          <AnimatePresence mode="wait">
+   407→   407→            <motion.div
+   408→   408→              key={tab}
+   409→   409→              initial={{ opacity: 0, y: 10 }}
+   410→   410→              animate={{ opacity: 1, y: 0 }}
+   411→   411→              exit={{ opacity: 0, y: -8 }}
+   412→   412→              transition={{ duration: 0.22, ease: "easeOut" }}
+   413→   413→            >
+   414→   414→              {tab === "overview" && <OverviewTab user={user} data={data} goToTab={goToTab} />}
+   415→   415→              {tab === "subscriptions" && (
+   416→   416→                <SubscriptionsTab data={data} reload={refresh} goToInvoices={goToInvoices} />
+   417→   417→              )}
+   418→   418→              {tab === "licenses" && <LicensesTab licenses={data.licenses} reload={refresh} />}
+   419→   419→              {tab === "downloads" && <DownloadsTab subs={data.subs} />}
+   420→   420→              {tab === "invoices" && (
+   421→   421→                <InvoicesTab
+   422→   422→                  invoices={data.invoices}
+   423→   423→                  subs={data.subs}
+   424→   424→                  subFilter={invoiceSubFilter}
+   425→   425→                  onSubFilterChange={setInvoiceSubFilter}
+   426→   426→                  user={user}
+   427→   427→                />
+   428→   428→              )}
+   429→   429→              {tab === "payment-methods" && (
+   430→   430→                <PaymentMethodsTab methods={data.methods} subs={data.subs} reload={refresh} />
+   431→   431→              )}
+   432→   432→              {tab === "settings" && <SettingsTab user={user} />}
+   433→   433→            </motion.div>
+   434→   434→          </AnimatePresence>
+   435→   435→        </div>
+   436→   436→      </div>
+   437→   437→    </motion.div>
+   438→   438→  );
+   439→   439→}
+   440→   440→
+   441→   441→function PortalSkeleton() {
+   442→   442→  return (
+   443→   443→    <div className="container mx-auto max-w-7xl px-4 py-8 sm:py-10" aria-busy="true" aria-label="Loading portal">
+   444→   444→      <div className="grid gap-8 lg:grid-cols-[14rem_1fr]">
+   445→   445→        <div className="hidden w-56 space-y-2 lg:block">
+   446→   446→          <Skeleton className="h-16 rounded-2xl" />
+   447→   447→          {PORTAL_TABS.map((t) => (
+   448→   448→            <Skeleton key={t.key} className="h-11 rounded-xl" />
+   449→   449→          ))}
+   450→   450→        </div>
+   451→   451→        <div className="space-y-6">
+   452→   452→          <Skeleton className="h-24 rounded-2xl" />
+   453→   453→          <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+   454→   454→            {[0, 1, 2, 3].map((i) => (
+   455→   455→              <Skeleton key={i} className="h-28 rounded-2xl" />
+   456→   456→            ))}
+   457→   457→          </div>
+   458→   458→          <Skeleton className="h-72 rounded-2xl" />
+   459→   459→          <Skeleton className="h-48 rounded-2xl" />
+   460→   460→        </div>
+   461→   461→      </div>
+   462→   462→    </div>
+   463→   463→  );
+   464→   464→}
+   465→   465→
+   466→   466→// ============================================================================
+   467→   467→// Tab: Overview
+   468→   468→// ============================================================================
+   469→   469→
+   470→   470→function OverviewTab({
+   471→   471→  user,
+   472→   472→  data,
+   473→   473→  goToTab,
+   474→   474→}: {
+   475→   475→  user: SessionUser;
+   476→   476→  data: PortalData;
+   477→   477→  goToTab: (t: PortalTab) => void;
+   478→   478→}) {
+   479→   479→  const { subs, invoices, grants } = data;
+   480→   480→  const activeSubs = subs.filter((s) => s.status === "ACTIVE");
+   481→   481→  const trialSubs = subs.filter((s) => s.status === "TRIALING");
+   482→   482→  const monthlySpend = activeSubs.reduce((sum, s) => sum + monthlyCents(s.plan), 0);
+   483→   483→  const paidInvoices = invoices.filter((i) => i.status === "PAID");
+   484→   484→  const lifetimePaid = paidInvoices.reduce((sum, i) => sum + i.amountCents, 0);
+   485→   485→  const activeGrants = grants.filter((g) => g.status === "SYNCED" && !g.revokedAt);
+   486→   486→  const topSubs = sortSubs(subs).slice(0, 4);
+   487→   487→  const recentInvoices = invoices.slice(0, 5);
+   488→   488→  const firstName = (user.name || "there").split(" ")[0];
+   489→   489→
+   490→   490→  return (
+   491→   491→    <motion.section variants={stagger} initial="hidden" animate="show" className="space-y-6">
+   492→   492→      {/* Welcome header */}
+   493→   493→      <motion.header
+   494→   494→        variants={fadeUp}
+   495→   495→        className="flex flex-wrap items-center gap-4 rounded-2xl border bg-card p-5 shadow-sm sm:p-6"
+   496→   496→      >
+   497→   497→        <UserAvatar name={user.name} color={user.avatarColor} size="lg" />
+   498→   498→        <div className="min-w-0">
+   499→   499→          <h1 className="text-xl font-bold tracking-tight sm:text-2xl">Welcome back, {firstName}</h1>
+   500→   500→          <p className="mt-0.5 text-sm text-muted-foreground">
+   501→   501→            Member since {fmtDate(user.createdAt)} · {user.email}
+   502→   502→          </p>
+   503→   503→        </div>
+   504→   504→        <Button size="sm" className="ml-auto rounded-xl" onClick={() => goToTab("subscriptions")}>
+   505→   505→          Manage billing <ChevronRight className="h-4 w-4" />
+   506→   506→        </Button>
+   507→   507→      </motion.header>
+   508→   508→
+   509→   509→      {/* Stats */}
+   510→   510→      <motion.div variants={fadeUp} className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+   511→   511→        <StatCard
+   512→   512→          label="Active memberships"
+   513→   513→          value={String(activeSubs.length + trialSubs.length)}
+   514→   514→          sub={`${activeSubs.length} paid · ${trialSubs.length} trialing`}
+   515→   515→          icon={BadgeCheck}
+   516→   516→        />
+   517→   517→        <StatCard
+   518→   518→          label="Monthly spend"
+   519→   519→          value={fmtMoney(monthlySpend)}
+   520→   520→          sub={activeSubs.length ? `across ${activeSubs.length} membership${activeSubs.length === 1 ? "" : "s"}` : "no recurring charges"}
+   521→   521→          icon={Wallet}
+   522→   522→        />
+   523→   523→        <StatCard
+   524→   524→          label="Lifetime paid"
+   525→   525→          value={fmtMoney(lifetimePaid)}
+   526→   526→          sub={`${paidInvoices.length} paid invoice${paidInvoices.length === 1 ? "" : "s"}`}
+   527→   527→          icon={ReceiptText}
+   528→   528→        />
+   529→   529→        <StatCard
+   530→   530→          label="Trial running"
+   531→   531→          value={trialSubs.length ? String(trialSubs.length) : "—"}
+   532→   532→          sub={trialSubs.length ? `first charge ${fmtDate(trialSubs[0].trialEndsAt)}` : "no trials running"}
+   533→   533→          icon={Timer}
+   534→   534→        />
+   535→   535→      </motion.div>
+   536→   536→
+   537→   537→      <div className="grid gap-6 lg:grid-cols-5">
+   538→   538→        {/* Memberships */}
+   539→   539→        <motion.div variants={fadeUp} className="overflow-hidden lg:col-span-3">
+   540→   540→          <Panel className="h-full">
+   541→   541→            <div className="flex items-center justify-between gap-3 border-b p-5">
+   542→   542→              <div>
+   543→   543→                <h2 className="font-bold tracking-tight">Your memberships</h2>
+   544→   544→                <p className="text-xs text-muted-foreground">{subs.length} total</p>
+   545→   545→              </div>
+   546→   546→              <Button variant="ghost" size="sm" onClick={() => goToTab("subscriptions")}>
+   547→   547→                View all <ChevronRight className="h-4 w-4" />
+   548→   548→              </Button>
+   549→   549→            </div>
+   550→   550→            {topSubs.length === 0 ? (
+   551→   551→              <div className="p-5">
+   552→   552→                <EmptyState
+   553→   553→                  icon={Repeat}
+   554→   554→                  title="No memberships yet"
+   555→   555→                  description="Browse the marketplace to join your first community."
+   556→   556→                  action={
+   557→   557→                    <Button className="rounded-xl" onClick={() => goToTab("subscriptions")}>
+   558→   558→                      <Store className="h-4 w-4" /> Browse marketplace
+   559→   559→                    </Button>
+   560→   560→                  }
+   561→   561→                />
+   562→   562→              </div>
+   563→   563→            ) : (
+   564→   564→              <ul className="divide-y">
+   565→   565→                {topSubs.map((s) => (
+   566→   566→                  <li key={s.id} className="flex items-center gap-3 p-4 sm:px-5">
+   567→   567→                    <ProductCover
+   568→   568→                      theme={s.product.coverTheme}
+   569→   569→                      category={s.product.category}
+   570→   570→                      title={s.product.title}
+   571→   571→                      className="h-11 w-11 shrink-0 rounded-xl"
+   572→   572→                      iconClassName="h-14 w-14"
+   573→   573→                    />
+   574→   574→                    <div className="min-w-0 flex-1">
+   575→   575→                      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+   576→   576→                        <p className="truncate text-sm font-semibold">{s.product.title}</p>
+   577→   577→                        <StatusBadge status={s.status} />
+   578→   578→                      </div>
+   579→   579→                      <p className="mt-0.5 truncate text-xs text-muted-foreground">
+   580→   580→                        {s.plan.name} · {nextChargeLine(s)}
+   581→   581→                      </p>
+   582→   582→                    </div>
+   583→   583→                    <Button
+   584→   584→                      variant="outline"
+   585→   585→                      size="sm"
+   586→   586→                      className="shrink-0 rounded-xl"
+   587→   587→                      onClick={() => goToTab("subscriptions")}
+   588→   588→                      aria-label={`Manage ${s.product.title} membership`}
+   589→   589→                    >
+   590→   590→                      Manage
+   591→   591→                    </Button>
+   592→   592→                  </li>
+   593→   593→                ))}
+   594→   594→              </ul>
+   595→   595→            )}
+   596→   596→          </Panel>
+   597→   597→        </motion.div>
+   598→   598→
+   599→   599→        {/* Access & roles */}
+   600→   600→        <motion.div variants={fadeUp} className="lg:col-span-2">
+   601→   601→          <Panel className="h-full p-5">
+   602→   602→            <h2 className="font-bold tracking-tight">Access &amp; roles</h2>
+   603→   603→            <p className="mt-0.5 text-xs text-muted-foreground">
+   604→   604→              Community roles synced automatically by creator bots
+   605→   605→            </p>
+   606→   606→            {activeGrants.length === 0 ? (
+   607→   607→              <p className="mt-6 rounded-xl border border-dashed p-4 text-sm text-muted-foreground">
+   608→   608→                No active community roles yet. They appear here when you join a product with Discord or
+   609→   609→                Telegram access.
+   610→   610→              </p>
+   611→   611→            ) : (
+   612→   612→              <ul className="mt-4 space-y-2.5">
+   613→   613→                {activeGrants.map((g) => (
+   614→   614→                  <li
+   615→   615→                    key={g.id}
+   616→   616→                    className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-xl border bg-muted/30 px-3 py-2.5"
+   617→   617→                  >
+   618→   618→                    <ProviderBadge provider={g.provider} />
+   619→   619→                    {g.role && <span className="text-sm font-medium">{g.role}</span>}
+   620→   620→                    <span className="min-w-0 truncate text-xs text-muted-foreground">{g.product.title}</span>
+   621→   621→                    <span className="ml-auto flex shrink-0 items-center gap-1 text-xs font-medium text-emerald-600 dark:text-emerald-400">
+   622→   622→                      <CircleCheck className="h-3.5 w-3.5" aria-hidden />
+   623→   623→                      {g.status.charAt(0) + g.status.slice(1).toLowerCase()}
+   624→   624→                    </span>
+   625→   625→                  </li>
+   626→   626→                ))}
+   627→   627→              </ul>
+   628→   628→            )}
+   629→   629→          </Panel>
+   630→   630→        </motion.div>
+   631→   631→      </div>
+   632→   632→
+   633→   633→      {/* Recent invoices */}
+   634→   634→      <motion.div variants={fadeUp}>
+   635→   635→        <Panel className="overflow-hidden">
+   636→   636→          <div className="flex items-center justify-between gap-3 border-b p-5">
+   637→   637→            <div>
+   638→   638→              <h2 className="font-bold tracking-tight">Recent invoices</h2>
+   639→   639→              <p className="text-xs text-muted-foreground">Last {recentInvoices.length} of {invoices.length}</p>
+   640→   640→            </div>
+   641→   641→            <Button variant="ghost" size="sm" onClick={() => goToTab("invoices")}>
+   642→   642→              View all <ChevronRight className="h-4 w-4" />
+   643→   643→            </Button>
+   644→   644→          </div>
+   645→   645→          {recentInvoices.length === 0 ? (
+   646→   646→            <p className="p-5 text-sm text-muted-foreground">No invoices yet.</p>
+   647→   647→          ) : (
+   648→   648→            <ul className="divide-y">
+   649→   649→              {recentInvoices.map((inv) => (
+   650→   650→                <li key={inv.id} className="flex items-center gap-3 px-5 py-3.5">
+   651→   651→                  <div className="min-w-0 flex-1">
+   652→   652→                    <p className="truncate text-sm font-medium">{inv.product?.title || "Vendly"}</p>
+   653→   653→                    <p className="truncate font-mono text-xs text-muted-foreground">
+   654→   654→                      {inv.number} · {fmtDate(inv.createdAt)}
+   655→   655→                    </p>
+   656→   656→                  </div>
+   657→   657→                  <span className="shrink-0 text-sm font-semibold tabular-nums">
+   658→   658→                    {fmtMoney(inv.amountCents, { cents: true })}
+   659→   659→                  </span>
+   660→   660→                  <StatusBadge status={inv.status} />
+   661→   661→                </li>
+   662→   662→              ))}
+   663→   663→            </ul>
+   664→   664→          )}
+   665→   665→        </Panel>
+   666→   666→      </motion.div>
+   667→   667→    </motion.section>
+   668→   668→  );
+   669→   669→}
+   670→   670→
+   671→   671→// ============================================================================
+   672→   672→// Tab: Subscriptions
+   673→   673→// ============================================================================
+   674→   674→
+   675→   675→interface SubCardProps {
+   676→   676→  sub: SubscriptionDTO;
+   677→   677→  methods: PaymentMethodDTO[];
+   678→   678→  busy: boolean;
+   679→   679→  onAction: (sub: SubscriptionDTO, action: string, extra?: Record<string, unknown>) => Promise<boolean>;
+   680→   680→  onChangePayment: (sub: SubscriptionDTO, pmId: string) => Promise<void>;
+   681→   681→  onOpenTier: () => void;
+   682→   682→  onCancel: (mode: "period_end" | "now") => void;
+   683→   683→  onInvoices: () => void;
+   684→   684→}
+   685→   685→
+   686→   686→function SubscriptionCard({
+   687→   687→  sub,
+   688→   688→  methods,
+   689→   689→  busy,
+   690→   690→  onAction,
+   691→   691→  onChangePayment,
+   692→   692→  onOpenTier,
+   693→   693→  onCancel,
+   694→   694→  onInvoices,
+   695→   695→}: SubCardProps) {
+   696→   696→  const navigate = useAppStore((s) => s.navigate);
+   697→   697→  const isActive = ACTIVE_STATUSES.includes(sub.status);
+   698→   698→  const isTrial = sub.status === "TRIALING";
+   699→   699→  const isCanceled = sub.status === "CANCELED";
+   700→   700→  const isPastDue = sub.status === "PAST_DUE";
+   701→   701→  const pm = sub.paymentMethod;
+   702→   702→
+   703→   703→  return (
+   704→   704→    <article
+   705→   705→      className={cn(
+   706→   706→        "overflow-hidden rounded-2xl border bg-card shadow-sm transition-opacity",
+   707→   707→        isCanceled && "bg-muted/40 opacity-75 shadow-none",
+   708→   708→        isPastDue && "border-destructive/35"
+   709→   709→      )}
+   710→   710→    >
+   711→   711→      <div className="flex flex-col gap-5 p-5 sm:p-6">
+   712→   712→        {/* Header */}
+   713→   713→        <div className="flex flex-wrap items-start gap-4">
+   714→   714→          <ProductCover
+   715→   715→            theme={sub.product.coverTheme}
+   716→   716→            category={sub.product.category}
+   717→   717→            title={sub.product.title}
+   718→   718→            className="h-14 w-14 shrink-0 rounded-xl"
+   719→   719→            iconClassName="h-20 w-20"
+   720→   720→          />
+   721→   721→          <div className="min-w-0 flex-1">
+   722→   722→            <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+   723→   723→              <h3 className="text-base font-bold tracking-tight">{sub.product.title}</h3>
+   724→   724→              <StatusBadge status={sub.status} />
+   725→   725→              {isTrial && sub.trialEndsAt && (
+   726→   726→                <Badge
+   727→   727→                  variant="outline"
+   728→   728→                  className="gap-1 border-teal-500/25 bg-teal-500/10 text-teal-700 dark:text-teal-400"
+   729→   729→                >
+   730→   730→                  <Timer className="h-3 w-3" aria-hidden />
+   731→   731→                  Trial: {timeUntil(sub.trialEndsAt)} left
+   732→   732→                </Badge>
+   733→   733→              )}
+   734→   734→            </div>
+   735→   735→            <p className="mt-1 text-sm text-muted-foreground">
+   736→   736→              by {sub.product.creator.name || "Independent creator"} · {sub.plan.name} plan · member since{" "}
+   737→   737→              {fmtDate(sub.createdAt)}
+   738→   738→            </p>
+   739→   739→            <div className="mt-2 flex flex-wrap items-center gap-1.5">
+   740→   740→              <GatewayBadge gateway={sub.gateway} />
+   741→   741→              {sub.product.accessType.map((a) => (
+   742→   742→                <ProviderBadge key={a} provider={a} />
+   743→   743→              ))}
+   744→   744→            </div>
+   745→   745→          </div>
+   746→   746→          <div className="text-left sm:text-right">
+   747→   747→            <p className="text-xl font-bold tabular-nums tracking-tight">{fmtMoney(sub.plan.priceCents)}</p>
+   748→   748→            <p className="text-xs text-muted-foreground">per {sub.plan.interval}</p>
+   749→   749→          </div>
+   750→   750→        </div>
+   751→   751→
+   752→   752→        {/* Period + payment method */}
+   753→   753→        {isActive && (
+   754→   754→          <div className="grid gap-3 sm:grid-cols-2">
+   755→   755→            <div className="space-y-2.5 rounded-xl border bg-muted/30 p-4">
+   756→   756→              <div className="flex items-center gap-2 text-sm">
+   757→   757→                <CalendarRange className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+   758→   758→                <span className="text-muted-foreground">Current period</span>
+   759→   759→                <span className="ml-auto font-medium tabular-nums">
+   760→   760→                  {fmtDate(sub.currentPeriodStart)} → {fmtDate(sub.currentPeriodEnd)}
+   761→   761→                </span>
+   762→   762→              </div>
+   763→   763→              {isTrial ? (
+   764→   764→                <div className="flex items-center gap-2 text-sm">
+   765→   765→                  <Timer className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+   766→   766→                  <span className="text-muted-foreground">First charge</span>
+   767→   767→                  <span className="ml-auto font-medium tabular-nums">
+   768→   768→                    {fmtMoney(sub.plan.priceCents)} · {fmtDate(sub.trialEndsAt)}
+   769→   769→                  </span>
+   770→   770→                </div>
+   771→   771→              ) : (
+   772→   772→                <div className="flex items-center gap-2 text-sm">
+   773→   773→                  <CalendarClock className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+   774→   774→                  <span className="text-muted-foreground">Next charge</span>
+   775→   775→                  <span className="ml-auto font-medium tabular-nums">
+   776→   776→                    {fmtMoney(sub.plan.priceCents)} on {fmtDate(sub.currentPeriodEnd)}
+   777→   777→                  </span>
+   778→   778→                </div>
+   779→   779→              )}
+   780→   780→            </div>
+   781→   781→
+   782→   782→            <div className="rounded-xl border bg-muted/30 p-4">
+   783→   783→              <div className="flex items-center justify-between gap-2">
+   784→   784→                <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+   785→   785→                  <CreditCard className="h-3.5 w-3.5" aria-hidden /> Payment method
+   786→   786→                </p>
+   787→   787→                {isPastDue && <span className="text-xs font-semibold text-destructive">Action needed</span>}
+   788→   788→              </div>
+   789→   789→              <div className="mt-2.5 flex flex-wrap items-center gap-2">
+   790→   790→                <span className="text-sm font-medium">{pm ? pmShort(pm) : "No method on file"}</span>
+   791→   791→                {methods.length > 0 && (
+   792→   792→                  <Select value={pm?.id ?? ""} onValueChange={(v) => onChangePayment(sub, v)}>
+   793→   793→                    <SelectTrigger
+   794→   794→                      size="sm"
+   795→   795→                      className="ml-auto h-8 rounded-lg text-xs"
+   796→   796→                      aria-label={`Change payment method for ${sub.product.title}`}
+   797→   797→                      disabled={busy}
+   798→   798→                    >
+   799→   799→                      <SelectValue placeholder="Select method" />
+   800→   800→                    </SelectTrigger>
+   801→   801→                    <SelectContent>
+   802→   802→                      {methods.map((m) => (
+   803→   803→                        <SelectItem key={m.id} value={m.id}>
+   804→   804→                          {pmShort(m)}
+   805→   805→                          {m.isDefault ? " · default" : ""}
+   806→   806→                        </SelectItem>
+   807→   807→                      ))}
+   808→   808→                    </SelectContent>
+   809→   809→                  </Select>
+   810→   810→                )}
+   811→   811→              </div>
+   812→   812→              <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground">
+   813→   813→                {isPastDue
+   814→   814→                  ? "Switch to a working method — the next billing run retries this charge automatically."
+   815→   815→                  : "Changing the method applies to future renewals."}
+   816→   816→              </p>
+   817→   817→            </div>
+   818→   818→          </div>
+   819→   819→        )}
+   820→   820→
+   821→   821→        {/* Banners */}
+   822→   822→        {sub.cancelAtPeriodEnd && isActive && (
+   823→   823→          <div className="flex flex-wrap items-center gap-3 rounded-xl border border-amber-500/30 bg-amber-500/10 p-4 text-sm">
+   824→   824→            <TriangleAlert className="h-4.5 w-4.5 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden />
+   825→   825→            <p className="min-w-0 flex-1 text-amber-800 dark:text-amber-300">
+   826→   826→              <span className="font-semibold">Cancels at period end.</span> Access continues until{" "}
+   827→   827→              {fmtDate(sub.currentPeriodEnd)}.
+   828→   828→            </p>
+   829→   829→            <Button
+   830→   830→              size="sm"
+   831→   831→              variant="outline"
+   832→   832→              className="rounded-lg border-amber-500/40 bg-transparent text-amber-800 hover:bg-amber-500/15 dark:text-amber-300"
+   833→   833→              disabled={busy}
+   834→   834→              onClick={() => onAction(sub, "resume")}
+   835→   835→            >
+   836→   836→              <RotateCcw className="h-3.5 w-3.5" /> Resume
+   837→   837→            </Button>
+   838→   838→          </div>
+   839→   839→        )}
+   840→   840→        {isPastDue && (
+   841→   841→          <div className="flex flex-wrap items-center gap-3 rounded-xl border border-destructive/30 bg-destructive/10 p-4 text-sm">
+   842→   842→            <TriangleAlert className="h-4.5 w-4.5 shrink-0 text-destructive" aria-hidden />
+   843→   843→            <p className="min-w-0 flex-1 text-destructive">
+   844→   844→              <span className="font-semibold">Payment failed.</span> {sub.dunningAttempts} dunning attempt
+   845→   845→              {sub.dunningAttempts === 1 ? "" : "s"} so far — update the payment method above to retry.
+   846→   846→            </p>
+   847→   847→          </div>
+   848→   848→        )}
+   849→   849→        {isCanceled && (
+   850→   850→          <p className="flex items-center gap-2 rounded-xl border bg-muted/40 p-3 text-sm text-muted-foreground">
+   851→   851→            <CalendarX className="h-4 w-4 shrink-0" aria-hidden />
+   852→   852→            Ended {fmtDate(sub.currentPeriodEnd)} — access and licenses were revoked.
+   853→   853→          </p>
+   854→   854→        )}
+   855→   855→
+   856→   856→        {/* Footer */}
+   857→   857→        <div className="flex flex-wrap items-center justify-between gap-3 border-t pt-4">
+   858→   858→          <p className="text-xs text-muted-foreground">
+   859→   859→            {sub.invoiceCount} invoice{sub.invoiceCount === 1 ? "" : "s"} ·{" "}
+   860→   860→            <span className="font-medium tabular-nums">{fmtMoney(sub.totalPaidCents)}</span> lifetime on this
+   861→   861→            membership
+   862→   862→          </p>
+   863→   863→          {isCanceled ? (
+   864→   864→            <Button
+   865→   865→              size="sm"
+   866→   866→              className="rounded-xl"
+   867→   867→              onClick={() => navigate("product", { productId: sub.product.id })}
+   868→   868→            >
+   869→   869→              <Store className="h-4 w-4" /> Re-subscribe
+   870→   870→            </Button>
+   871→   871→          ) : (
+   872→   872→            <DropdownMenu>
+   873→   873→              <DropdownMenuTrigger asChild>
+   874→   874→                <Button variant="outline" size="sm" className="rounded-xl" disabled={busy}>
+   875→   875→                  {busy ? (
+   876→   876→                    <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+   877→   877→                  ) : (
+   878→   878→                    <Settings className="h-4 w-4" aria-hidden />
+   879→   879→                  )}
+   880→   880→                  Manage
+   881→   881→                  <ChevronDown className="h-3.5 w-3.5 opacity-60" aria-hidden />
+   882→   882→                </Button>
+   883→   883→              </DropdownMenuTrigger>
+   884→   884→              <DropdownMenuContent align="end" className="w-56">
+   885→   885→                <DropdownMenuItem className="gap-2" onClick={onOpenTier}>
+   886→   886→                  <ArrowLeftRight className="h-4 w-4" aria-hidden /> Change tier…
+   887→   887→                </DropdownMenuItem>
+   888→   888→                <DropdownMenuItem className="gap-2" onClick={onInvoices}>
+   889→   889→                  <ReceiptText className="h-4 w-4" aria-hidden /> View invoices
+   890→   890→                </DropdownMenuItem>
+   891→   891→                {sub.cancelAtPeriodEnd ? (
+   892→   892→                  <DropdownMenuItem className="gap-2" onClick={() => onAction(sub, "resume")}>
+   893→   893→                    <RotateCcw className="h-4 w-4" aria-hidden /> Resume subscription
+   894→   894→                  </DropdownMenuItem>
+   895→   895→                ) : (
+   896→   896→                  <DropdownMenuItem className="gap-2" onClick={() => onCancel("period_end")}>
+   897→   897→                    <CalendarX className="h-4 w-4" aria-hidden /> Cancel at period end…
+   898→   898→                  </DropdownMenuItem>
+   899→   899→                )}
+   900→   900→                <DropdownMenuSeparator />
+   901→   901→                <DropdownMenuItem className="gap-2 text-destructive focus:text-destructive" onClick={() => onCancel("now")}>
+   902→   902→                  <Ban className="h-4 w-4" aria-hidden /> Cancel immediately…
+   903→   903→                </DropdownMenuItem>
+   904→   904→              </DropdownMenuContent>
+   905→   905→            </DropdownMenu>
+   906→   906→          )}
+   907→   907→        </div>
+   908→   908→      </div>
+   909→   909→    </article>
+   910→   910→  );
+   911→   911→}
+   912→   912→
+   913→   913→function SubscriptionsTab({
+   914→   914→  data,
+   915→   915→  reload,
+   916→   916→  goToInvoices,
+   917→   917→}: {
+   918→   918→  data: PortalData;
+   919→   919→  reload: () => void;
+   920→   920→  goToInvoices: (subId: string) => void;
+   921→   921→}) {
+   922→   922→  const { toast } = useToast();
+   923→   923→  const navigate = useAppStore((s) => s.navigate);
+   924→   924→  const { subs, methods } = data;
+   925→   925→
+   926→   926→  const [busyKey, setBusyKey] = useState<string | null>(null);
+   927→   927→  const [tierSub, setTierSub] = useState<SubscriptionDTO | null>(null);
+   928→   928→  const [tierPlans, setTierPlans] = useState<PlanDTO[] | null>(null);
+   929→   929→  const [tierPlanId, setTierPlanId] = useState<string | null>(null);
+   930→   930→  const [cancelMode, setCancelMode] = useState<{ sub: SubscriptionDTO; mode: "period_end" | "now" } | null>(null);
+   931→   931→  const plansCache = useRef<Record<string, PlanDTO[]>>({});
+   932→   932→
+   933→   933→  // Invalidate plan cache whenever subscription data refreshes.
+   934→   934→  useEffect(() => {
+   935→   935→    plansCache.current = {};
+   936→   936→  }, [subs]);
+   937→   937→
+   938→   938→  function openTier(sub: SubscriptionDTO) {
+   939→   939→    setTierPlanId(null);
+   940→   940→    setTierPlans(plansCache.current[sub.product.id] ?? null);
+   941→   941→    setTierSub(sub);
+   942→   942→  }
+   943→   943→
+   944→   944→  function closeTier() {
+   945→   945→    setTierSub(null);
+   946→   946→    setTierPlans(null);
+   947→   947→    setTierPlanId(null);
+   948→   948→  }
+   949→   949→
+   950→   950→  // Fetch plans for the "Change tier" dialog when a cache miss was staged.
+
+[showing lines 401-950 of 2002; use offset=951 with limit to continue reading]

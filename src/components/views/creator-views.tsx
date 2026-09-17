@@ -1,0 +1,3173 @@
+"use client";
+
+// CREATOR ANALYTICS DASHBOARD — "Creator Studio".
+// Owned by Task 2-c. Rendered when store.view === "creator".
+// Internal tab system (synced from params.creatorTab): overview | products |
+// subscribers | orders | webhooks | time (billing time machine).
+
+import { useEffect, useMemo, useRef, useState, type ComponentProps, type FormEvent } from "react";
+import { AnimatePresence, motion, type Variants } from "framer-motion";
+import {
+  Area,
+  AreaChart,
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Cell,
+  ComposedChart,
+  Legend,
+  Line,
+  Pie,
+  PieChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
+import { useAppStore } from "@/lib/store";
+import { api } from "@/lib/api";
+import type {
+  AnalyticsDTO,
+  BillingRunResult,
+  PlanDTO,
+  ProductCardDTO,
+  ProductDetailDTO,
+  SessionUser,
+  WebhookDeliveryDTO,
+  WebhookEndpointDTO,
+} from "@/lib/types";
+import { CATEGORIES, WEBHOOK_EVENTS } from "@/lib/types";
+import { fmtCompact, fmtDate, fmtDateTime, fmtMoney } from "@/lib/format";
+import {
+  CopyButton,
+  EmptyState,
+  GatewayBadge,
+  ProductCover,
+  ProviderBadge,
+  SectionHeader,
+  StatCard,
+  StatusBadge,
+  UserAvatar,
+} from "@/components/shared";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Progress } from "@/components/ui/progress";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Slider } from "@/components/ui/slider";
+import { Switch } from "@/components/ui/switch";
+import { TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Textarea } from "@/components/ui/textarea";
+import { useToast } from "@/hooks/use-toast";
+import { cn } from "@/lib/utils";
+import {
+  Activity,
+  ArrowRight,
+  Ban,
+  Bitcoin,
+  CalendarRange,
+  Check,
+  ChevronDown,
+  ChevronRight,
+  CreditCard,
+  DollarSign,
+  Eye,
+  EyeOff,
+  FastForward,
+  FlaskConical,
+  KeyRound,
+  LayoutDashboard,
+  Loader2,
+  MoreHorizontal,
+  Package,
+  PackagePlus,
+  Pencil,
+  Pause,
+  Play,
+  Plus,
+  Receipt,
+  ReceiptText,
+  RefreshCw,
+  RotateCcw,
+  Search,
+  Send,
+  ShieldCheck,
+  Sparkles,
+  Star,
+  Store,
+  Terminal,
+  Timer,
+  Trash2,
+  TrendingUp,
+  TriangleAlert,
+  UserMinus,
+  UserPlus,
+  Users,
+  Wallet,
+  Webhook,
+  XCircle,
+  Zap,
+  type LucideIcon,
+} from "lucide-react";
+
+// ============================================================================
+// Tabs, constants & helpers
+// ============================================================================
+
+type CreatorTab = "overview" | "products" | "subscribers" | "orders" | "webhooks" | "time";
+
+const CREATOR_TABS: { key: CreatorTab; label: string; icon: LucideIcon }[] = [
+  { key: "overview", label: "Overview", icon: LayoutDashboard },
+  { key: "products", label: "Products", icon: Package },
+  { key: "subscribers", label: "Subscribers", icon: Users },
+  { key: "orders", label: "Orders", icon: ReceiptText },
+  { key: "webhooks", label: "Webhooks", icon: Webhook },
+  { key: "time", label: "Time machine", icon: Timer },
+];
+
+const TAB_KEYS = CREATOR_TABS.map((t) => t.key);
+
+function isCreatorTab(v: unknown): v is CreatorTab {
+  return typeof v === "string" && (TAB_KEYS as string[]).includes(v);
+}
+
+const stagger: Variants = { hidden: {}, show: { transition: { staggerChildren: 0.06 } } };
+const fadeUp: Variants = {
+  hidden: { opacity: 0, y: 10 },
+  show: { opacity: 1, y: 0, transition: { duration: 0.28, ease: "easeOut" } },
+};
+
+/** Chart palette — emerald-first, no blue/indigo primaries. */
+const CHART = {
+  emerald: "#10b981",
+  teal: "#14b8a6",
+  rose: "#f43f5e",
+  amber: "#f59e0b",
+  violet: "#8b5cf6",
+};
+
+/** Gateway colors for the revenue-mix donut. */
+const GATEWAY_CHART_COLORS: Record<string, string> = {
+  STRIPE: CHART.violet,
+  PAYPAL: CHART.amber,
+  CRYPTO: CHART.emerald,
+};
+const GATEWAY_LABELS: Record<string, string> = {
+  STRIPE: "Card · Stripe",
+  PAYPAL: "PayPal",
+  CRYPTO: "Crypto",
+};
+
+/** Sim-clock aware relative time (the browser clock may lag simulated time). */
+function relTime(iso: string, nowIso: string): string {
+  const diff = new Date(nowIso).getTime() - new Date(iso).getTime();
+  if (diff < 0) {
+    const d = -diff;
+    const days = Math.floor(d / 86400000);
+    if (days >= 1) return `in ${days}d`;
+    const hours = Math.floor(d / 3600000);
+    if (hours >= 1) return `in ${hours}h`;
+    return `in ${Math.max(1, Math.floor(d / 60000))}m`;
+  }
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 30) return `${days}d ago`;
+  return fmtDate(iso);
+}
+
+/** "2026-09-17" → "Sep 17" for chart axes. */
+function fmtAxisDate(dateStr: string): string {
+  const d = new Date(`${dateStr}T00:00:00`);
+  return Number.isNaN(d.getTime()) ? dateStr : d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
+
+/** Chart series store dollars — format without the cents-to-dollars helper. */
+function fmtDollars(v: number): string {
+  return `$${v.toLocaleString("en-US", { maximumFractionDigits: 2 })}`;
+}
+
+function shortWallet(addr: string): string {
+  return addr.length > 14 ? `${addr.slice(0, 8)}…${addr.slice(-4)}` : addr;
+}
+
+interface SubPaymentMethod {
+  type: string;
+  brand: string | null;
+  last4: string | null;
+  email: string | null;
+  walletAddress: string | null;
+}
+
+function pmLine(pm: SubPaymentMethod | null): string {
+  if (!pm) return "No saved method";
+  if (pm.type === "CARD") return `${pm.brand || "Card"} ••••${pm.last4 || "····"}`;
+  if (pm.type === "PAYPAL") return pm.email || "PayPal account";
+  return shortWallet(pm.walletAddress || "");
+}
+
+/** Card-style panel used across the studio (full control over padding). */
+function Panel({ className, children, ...props }: ComponentProps<"div">) {
+  return (
+    <div className={cn("rounded-2xl border bg-card shadow-sm", className)} {...props}>
+      {children}
+    </div>
+  );
+}
+
+/** Thin custom scrollbar styling for scroll containers. */
+const SCROLL_THIN =
+  "[scrollbar-width:thin] [scrollbar-color:var(--border)_transparent] [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-border";
+
+function Stars({ rating, className }: { rating: number; className?: string }) {
+  return (
+    <span className={cn("inline-flex items-center gap-0.5", className)} aria-label={`Rated ${rating.toFixed(1)} out of 5`}>
+      {[1, 2, 3, 4, 5].map((i) => (
+        <Star
+          key={i}
+          className={cn("h-3 w-3", i <= Math.round(rating) ? "fill-amber-400 text-amber-400" : "text-muted-foreground/30")}
+        />
+      ))}
+    </span>
+  );
+}
+
+function categoryLabel(key: string): string {
+  return CATEGORIES.find((c) => c.key === key)?.label || key;
+}
+
+function LoadError({ message }: { message: string }) {
+  const refresh = useAppStore((s) => s.refresh);
+  return (
+    <EmptyState
+      icon={TriangleAlert}
+      title="Couldn't load this section"
+      description={message}
+      action={
+        <Button variant="outline" onClick={() => refresh()}>
+          <RotateCcw className="h-4 w-4" /> Try again
+        </Button>
+      }
+    />
+  );
+}
+
+// ============================================================================
+// Data loading
+// ============================================================================
+
+/**
+ * Fetches on mount, on store refresh (nonce) and on demo-account switch.
+ * Existing data is kept while refetching so the UI never flashes skeletons.
+ */
+function useCreatorFetch<T>(load: () => Promise<T>) {
+  const nonce = useAppStore((s) => s.nonce);
+  const userId = useAppStore((s) => s.user?.id);
+  const [data, setData] = useState<T | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const loadRef = useRef(load);
+
+  useEffect(() => {
+    loadRef.current = load;
+  });
+
+  useEffect(() => {
+    if (!userId) return;
+    let alive = true;
+    loadRef
+      .current()
+      .then((d) => {
+        if (!alive) return;
+        setData(d);
+        setError(null);
+      })
+      .catch((e) => {
+        if (alive) setError(e instanceof Error ? e.message : "Something went wrong.");
+      });
+    return () => {
+      alive = false;
+    };
+  }, [nonce, userId]);
+
+  return { data, error, loading: data === null && error === null, setData };
+}
+
+function useSimNow(): string {
+  return useAppStore((s) => s.clock.now);
+}
+
+// ============================================================================
+// Chart tooltips (shared shell + per-chart bodies)
+// ============================================================================
+
+interface TipItem {
+  name?: string | number;
+  value?: number | string;
+  color?: string;
+  payload?: Record<string, unknown>;
+}
+interface TipProps {
+  active?: boolean;
+  payload?: TipItem[];
+  label?: string | number;
+}
+
+function TipShell({ label, rows }: { label: string; rows: { color?: string; label: string; value: string }[] }) {
+  return (
+    <div className="rounded-xl border bg-card px-3 py-2 shadow-lg">
+      <p className="text-[11px] font-semibold text-muted-foreground">{label}</p>
+      <div className="mt-1 space-y-0.5">
+        {rows.map((r) => (
+          <div key={r.label} className="flex items-center gap-2 text-xs">
+            {r.color ? <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: r.color }} /> : null}
+            <span className="text-muted-foreground">{r.label}</span>
+            <span className="ml-auto pl-4 font-semibold tabular-nums text-foreground">{r.value}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function MrrTip({ active, payload, label }: TipProps) {
+  if (!active || !payload?.length) return null;
+  return (
+    <TipShell
+      label={fmtAxisDate(String(label ?? ""))}
+      rows={[{ color: CHART.emerald, label: "MRR", value: fmtDollars(Number(payload[0].value ?? 0)) }]}
+    />
+  );
+}
+
+function RevenueTip({ active, payload, label }: TipProps) {
+  if (!active || !payload?.length) return null;
+  const count = Number((payload[0].payload as { count?: number } | undefined)?.count ?? 0);
+  return (
+    <TipShell
+      label={fmtAxisDate(String(label ?? ""))}
+      rows={[
+        { color: CHART.amber, label: "Revenue", value: fmtDollars(Number(payload[0].value ?? 0)) },
+        { label: "Invoices", value: String(count) },
+      ]}
+    />
+  );
+}
+
+function SubsTip({ active, payload, label }: TipProps) {
+  if (!active || !payload?.length) return null;
+  const colors: Record<string, string> = { active: CHART.emerald, new: CHART.teal, canceled: CHART.rose };
+  const names: Record<string, string> = { active: "Active", new: "New", canceled: "Canceled" };
+  return (
+    <TipShell
+      label={fmtAxisDate(String(label ?? ""))}
+      rows={payload.map((p) => ({
+        color: colors[String(p.name)] || CHART.emerald,
+        label: names[String(p.name)] || String(p.name),
+        value: String(p.value ?? 0),
+      }))}
+    />
+  );
+}
+
+function GatewayTip({ active, payload }: TipProps) {
+  if (!active || !payload?.length) return null;
+  const item = payload[0];
+  const entry = (item.payload ?? {}) as { count?: number };
+  const gw = String(item.name ?? "");
+  return (
+    <TipShell
+      label={GATEWAY_LABELS[gw] || gw}
+      rows={[
+        { color: GATEWAY_CHART_COLORS[gw], label: "Revenue", value: fmtMoney(Number(item.value ?? 0)) },
+        { label: "Subscriptions", value: String(entry.count ?? 0) },
+      ]}
+    />
+  );
+}
+
+const AXIS_TICK = { fontSize: 11, fill: "var(--muted-foreground)" } as const;
+
+// ============================================================================
+// Root component
+// ============================================================================
+
+export function CreatorViews() {
+  const user = useAppStore((s) => s.user);
+  const params = useAppStore((s) => s.params);
+  const clock = useAppStore((s) => s.clock);
+  const navigate = useAppStore((s) => s.navigate);
+
+  // Tab state is store-driven (params.creatorTab) so deep links — e.g. the
+  // header's "Simulated +Nd" chip — always land on the right tab.
+  const tab: CreatorTab = isCreatorTab(params.creatorTab) ? params.creatorTab : "overview";
+
+  function goToTab(t: CreatorTab) {
+    navigate("creator", { creatorTab: t });
+  }
+
+  if (!user) {
+    return (
+      <div className="container mx-auto max-w-7xl px-4 py-16">
+        <EmptyState
+          icon={LayoutDashboard}
+          title="Sign in to open your Creator Studio"
+          description="Pick a demo account from the header menu — try Marcus Chen or Aisha Rahman for a fully populated studio."
+        />
+      </div>
+    );
+  }
+
+  return (
+    <motion.div
+      className="container mx-auto max-w-7xl px-4 py-8 sm:py-10"
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      transition={{ duration: 0.3 }}
+    >
+      <div className="grid gap-8 lg:grid-cols-[15rem_1fr]">
+        {/* ---------- Sidebar (desktop) ---------- */}
+        <aside className="hidden lg:block">
+          <nav className="sticky top-20 w-60" aria-label="Creator Studio sections">
+            <div className="mb-4 flex items-center gap-3 rounded-2xl border bg-card p-3 shadow-sm">
+              <UserAvatar name={user.name} color={user.avatarColor} />
+              <div className="min-w-0">
+                <p className="truncate text-sm font-semibold">{user.name || "Creator"}</p>
+                <p className="truncate text-[11px] text-muted-foreground">Creator Studio · {user.email}</p>
+              </div>
+            </div>
+            <ul className="flex flex-col gap-1">
+              {CREATOR_TABS.map((t) => {
+                const active = tab === t.key;
+                return (
+                  <li key={t.key}>
+                    <button
+                      onClick={() => goToTab(t.key)}
+                      aria-current={active ? "page" : undefined}
+                      className={cn(
+                        "flex w-full items-center gap-2.5 rounded-xl px-3 py-2.5 text-left text-sm font-medium transition-colors",
+                        active
+                          ? "bg-primary text-primary-foreground shadow-sm"
+                          : "text-muted-foreground hover:bg-muted hover:text-foreground"
+                      )}
+                    >
+                      <t.icon className="h-4 w-4 shrink-0" />
+                      {t.label}
+                      {t.key === "time" && clock.simulated && (
+                        <span className="ml-auto h-2 w-2 animate-pulse rounded-full bg-amber-500" aria-label="Simulated clock active" />
+                      )}
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+            <button
+              onClick={() => goToTab("time")}
+              className="mt-6 flex w-full items-center gap-3 rounded-2xl border p-3 text-left transition-colors hover:bg-muted/50"
+              aria-label="Open the billing time machine"
+            >
+              <span
+                className={cn(
+                  "flex h-9 w-9 shrink-0 items-center justify-center rounded-xl",
+                  clock.simulated
+                    ? "bg-amber-500/15 text-amber-600 dark:text-amber-400"
+                    : "bg-emerald-500/12 text-emerald-600 dark:text-emerald-400"
+                )}
+              >
+                <Timer className="h-4 w-4" />
+              </span>
+              <span className="min-w-0">
+                <span className="block text-xs font-semibold">{clock.simulated ? clock.label : "Live clock"}</span>
+                <span className="block truncate text-[11px] tabular-nums text-muted-foreground">{fmtDateTime(clock.now)}</span>
+              </span>
+            </button>
+          </nav>
+        </aside>
+
+        {/* ---------- Mobile pill nav ---------- */}
+        <div className="lg:hidden">
+          <div
+            className="-mx-4 overflow-x-auto px-4 pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+            role="tablist"
+            aria-label="Creator Studio sections"
+          >
+            <div className="flex gap-2">
+              {CREATOR_TABS.map((t) => {
+                const active = tab === t.key;
+                return (
+                  <button
+                    key={t.key}
+                    role="tab"
+                    aria-selected={active}
+                    onClick={() => goToTab(t.key)}
+                    className={cn(
+                      "flex h-10 shrink-0 items-center gap-2 rounded-full border px-4 text-sm font-medium transition-colors",
+                      active
+                        ? "border-primary bg-primary text-primary-foreground shadow-sm"
+                        : "bg-card text-muted-foreground hover:text-foreground"
+                    )}
+                  >
+                    <t.icon className="h-4 w-4" />
+                    {t.label}
+                    {t.key === "time" && clock.simulated && <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-400" />}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+
+        {/* ---------- Tab content ---------- */}
+        <div className="min-w-0">
+          <AnimatePresence mode="wait">
+            <motion.div
+              key={tab}
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -8 }}
+              transition={{ duration: 0.22, ease: "easeOut" }}
+            >
+              {tab === "overview" && <OverviewTab user={user} />}
+              {tab === "products" && <ProductsTab user={user} />}
+              {tab === "subscribers" && <SubscribersTab />}
+              {tab === "orders" && <OrdersTab />}
+              {tab === "webhooks" && <WebhooksTab />}
+              {tab === "time" && <TimeTab />}
+            </motion.div>
+          </AnimatePresence>
+        </div>
+      </div>
+    </motion.div>
+  );
+}
+
+// ============================================================================
+// Skeletons
+// ============================================================================
+
+function OverviewSkeleton() {
+  return (
+    <div className="space-y-6" aria-busy="true" aria-label="Loading analytics">
+      <div className="flex items-center gap-3.5">
+        <Skeleton className="h-12 w-12 rounded-full" />
+        <div className="space-y-2">
+          <Skeleton className="h-6 w-44" />
+          <Skeleton className="h-4 w-64" />
+        </div>
+      </div>
+      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        {[0, 1, 2, 3].map((i) => (
+          <Skeleton key={i} className="h-28 rounded-2xl" />
+        ))}
+      </div>
+      <div className="grid gap-4 xl:grid-cols-2">
+        <Skeleton className="h-80 rounded-2xl" />
+        <Skeleton className="h-80 rounded-2xl" />
+      </div>
+      <div className="grid gap-4 lg:grid-cols-5">
+        <Skeleton className="h-56 rounded-2xl lg:col-span-3" />
+        <Skeleton className="h-56 rounded-2xl lg:col-span-2" />
+      </div>
+    </div>
+  );
+}
+
+function CardsSkeleton({ count = 3, height = "h-72" }: { count?: number; height?: string }) {
+  return (
+    <div className="grid gap-5 md:grid-cols-2 2xl:grid-cols-3" aria-busy="true" aria-label="Loading products">
+      {Array.from({ length: count }).map((_, i) => (
+        <Skeleton key={i} className={cn("rounded-2xl", height)} />
+      ))}
+    </div>
+  );
+}
+
+function TableSkeleton({ rows = 6, label = "Loading" }: { rows?: number; label?: string }) {
+  return (
+    <Panel className="overflow-hidden" aria-busy="true" aria-label={`${label} data`}>
+      <div className="space-y-0">
+        <Skeleton className="m-3 h-10 rounded-xl" />
+        {Array.from({ length: rows }).map((_, i) => (
+          <Skeleton key={i} className="mx-3 mb-2 h-12 rounded-xl" />
+        ))}
+      </div>
+    </Panel>
+  );
+}
+
+// ============================================================================
+// TAB: OVERVIEW — the money dashboard
+// ============================================================================
+
+function OverviewTab({ user }: { user: SessionUser }) {
+  const { data: analytics, error, loading } = useCreatorFetch(() =>
+    api<{ analytics: AnalyticsDTO }>("/api/analytics").then((r) => r.analytics)
+  );
+  const [createOpen, setCreateOpen] = useState(false);
+
+  if (loading) return <OverviewSkeleton />;
+  if (error || !analytics) return <LoadError message={error || "Analytics unavailable."} />;
+
+  // Onboarding: no products yet (works for customer demo accounts too).
+  if (analytics.topProducts.length === 0) {
+    return (
+      <div className="py-8">
+        <EmptyState
+          icon={PackagePlus}
+          title="You don't have any products yet"
+          description="Create your first product to start selling memberships, licenses and communities — analytics, subscribers and orders will light up as you grow."
+          action={
+            <Button onClick={() => setCreateOpen(true)}>
+              <Plus className="h-4 w-4" /> Create your first product
+            </Button>
+          }
+        />
+        <p className="mx-auto mt-5 max-w-md text-center text-xs text-muted-foreground">
+          Exploring with a customer account? Switch to a creator demo account —{" "}
+          <span className="font-medium text-foreground">Marcus Chen</span> or{" "}
+          <span className="font-medium text-foreground">Aisha Rahman</span> — from the header menu.
+        </p>
+        <CreateProductDialog open={createOpen} onOpenChange={setCreateOpen} />
+      </div>
+    );
+  }
+
+  const firstName = (user.name || "creator").split(" ")[0];
+  const totalMrr = analytics.topProducts.reduce((s, p) => s + p.mrrCents, 0);
+  const topProducts = analytics.topProducts.slice(0, 5);
+  const gatewayTotal = analytics.gatewayBreakdown.reduce((s, g) => s + g.revenueCents, 0);
+  const churnPct = analytics.churnRate * 100;
+  const churnHigh = analytics.churnRate > 0.1;
+  // Daily revenue is sparse (most days have zero charges) — bucket into
+  // ~13 weekly sums so the bars are actually readable. (Cheap 90-item loop,
+  // intentionally not memoized to keep hook order stable across early returns.)
+  const weeklyRevenue: { date: string; revenue: number; count: number }[] = [];
+  for (let i = 0; i < analytics.revenueSeries.length; i += 7) {
+    const chunk = analytics.revenueSeries.slice(i, i + 7);
+    if (chunk.length === 0) continue;
+    weeklyRevenue.push({
+      date: chunk[0].date,
+      revenue: Math.round(chunk.reduce((s, d) => s + d.revenue, 0)),
+      count: chunk.reduce((s, d) => s + d.count, 0),
+    });
+  }
+
+  const gatewayData = analytics.gatewayBreakdown.map((g) => ({
+    ...g,
+    fill: GATEWAY_CHART_COLORS[g.gateway] || "#71717a",
+  }));
+
+  return (
+    <div className="space-y-6">
+      {/* ---------- Header ---------- */}
+      <header className="flex flex-wrap items-center justify-between gap-4">
+        <div className="flex items-center gap-3.5">
+          <UserAvatar name={user.name} color={user.avatarColor} size="lg" />
+          <div>
+            <h1 className="text-2xl font-bold tracking-tight">Creator Studio</h1>
+            <p className="mt-0.5 text-sm text-muted-foreground">
+              Welcome back, {firstName} — here's how your business is doing.
+            </p>
+          </div>
+        </div>
+        <Badge variant="outline" className="gap-1.5 bg-muted/50 py-1.5 pl-2.5 pr-3 text-xs font-medium">
+          <CalendarRange className="h-3.5 w-3.5 text-primary" /> Last 90 days
+        </Badge>
+      </header>
+
+      {/* ---------- KPI cards ---------- */}
+      <motion.div
+        className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4"
+        variants={stagger}
+        initial="hidden"
+        animate="show"
+      >
+        <motion.div variants={fadeUp}>
+          <StatCard
+            label="Monthly recurring revenue"
+            value={fmtMoney(analytics.mrrCents)}
+            sub={`ARR ${fmtMoney(analytics.arrCents)}`}
+            icon={TrendingUp}
+          />
+        </motion.div>
+        <motion.div variants={fadeUp}>
+          <StatCard
+            label="Active subscriptions"
+            value={String(analytics.activeSubscriptions)}
+            sub={`+${analytics.trialingCount} trialing · ${analytics.pastDueCount} past due`}
+            icon={Users}
+          />
+        </motion.div>
+        <motion.div variants={fadeUp}>
+          <StatCard
+            label="Churn rate"
+            value={`${churnPct.toFixed(1)}%`}
+            sub={`${analytics.canceled30d} canceled in 30d`}
+            icon={UserMinus}
+            className={cn(churnHigh && "border-red-500/40 bg-red-500/[0.04]")}
+          />
+        </motion.div>
+        <motion.div variants={fadeUp}>
+          <StatCard
+            label="Revenue (30d)"
+            value={fmtMoney(analytics.revenue30dCents)}
+            sub={`Lifetime ${fmtMoney(analytics.totalRevenueCents)}`}
+            icon={DollarSign}
+          />
+        </motion.div>
+      </motion.div>
+
+      {/* ---------- Charts ---------- */}
+      <div className="grid gap-4 sm:gap-5 xl:grid-cols-2">
+        <motion.div variants={fadeUp} initial="hidden" animate="show">
+          <Panel className="p-5">
+            <div className="mb-4">
+              <h2 className="text-sm font-bold">MRR trend</h2>
+              <p className="mt-0.5 text-xs text-muted-foreground">Monthly recurring revenue, daily snapshot</p>
+            </div>
+            <ResponsiveContainer width="100%" height={256}>
+              <AreaChart data={analytics.mrrSeries} margin={{ top: 4, right: 6, left: 0, bottom: 0 }}>
+                <defs>
+                  <linearGradient id="mrrGrad" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor={CHART.emerald} stopOpacity={0.35} />
+                    <stop offset="100%" stopColor={CHART.emerald} stopOpacity={0.02} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" vertical={false} strokeOpacity={0.6} />
+                <XAxis
+                  dataKey="date"
+                  tickFormatter={(v: string) => fmtAxisDate(v)}
+                  tick={AXIS_TICK}
+                  tickLine={false}
+                  axisLine={false}
+                  minTickGap={48}
+                  tickMargin={8}
+                />
+                <YAxis
+                  tickFormatter={(v: number) => `$${fmtCompact(v)}`}
+                  tick={AXIS_TICK}
+                  tickLine={false}
+                  axisLine={false}
+                  width={52}
+                />
+                <Tooltip content={<MrrTip />} cursor={{ stroke: "var(--border)", strokeDasharray: "3 3" }} />
+                <Area
+                  type="monotone"
+                  dataKey="mrr"
+                  name="MRR"
+                  stroke={CHART.emerald}
+                  strokeWidth={2}
+                  fill="url(#mrrGrad)"
+                  dot={false}
+                  activeDot={{ r: 4, strokeWidth: 0 }}
+                />
+              </AreaChart>
+            </ResponsiveContainer>
+          </Panel>
+        </motion.div>
+
+        <motion.div variants={fadeUp} initial="hidden" animate="show">
+          <Panel className="p-5">
+            <div className="mb-4">
+              <h2 className="text-sm font-bold">Weekly revenue</h2>
+              <p className="mt-0.5 text-xs text-muted-foreground">Successful charges per week</p>
+            </div>
+            <ResponsiveContainer width="100%" height={256}>
+              <BarChart data={weeklyRevenue} margin={{ top: 4, right: 6, left: 0, bottom: 0 }}>
+                <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" vertical={false} strokeOpacity={0.6} />
+                <XAxis
+                  dataKey="date"
+                  tickFormatter={(v: string) => fmtAxisDate(v)}
+                  tick={AXIS_TICK}
+                  tickLine={false}
+                  axisLine={false}
+                  minTickGap={48}
+                  tickMargin={8}
+                />
+                <YAxis
+                  tickFormatter={(v: number) => `$${fmtCompact(v)}`}
+                  tick={AXIS_TICK}
+                  tickLine={false}
+                  axisLine={false}
+                  width={52}
+                />
+                <Tooltip content={<RevenueTip />} cursor={{ fill: "var(--muted)", fillOpacity: 0.4 }} />
+                <Bar dataKey="revenue" name="Revenue" fill={CHART.amber} radius={[3, 3, 0, 0]} maxBarSize={26} />
+              </BarChart>
+            </ResponsiveContainer>
+          </Panel>
+        </motion.div>
+
+        <motion.div variants={fadeUp} initial="hidden" animate="show">
+          <Panel className="p-5">
+            <div className="mb-4">
+              <h2 className="text-sm font-bold">Subscriber growth</h2>
+              <p className="mt-0.5 text-xs text-muted-foreground">Active members with new and canceled per day</p>
+            </div>
+            <ResponsiveContainer width="100%" height={256}>
+              <ComposedChart data={analytics.subscriberSeries} margin={{ top: 4, right: 6, left: 0, bottom: 0 }}>
+                <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" vertical={false} strokeOpacity={0.6} />
+                <XAxis
+                  dataKey="date"
+                  tickFormatter={(v: string) => fmtAxisDate(v)}
+                  tick={AXIS_TICK}
+                  tickLine={false}
+                  axisLine={false}
+                  minTickGap={48}
+                  tickMargin={8}
+                />
+                <YAxis tick={AXIS_TICK} tickLine={false} axisLine={false} width={32} allowDecimals={false} />
+                <Tooltip content={<SubsTip />} cursor={{ fill: "var(--muted)", fillOpacity: 0.3 }} />
+                <Legend
+                  verticalAlign="bottom"
+                  height={26}
+                  iconType="circle"
+                  iconSize={8}
+                  wrapperStyle={{ fontSize: 12, paddingTop: 6 }}
+                />
+                <Bar dataKey="new" name="New" fill={CHART.teal} barSize={4} radius={[2, 2, 0, 0]} />
+                <Bar dataKey="canceled" name="Canceled" fill={CHART.rose} barSize={4} radius={[2, 2, 0, 0]} />
+                <Line
+                  dataKey="active"
+                  name="Active"
+                  stroke={CHART.emerald}
+                  strokeWidth={2}
+                  dot={false}
+                  activeDot={{ r: 4, strokeWidth: 0 }}
+                />
+              </ComposedChart>
+            </ResponsiveContainer>
+          </Panel>
+        </motion.div>
+
+        <motion.div variants={fadeUp} initial="hidden" animate="show">
+          <Panel className="p-5">
+            <div className="mb-4">
+              <h2 className="text-sm font-bold">Revenue by gateway</h2>
+              <p className="mt-0.5 text-xs text-muted-foreground">Lifetime volume across payment processors</p>
+            </div>
+            {gatewayData.length === 0 || gatewayTotal === 0 ? (
+              <div className="flex h-64 items-center justify-center">
+                <EmptyState
+                  icon={Wallet}
+                  title="No revenue yet"
+                  description="Gateway mix appears after your first successful charge."
+                  className="border-0 p-6"
+                />
+              </div>
+            ) : (
+              <div className="flex flex-col items-center">
+                <div className="relative h-52 w-full">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <PieChart>
+                      <Pie
+                        data={gatewayData}
+                        dataKey="revenueCents"
+                        nameKey="gateway"
+                        innerRadius="62%"
+                        outerRadius="88%"
+                        paddingAngle={2}
+                        strokeWidth={0}
+                      >
+                        {gatewayData.map((g) => (
+                          <Cell key={g.gateway} fill={g.fill} />
+                        ))}
+                      </Pie>
+                      <Tooltip content={<GatewayTip />} />
+                    </PieChart>
+                  </ResponsiveContainer>
+                  <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
+                    <p className="text-lg font-bold tabular-nums tracking-tight">{fmtMoney(gatewayTotal)}</p>
+                    <p className="text-[11px] text-muted-foreground">total revenue</p>
+                  </div>
+                </div>
+                <ul className="mt-3 w-full space-y-2">
+                  {gatewayData.map((g) => {
+                    const share = gatewayTotal > 0 ? g.revenueCents / gatewayTotal : 0;
+                    return (
+                      <li key={g.gateway} className="flex items-center gap-2.5 text-xs">
+                        <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: g.fill }} />
+                        <span className="min-w-0 flex-1 truncate font-medium">{GATEWAY_LABELS[g.gateway] || g.gateway}</span>
+                        <span className="tabular-nums text-muted-foreground">{g.count} subs</span>
+                        <span className="w-20 text-right font-semibold tabular-nums">{fmtMoney(g.revenueCents)}</span>
+                        <span className="w-9 text-right tabular-nums text-muted-foreground">{Math.round(share * 100)}%</span>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </div>
+            )}
+          </Panel>
+        </motion.div>
+      </div>
+
+      {/* ---------- Top products + activity ---------- */}
+      <div className="grid gap-4 sm:gap-5 lg:grid-cols-5">
+        <Panel className="overflow-hidden lg:col-span-3">
+          <div className="border-b p-5 pb-4">
+            <h2 className="text-sm font-bold">Top products</h2>
+            <p className="mt-0.5 text-xs text-muted-foreground">Ranked by monthly recurring revenue</p>
+          </div>
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b bg-muted/40 text-left text-[11px] uppercase tracking-wide text-muted-foreground">
+                <th scope="col" className="px-5 py-2.5 font-medium">Product</th>
+                <th scope="col" className="px-3 py-2.5 text-right font-medium">Members</th>
+                <th scope="col" className="px-3 py-2.5 font-medium">MRR</th>
+                <th scope="col" className="px-5 py-2.5 text-right font-medium">Lifetime</th>
+              </tr>
+            </thead>
+            <tbody>
+              {topProducts.map((p) => {
+                const share = totalMrr > 0 ? Math.round((p.mrrCents / totalMrr) * 100) : 0;
+                return (
+                  <tr key={p.id} className="border-b last:border-0">
+                    <td className="px-5 py-3">
+                      <div className="flex items-center gap-3">
+                        <ProductCover
+                          theme={p.coverTheme}
+                          category="OTHER"
+                          title={p.title}
+                          className="h-10 w-14 shrink-0 rounded-lg"
+                          iconClassName="h-12 w-12"
+                        />
+                        <span className="min-w-0 truncate font-medium">{p.title}</span>
+                      </div>
+                    </td>
+                    <td className="px-3 py-3 text-right tabular-nums text-muted-foreground">{fmtCompact(p.members)}</td>
+                    <td className="w-44 px-3 py-3">
+                      <p className="font-semibold tabular-nums">{fmtMoney(p.mrrCents)}</p>
+                      <Progress value={share} className="mt-1.5 h-1.5 w-28" aria-label={`${share}% of MRR`} />
+                    </td>
+                    <td className="px-5 py-3 text-right font-medium tabular-nums">{fmtMoney(p.revenueCents)}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </Panel>
+
+        <RecentActivity activity={analytics.recentActivity} />
+      </div>
+    </div>
+  );
+}
+
+function RecentActivity({ activity }: { activity: AnalyticsDTO["recentActivity"] }) {
+  const now = useSimNow();
+  return (
+    <Panel className="flex flex-col overflow-hidden lg:col-span-2">
+      <div className="border-b p-5 pb-4">
+        <h2 className="text-sm font-bold">Recent activity</h2>
+        <p className="mt-0.5 text-xs text-muted-foreground">Latest payments and subscriptions</p>
+      </div>
+      {activity.length === 0 ? (
+        <EmptyState
+          icon={Activity}
+          title="No activity yet"
+          description="Payments and new subscriptions will appear here."
+          className="m-4 flex-1 border-0"
+        />
+      ) : (
+        <ul className={cn("max-h-80 divide-y overflow-y-auto", SCROLL_THIN)} aria-label="Recent activity">
+          {activity.map((a) => {
+            const meta = activityIcon(a.type);
+            const Icon = meta.icon;
+            return (
+              <li key={a.id} className="flex items-start gap-3 px-5 py-3">
+                <span className={cn("mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg", meta.cls)}>
+                  <Icon className="h-4 w-4" />
+                </span>
+                <div className="min-w-0 flex-1">
+                  <p className="text-[13px] leading-snug">{a.message}</p>
+                  <p className="mt-0.5 text-[11px] text-muted-foreground">{relTime(a.at, now)}</p>
+                </div>
+                {a.amountCents != null && (
+                  <span className="shrink-0 rounded-full bg-muted px-2 py-0.5 text-[11px] font-semibold tabular-nums text-muted-foreground">
+                    {fmtMoney(a.amountCents)}
+                  </span>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </Panel>
+  );
+}
+
+function activityIcon(type: string): { icon: LucideIcon; cls: string } {
+  if (type === "invoice.paid") return { icon: DollarSign, cls: "bg-emerald-500/12 text-emerald-600 dark:text-emerald-400" };
+  if (type === "invoice.failed" || type === "invoice") return { icon: XCircle, cls: "bg-red-500/12 text-red-600 dark:text-red-400" };
+  if (type === "subscription.created") return { icon: UserPlus, cls: "bg-teal-500/12 text-teal-600 dark:text-teal-400" };
+  return { icon: Activity, cls: "bg-muted text-muted-foreground" };
+}
+
+// ============================================================================
+// TAB: PRODUCTS
+// ============================================================================
+
+interface TierDraft {
+  name: string;
+  price: string;
+  interval: "month" | "year";
+  trialDays: string;
+  badge: string;
+}
+
+const EMPTY_TIER: TierDraft = { name: "", price: "", interval: "month", trialDays: "", badge: "" };
+
+const ACCESS_OPTIONS: { key: string; label: string }[] = [
+  { key: "DISCORD", label: "Discord role" },
+  { key: "TELEGRAM", label: "Telegram channel" },
+  { key: "LICENSE", label: "License key" },
+  { key: "FILE", label: "File vault" },
+];
+
+function ProductsTab({ user }: { user: SessionUser }) {
+  const { toast } = useToast();
+  const refresh = useAppStore((s) => s.refresh);
+  const navigate = useAppStore((s) => s.navigate);
+
+  // The catalog endpoint only lists ACTIVE products — remember paused ones so
+  // creators never lose sight of their own listings between refetches.
+  const cacheRef = useRef<{ userId: string; map: Map<string, ProductCardDTO> }>({ userId: "", map: new Map() });
+
+  const { data, error, loading, setData } = useCreatorFetch(async () => {
+    const [productsRes, analyticsRes] = await Promise.all([
+      api<{ products: ProductCardDTO[] }>(`/api/products?creatorId=${user.id}`),
+      api<{ analytics: AnalyticsDTO }>("/api/analytics"),
+    ]);
+    const cache = cacheRef.current;
+    if (cache.userId !== user.id) {
+      cache.userId = user.id;
+      cache.map.clear();
+    }
+    const fresh = productsRes.products;
+    const known = [...cache.map.values()].filter((p) => !fresh.some((f) => f.id === p.id));
+    const merged = [...fresh, ...known];
+    for (const p of merged) cache.map.set(p.id, p);
+    return { products: merged, analytics: analyticsRes.analytics };
+  });
+
+  const [createOpen, setCreateOpen] = useState(false);
+  const [editing, setEditing] = useState<ProductCardDTO | null>(null);
+  const [busyId, setBusyId] = useState<string | null>(null);
+
+  function replaceProduct(updated: ProductDetailDTO | ProductCardDTO) {
+    cacheRef.current.map.set(updated.id, updated as ProductCardDTO);
+    setData((prev) =>
+      prev
+        ? {
+            ...prev,
+            products: prev.products.some((p) => p.id === updated.id)
+              ? prev.products.map((p) => (p.id === updated.id ? (updated as ProductCardDTO) : p))
+              : [...prev.products, updated as ProductCardDTO],
+          }
+        : prev
+    );
+  }
+
+  async function toggleStatus(p: ProductCardDTO) {
+    const next = p.status === "PAUSED" ? "ACTIVE" : "PAUSED";
+    setBusyId(p.id);
+    try {
+      const res = await api<{ product: ProductDetailDTO }>(`/api/products/${p.id}`, {
+        method: "PATCH",
+        json: { status: next },
+      });
+      if (res.product) replaceProduct(res.product);
+      toast({
+        title: next === "PAUSED" ? "Product paused" : "Product resumed",
+        description:
+          next === "PAUSED"
+            ? `${p.title} is now hidden from the marketplace. Existing members keep access.`
+            : `${p.title} is live on the marketplace again.`,
+      });
+    } catch (e) {
+      toast({ title: "Couldn't update the product", description: (e as Error).message, variant: "destructive" });
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  if (loading) return <CardsSkeleton count={3} />;
+  if (error || !data) return <LoadError message={error || "Products unavailable."} />;
+
+  const { products, analytics } = data;
+
+  return (
+    <div className="space-y-5">
+      <SectionHeader
+        title="Products"
+        description={`${products.length} listing${products.length === 1 ? "" : "s"} on the Vendly marketplace`}
+        action={
+          <Button onClick={() => setCreateOpen(true)}>
+            <Plus className="h-4 w-4" /> New product
+          </Button>
+        }
+      />
+
+      {products.length === 0 ? (
+        <EmptyState
+          icon={PackagePlus}
+          title="You don't have any products yet"
+          description="Create your first product — memberships, licenses, communities and digital files all live here."
+          action={
+            <Button onClick={() => setCreateOpen(true)}>
+              <Plus className="h-4 w-4" /> Create your first product
+            </Button>
+          }
+        />
+      ) : (
+        <motion.div
+          className="grid gap-5 md:grid-cols-2 2xl:grid-cols-3"
+          variants={stagger}
+          initial="hidden"
+          animate="show"
+        >
+          {products.map((p) => {
+            const mrr = analytics.topProducts.find((t) => t.id === p.id)?.mrrCents ?? null;
+            const paused = p.status === "PAUSED";
+            const plans = [...p.plans].sort((a, b) => a.sortOrder - b.sortOrder);
+            return (
+              <motion.div key={p.id} variants={fadeUp}>
+                <Panel className={cn("flex h-full flex-col overflow-hidden transition-shadow hover:shadow-md", paused && "opacity-80")}>
+                  <div className="relative">
+                    <ProductCover
+                      theme={p.coverTheme}
+                      category={p.category}
+                      title={p.title}
+                      className={cn("h-28", paused && "grayscale-[45%]")}
+                      iconClassName="h-24 w-24"
+                    />
+                    <div className="absolute left-3 top-3 flex flex-wrap gap-1.5">
+                      <StatusBadge status={p.status} className="bg-card/90 backdrop-blur" />
+                      {p.featured && (
+                        <Badge className="gap-1 bg-primary text-primary-foreground">
+                          <Sparkles className="h-3 w-3" /> Featured
+                        </Badge>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="flex flex-1 flex-col p-4 sm:p-5">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <h3 className="truncate font-semibold leading-tight">{p.title}</h3>
+                        <p className="mt-0.5 line-clamp-1 text-xs text-muted-foreground">
+                          {p.tagline || categoryLabel(p.category)}
+                        </p>
+                      </div>
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8 shrink-0"
+                            aria-label={`Actions for ${p.title}`}
+                            disabled={busyId === p.id}
+                          >
+                            {busyId === p.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <MoreHorizontal className="h-4 w-4" />}
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end" className="w-48">
+                          <DropdownMenuItem onClick={() => navigate("product", { productId: p.id })}>
+                            <Store className="h-4 w-4" /> View storefront
+                          </DropdownMenuItem>
+                          <DropdownMenuItem onClick={() => void toggleStatus(p)}>
+                            {paused ? <Play className="h-4 w-4" /> : <Pause className="h-4 w-4" />}
+                            {paused ? "Resume listing" : "Pause listing"}
+                          </DropdownMenuItem>
+                          <DropdownMenuItem onClick={() => setEditing(p)}>
+                            <Pencil className="h-4 w-4" /> Edit details
+                          </DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    </div>
+
+                    <div className="mt-2.5 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-xs text-muted-foreground">
+                      <span className="flex items-center gap-1">
+                        <Users className="h-3.5 w-3.5" /> {fmtCompact(p.membersCount)} members
+                      </span>
+                      <span className="flex items-center gap-1.5">
+                        <Stars rating={p.rating} /> {p.rating.toFixed(1)}
+                      </span>
+                      <span>({p.reviewCount} reviews)</span>
+                    </div>
+
+                    <div className="mt-2.5 flex flex-wrap gap-1.5">
+                      {p.accessType.map((a) => (
+                        <ProviderBadge key={a} provider={a} />
+                      ))}
+                    </div>
+
+                    <div className="mt-3 space-y-1.5 rounded-xl bg-muted/40 p-3">
+                      {plans.slice(0, 4).map((plan) => (
+                        <div key={plan.id} className="flex items-center justify-between gap-3 text-xs">
+                          <span className="min-w-0 truncate font-medium">{plan.name}</span>
+                          <span className="shrink-0 tabular-nums text-muted-foreground">
+                            {fmtMoney(plan.priceCents)}/{plan.interval === "year" ? "yr" : "mo"}
+                          </span>
+                        </div>
+                      ))}
+                      {plans.length === 0 && <p className="text-xs text-muted-foreground">No pricing tiers</p>}
+                    </div>
+
+                    <div className="mt-auto flex items-center justify-between border-t pt-3 mt-3">
+                      <span className="text-xs text-muted-foreground">MRR</span>
+                      <span className="text-sm font-bold tabular-nums">{fmtMoney(mrr)}</span>
+                    </div>
+                  </div>
+                </Panel>
+              </motion.div>
+            );
+          })}
+        </motion.div>
+      )}
+
+      <CreateProductDialog
+        open={createOpen}
+        onOpenChange={setCreateOpen}
+        onCreated={() => {
+          refresh();
+        }}
+      />
+      <EditProductDialog product={editing} onOpenChange={(open) => !open && setEditing(null)} onSaved={replaceProduct} />
+    </div>
+  );
+}
+
+// ============================================================================
+// Create product dialog (2-step)
+// ============================================================================
+
+function CreateProductDialog({
+  open,
+  onOpenChange,
+  onCreated,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onCreated?: () => void;
+}) {
+  const { toast } = useToast();
+  const [step, setStep] = useState(1);
+  const [title, setTitle] = useState("");
+  const [tagline, setTagline] = useState("");
+  const [category, setCategory] = useState("OTHER");
+  const [description, setDescription] = useState("");
+  const [accessType, setAccessType] = useState<string[]>(["DISCORD"]);
+  const [discordRoleName, setDiscordRoleName] = useState("");
+  const [telegramChannel, setTelegramChannel] = useState("");
+  const [tiers, setTiers] = useState<TierDraft[]>([{ ...EMPTY_TIER }]);
+  const [formError, setFormError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  // Reset the form each time the dialog opens.
+  useEffect(() => {
+    if (open) {
+      setStep(1);
+      setTitle("");
+      setTagline("");
+      setCategory("OTHER");
+      setDescription("");
+      setAccessType(["DISCORD"]);
+      setDiscordRoleName("");
+      setTelegramChannel("");
+      setTiers([{ ...EMPTY_TIER }]);
+      setFormError(null);
+      setBusy(false);
+    }
+  }, [open]);
+
+  function toggleAccess(key: string) {
+    setAccessType((prev) => (prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]));
+  }
+
+  function updateTier(i: number, patch: Partial<TierDraft>) {
+    setTiers((prev) => prev.map((t, idx) => (idx === i ? { ...t, ...patch } : t)));
+  }
+
+  function goToPricing() {
+    if (title.trim().length < 3) return setFormError("Give your product a title (at least 3 characters).");
+    if (description.trim().length < 10) return setFormError("Add a description of at least 10 characters.");
+    if (accessType.length === 0) return setFormError("Pick at least one way members get access.");
+    if (accessType.includes("DISCORD") && !discordRoleName.trim())
+      return setFormError("Enter the Discord role to grant on purchase.");
+    if (accessType.includes("TELEGRAM") && !telegramChannel.trim())
+      return setFormError("Enter the Telegram channel to invite buyers to.");
+    setFormError(null);
+    setStep(2);
+  }
+
+  async function submit(e: FormEvent) {
+    e.preventDefault();
+    const plans = tiers.map((t) => ({
+      name: t.name.trim(),
+      priceCents: Math.round(parseFloat(t.price) * 100),
+      interval: t.interval,
+      trialDays: Math.max(0, Math.min(30, Number(t.trialDays) || 0)),
+      badge: t.badge.trim() || null,
+      features: [] as string[],
+    }));
+    if (plans.some((p) => !p.name || !Number.isFinite(p.priceCents) || p.priceCents <= 0)) {
+      setFormError("Every tier needs a name and a price above $0.");
+      return;
+    }
+    setFormError(null);
+    setBusy(true);
+    try {
+      await api("/api/products", {
+        json: {
+          title: title.trim(),
+          tagline: tagline.trim(),
+          description: description.trim(),
+          category,
+          accessType,
+          discordRoleName: accessType.includes("DISCORD") ? discordRoleName.trim() : undefined,
+          telegramChannel: accessType.includes("TELEGRAM") ? telegramChannel.trim() : undefined,
+          plans,
+        },
+      });
+      toast({
+        title: "Product created",
+        description: `${title.trim()} is live on the marketplace with ${plans.length} pricing tier${plans.length === 1 ? "" : "s"}.`,
+      });
+      onCreated?.();
+      onOpenChange(false);
+    } catch (err) {
+      toast({ title: "Couldn't create the product", description: (err as Error).message, variant: "destructive" });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-h-[88vh] overflow-y-auto sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>{step === 1 ? "Create a product" : "Pricing tiers"}</DialogTitle>
+          <DialogDescription>
+            {step === 1
+              ? "Step 1 of 2 — the basics: what it is and how members get access."
+              : "Step 2 of 2 — up to 4 tiers. Prices are in US dollars."}
+          </DialogDescription>
+        </DialogHeader>
+
+        {step === 1 ? (
+          <div className="space-y-4">
+            <div className="space-y-1.5">
+              <Label htmlFor="np-title">Title</Label>
+              <Input
+                id="np-title"
+                value={title}
+                onChange={(e) => setTitle(e.target.value)}
+                placeholder="e.g. Trade Signals Pro"
+                maxLength={80}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="np-tagline">Tagline</Label>
+              <Input
+                id="np-tagline"
+                value={tagline}
+                onChange={(e) => setTagline(e.target.value)}
+                placeholder="One line that sells it (optional)"
+                maxLength={120}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label>Category</Label>
+              <Select value={category} onValueChange={setCategory}>
+                <SelectTrigger aria-label="Category" className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {CATEGORIES.map((c) => (
+                    <SelectItem key={c.key} value={c.key}>
+                      {c.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="np-desc">Description</Label>
+              <Textarea
+                id="np-desc"
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                placeholder="What's included, who it's for, what members get…"
+                rows={4}
+              />
+            </div>
+            <fieldset className="space-y-2">
+              <legend className="text-sm font-medium">How members get access</legend>
+              <div className="grid grid-cols-2 gap-2">
+                {ACCESS_OPTIONS.map((a) => {
+                  const on = accessType.includes(a.key);
+                  return (
+                    <button
+                      key={a.key}
+                      type="button"
+                      onClick={() => toggleAccess(a.key)}
+                      aria-pressed={on}
+                      className={cn(
+                        "flex items-center gap-2 rounded-xl border px-3 py-2.5 text-xs font-medium transition-colors",
+                        on
+                          ? "border-primary bg-primary/10 text-primary"
+                          : "text-muted-foreground hover:bg-muted hover:text-foreground"
+                      )}
+                    >
+                      {on ? <Check className="h-3.5 w-3.5" /> : <Plus className="h-3.5 w-3.5" />}
+                      {a.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </fieldset>
+            <AnimatePresence initial={false}>
+              {accessType.includes("DISCORD") && (
+                <motion.div
+                  initial={{ opacity: 0, height: 0 }}
+                  animate={{ opacity: 1, height: "auto" }}
+                  exit={{ opacity: 0, height: 0 }}
+                  className="overflow-hidden"
+                >
+                  <div className="space-y-1.5 pt-1">
+                    <Label htmlFor="np-discord">Discord role to grant</Label>
+                    <Input
+                      id="np-discord"
+                      value={discordRoleName}
+                      onChange={(e) => setDiscordRoleName(e.target.value)}
+                      placeholder="e.g. @Whale Room"
+                    />
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+            <AnimatePresence initial={false}>
+              {accessType.includes("TELEGRAM") && (
+                <motion.div
+                  initial={{ opacity: 0, height: 0 }}
+                  animate={{ opacity: 1, height: "auto" }}
+                  exit={{ opacity: 0, height: 0 }}
+                  className="overflow-hidden"
+                >
+                  <div className="space-y-1.5 pt-1">
+                    <Label htmlFor="np-telegram">Telegram channel</Label>
+                    <Input
+                      id="np-telegram"
+                      value={telegramChannel}
+                      onChange={(e) => setTelegramChannel(e.target.value)}
+                      placeholder="e.g. @alphagroup"
+                    />
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {tiers.map((t, i) => (
+              <div key={i} className="space-y-2.5 rounded-xl border p-3.5">
+                <div className="flex items-center justify-between">
+                  <p className="text-xs font-semibold text-muted-foreground">Tier {i + 1}</p>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="h-7 w-7 text-muted-foreground hover:text-red-600"
+                    onClick={() => setTiers((prev) => prev.filter((_, idx) => idx !== i))}
+                    disabled={tiers.length === 1}
+                    aria-label={`Remove tier ${i + 1}`}
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </Button>
+                </div>
+                <div className="grid gap-2.5 sm:grid-cols-2">
+                  <div className="space-y-1.5">
+                    <Label htmlFor={`tier-name-${i}`}>Name</Label>
+                    <Input
+                      id={`tier-name-${i}`}
+                      value={t.name}
+                      onChange={(e) => updateTier(i, { name: e.target.value })}
+                      placeholder="Monthly"
+                      maxLength={40}
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor={`tier-price-${i}`}>Price (USD)</Label>
+                    <Input
+                      id={`tier-price-${i}`}
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      inputMode="decimal"
+                      value={t.price}
+                      onChange={(e) => updateTier(i, { price: e.target.value })}
+                      placeholder="49.00"
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>Interval</Label>
+                    <Select
+                      value={t.interval}
+                      onValueChange={(v) => updateTier(i, { interval: v === "year" ? "year" : "month" })}
+                    >
+                      <SelectTrigger aria-label={`Interval for tier ${i + 1}`} className="w-full">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="month">Monthly</SelectItem>
+                        <SelectItem value="year">Yearly</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor={`tier-trial-${i}`}>Trial days (optional)</Label>
+                    <Input
+                      id={`tier-trial-${i}`}
+                      type="number"
+                      min="0"
+                      max="30"
+                      value={t.trialDays}
+                      onChange={(e) => updateTier(i, { trialDays: e.target.value })}
+                      placeholder="0"
+                    />
+                  </div>
+                  <div className="space-y-1.5 sm:col-span-2">
+                    <Label htmlFor={`tier-badge-${i}`}>Badge (optional)</Label>
+                    <Input
+                      id={`tier-badge-${i}`}
+                      value={t.badge}
+                      onChange={(e) => updateTier(i, { badge: e.target.value })}
+                      placeholder="Most popular"
+                      maxLength={24}
+                    />
+                  </div>
+                </div>
+              </div>
+            ))}
+            <Button
+              type="button"
+              variant="outline"
+              className="w-full border-dashed"
+              onClick={() => setTiers((prev) => (prev.length >= 4 ? prev : [...prev, { ...EMPTY_TIER }]))}
+              disabled={tiers.length >= 4}
+            >
+              <Plus className="h-4 w-4" /> Add tier {tiers.length >= 4 && "(max 4)"}
+            </Button>
+          </div>
+        )}
+
+        {formError && (
+          <p className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs font-medium text-red-600 dark:text-red-400">
+            {formError}
+          </p>
+        )}
+
+        <DialogFooter className="gap-2 sm:gap-0">
+          {step === 2 && (
+            <Button type="button" variant="ghost" onClick={() => setStep(1)}>
+              Back
+            </Button>
+          )}
+          {step === 1 ? (
+            <Button type="button" onClick={goToPricing}>
+              Continue to pricing <ArrowRight className="h-4 w-4" />
+            </Button>
+          ) : (
+            <Button type="submit" form="create-product-form" disabled={busy} onClick={(e) => void submit(e)}>
+              {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+              Create product
+            </Button>
+          )}
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ============================================================================
+// Edit product dialog (basics)
+// ============================================================================
+
+function EditProductDialog({
+  product,
+  onOpenChange,
+  onSaved,
+}: {
+  product: ProductCardDTO | null;
+  onOpenChange: (open: boolean) => void;
+  onSaved: (product: ProductDetailDTO) => void;
+}) {
+  const { toast } = useToast();
+  const [title, setTitle] = useState("");
+  const [tagline, setTagline] = useState("");
+  const [category, setCategory] = useState("OTHER");
+  const [description, setDescription] = useState("");
+  const [formError, setFormError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (product) {
+      setTitle(product.title);
+      setTagline(product.tagline || "");
+      setCategory(product.category);
+      setDescription("");
+      setFormError(null);
+      setBusy(false);
+    }
+  }, [product]);
+
+  async function save() {
+    if (!product) return;
+    if (title.trim().length < 3 || description.trim().length < 10) {
+      setFormError("Title needs 3+ characters and description 10+.");
+      return;
+    }
+    setFormError(null);
+    setBusy(true);
+    try {
+      const res = await api<{ product: ProductDetailDTO }>(`/api/products/${product.id}`, {
+        method: "PATCH",
+        json: { title: title.trim(), tagline: tagline.trim(), category, description: description.trim() },
+      });
+      if (res.product) onSaved(res.product);
+      toast({ title: "Product updated", description: `${title.trim()} has been saved.` });
+      onOpenChange(false);
+    } catch (e) {
+      toast({ title: "Couldn't save changes", description: (e as Error).message, variant: "destructive" });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Dialog open={!!product} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>Edit {product?.title}</DialogTitle>
+          <DialogDescription>Update the storefront basics. Pricing tiers are managed at creation.</DialogDescription>
+        </DialogHeader>
+        <div className="space-y-4">
+          <div className="space-y-1.5">
+            <Label htmlFor="ep-title">Title</Label>
+            <Input id="ep-title" value={title} onChange={(e) => setTitle(e.target.value)} maxLength={80} />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="ep-tagline">Tagline</Label>
+            <Input id="ep-tagline" value={tagline} onChange={(e) => setTagline(e.target.value)} maxLength={120} />
+          </div>
+          <div className="space-y-1.5">
+            <Label>Category</Label>
+            <Select value={category} onValueChange={setCategory}>
+              <SelectTrigger aria-label="Category" className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {CATEGORIES.map((c) => (
+                  <SelectItem key={c.key} value={c.key}>
+                    {c.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="ep-desc">Description</Label>
+            <Textarea
+              id="ep-desc"
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              placeholder="Replace the current description (required, 10+ characters)"
+              rows={4}
+            />
+          </div>
+          {formError && (
+            <p className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs font-medium text-red-600 dark:text-red-400">
+              {formError}
+            </p>
+          )}
+        </div>
+        <DialogFooter>
+          <Button variant="ghost" onClick={() => onOpenChange(false)}>
+            Cancel
+          </Button>
+          <Button onClick={() => void save()} disabled={busy}>
+            {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />} Save changes
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ============================================================================
+// TAB: SUBSCRIBERS (CRM)
+// ============================================================================
+
+interface SubscriberRow {
+  id: string;
+  customer: {
+    id: string;
+    name: string | null;
+    email: string;
+    avatarColor: string;
+    discordHandle: string | null;
+    telegramHandle: string | null;
+  };
+  product: { id: string; title: string; coverTheme: string };
+  plan: PlanDTO;
+  status: string;
+  gateway: string;
+  cancelAtPeriodEnd: boolean;
+  dunningAttempts: number;
+  currentPeriodEnd: string;
+  trialEndsAt: string | null;
+  createdAt: string;
+  lifetimeValueCents: number;
+  paymentMethod: SubPaymentMethod | null;
+}
+
+const SUBSCRIBER_SEGMENTS: { key: string; label: string; test: (s: SubscriberRow) => boolean }[] = [
+  { key: "all", label: "All", test: () => true },
+  { key: "active", label: "Active", test: (s) => s.status === "ACTIVE" && !s.cancelAtPeriodEnd },
+  { key: "trialing", label: "Trialing", test: (s) => s.status === "TRIALING" },
+  { key: "past_due", label: "Past due", test: (s) => s.status === "PAST_DUE" },
+  { key: "canceling", label: "Canceling", test: (s) => s.cancelAtPeriodEnd || s.status === "CANCELED" },
+];
+
+function SubscribersTab() {
+  const { data, error, loading } = useCreatorFetch(() =>
+    api<{ subscribers: SubscriberRow[] }>("/api/creator/subscribers").then((r) => r.subscribers)
+  );
+  const [segment, setSegment] = useState("all");
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+
+  if (loading) return <TableSkeleton rows={7} label="Subscribers" />;
+  if (error || !data) return <LoadError message={error || "Subscribers unavailable."} />;
+
+  const subs = data;
+  const active = SUBSCRIBER_SEGMENTS.find((s) => s.key === segment) || SUBSCRIBER_SEGMENTS[0];
+  const filtered = subs.filter(active.test);
+
+  return (
+    <div className="space-y-5">
+      <SectionHeader
+        title="Subscribers"
+        description={`${subs.length} member${subs.length === 1 ? "" : "s"} across your products`}
+      />
+
+      {/* Segment chips */}
+      <div className="flex flex-wrap gap-2" role="group" aria-label="Filter subscribers">
+        {SUBSCRIBER_SEGMENTS.map((seg) => {
+          const on = seg.key === segment;
+          const count = subs.filter(seg.test).length;
+          return (
+            <button
+              key={seg.key}
+              onClick={() => setSegment(seg.key)}
+              aria-pressed={on}
+              className={cn(
+                "flex h-9 items-center gap-2 rounded-full border px-3.5 text-sm font-medium transition-colors",
+                on
+                  ? "border-primary bg-primary text-primary-foreground shadow-sm"
+                  : "bg-card text-muted-foreground hover:bg-muted hover:text-foreground"
+              )}
+            >
+              {seg.label}
+              <span
+                className={cn(
+                  "rounded-full px-1.5 text-[11px] font-semibold tabular-nums",
+                  on ? "bg-primary-foreground/20" : "bg-muted"
+                )}
+              >
+                {count}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+
+      {subs.length === 0 ? (
+        <EmptyState
+          icon={Users}
+          title="No subscribers yet"
+          description="Members who purchase your products will appear here with their plan, payment method and lifetime value."
+        />
+      ) : filtered.length === 0 ? (
+        <EmptyState
+          icon={Users}
+          title={`No ${active.label.toLowerCase()} subscribers`}
+          description="Try a different segment to see more members."
+        />
+      ) : (
+        <Panel className="overflow-hidden">
+          <div className={cn("max-h-[70vh] overflow-auto", SCROLL_THIN)}>
+            <table className="w-full min-w-[920px] text-sm">
+              <TableHeader className="sticky top-0 z-10 bg-card shadow-[0_1px_0_0_var(--border)]">
+                <TableRow className="hover:bg-transparent">
+                  <TableHead className="pl-5">Customer</TableHead>
+                  <TableHead>Product</TableHead>
+                  <TableHead>Plan</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead>Gateway</TableHead>
+                  <TableHead>Next renewal</TableHead>
+                  <TableHead className="text-right">LTV</TableHead>
+                  <TableHead className="w-12" aria-label="Expand" />
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {filtered.map((s) => {
+                  const expanded = expandedId === s.id;
+                  return (
+                    <>
+                      <TableRow
+                        key={s.id}
+                        className="cursor-pointer"
+                        onClick={() => setExpandedId(expanded ? null : s.id)}
+                        aria-expanded={expanded}
+                      >
+                        <TableCell className="pl-5">
+                          <div className="flex items-center gap-2.5">
+                            <UserAvatar name={s.customer.name || s.customer.email} color={s.customer.avatarColor} size="sm" />
+                            <div className="min-w-0">
+                              <p className="truncate text-[13px] font-medium">{s.customer.name || s.customer.email}</p>
+                              <p className="truncate text-xs text-muted-foreground">{s.customer.email}</p>
+                            </div>
+                          </div>
+                        </TableCell>
+                        <TableCell>
+                          <div className="flex items-center gap-2.5">
+                            <ProductCover
+                              theme={s.product.coverTheme}
+                              category="OTHER"
+                              title={s.product.title}
+                              className="h-8 w-11 shrink-0 rounded-md"
+                              iconClassName="h-9 w-9"
+                            />
+                            <span className="max-w-[150px] truncate text-[13px]">{s.product.title}</span>
+                          </div>
+                        </TableCell>
+                        <TableCell>
+                          <p className="text-[13px] font-medium">{s.plan.name}</p>
+                          <p className="text-xs tabular-nums text-muted-foreground">
+                            {fmtMoney(s.plan.priceCents)}/{s.plan.interval === "year" ? "yr" : "mo"}
+                          </p>
+                        </TableCell>
+                        <TableCell>
+                          <StatusBadge status={s.status} />
+                        </TableCell>
+                        <TableCell>
+                          <GatewayBadge gateway={s.gateway} />
+                        </TableCell>
+                        <TableCell>
+                          <p className="text-[13px] tabular-nums">{fmtDate(s.currentPeriodEnd)}</p>
+                          {s.cancelAtPeriodEnd && s.status !== "CANCELED" && (
+                            <span className="mt-0.5 inline-block rounded-full border border-amber-500/30 bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:text-amber-400">
+                              Cancels {fmtDate(s.currentPeriodEnd)}
+                            </span>
+                          )}
+                          {s.status === "TRIALING" && s.trialEndsAt && (
+                            <span className="mt-0.5 inline-block rounded-full border border-teal-500/30 bg-teal-500/10 px-1.5 py-0.5 text-[10px] font-medium text-teal-700 dark:text-teal-400">
+                              Trial ends {fmtDate(s.trialEndsAt)}
+                            </span>
+                          )}
+                        </TableCell>
+                        <TableCell className="text-right font-medium tabular-nums">
+                          {fmtMoney(s.lifetimeValueCents)}
+                        </TableCell>
+                        <TableCell>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-7 w-7"
+                            aria-label={expanded ? "Collapse details" : "Expand details"}
+                            aria-expanded={expanded}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setExpandedId(expanded ? null : s.id);
+                            }}
+                          >
+                            <ChevronDown className={cn("h-4 w-4 transition-transform", expanded && "rotate-180")} />
+                          </Button>
+                        </TableCell>
+                      </TableRow>
+                      {expanded && (
+                        <TableRow key={`${s.id}-detail`} className="bg-muted/30 hover:bg-muted/30">
+                          <TableCell colSpan={8} className="px-5 py-4">
+                            <motion.div
+                              initial={{ opacity: 0, y: -4 }}
+                              animate={{ opacity: 1, y: 0 }}
+                              transition={{ duration: 0.2 }}
+                              className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5"
+                            >
+                              <DetailBlock icon={CreditCard} label="Payment method" value={pmLine(s.paymentMethod)} />
+                              <DetailBlock icon={Users} label="Discord" value={s.customer.discordHandle || "Not linked"} />
+                              <DetailBlock icon={Send} label="Telegram" value={s.customer.telegramHandle || "Not linked"} />
+                              <DetailBlock
+                                icon={TriangleAlert}
+                                label="Dunning attempts"
+                                value={
+                                  s.dunningAttempts > 0
+                                    ? `${s.dunningAttempts} of 3 retries`
+                                    : s.status === "PAST_DUE"
+                                      ? "Retries starting"
+                                      : "None"
+                                }
+                                tone={s.dunningAttempts > 0 ? "warning" : undefined}
+                              />
+                              <DetailBlock icon={CalendarRange} label="Member since" value={fmtDate(s.createdAt)} />
+                            </motion.div>
+                          </TableCell>
+                        </TableRow>
+                      )}
+                    </>
+                  );
+                })}
+              </TableBody>
+            </table>
+          </div>
+        </Panel>
+      )}
+    </div>
+  );
+}
+
+function DetailBlock({
+  icon: Icon,
+  label,
+  value,
+  tone,
+}: {
+  icon: LucideIcon;
+  label: string;
+  value: string;
+  tone?: "warning";
+}) {
+  return (
+    <div className={cn("rounded-xl border bg-background/70 p-3", tone === "warning" && "border-amber-500/40")}>
+      <p className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
+        <Icon className={cn("h-3.5 w-3.5", tone === "warning" && "text-amber-500")} />
+        {label}
+      </p>
+      <p className={cn("mt-1 truncate text-sm font-medium tabular-nums", tone === "warning" && "text-amber-700 dark:text-amber-400")}>
+        {value}
+      </p>
+    </div>
+  );
+}
+
+// ============================================================================
+// TAB: ORDERS
+// ============================================================================
+
+interface OrderRow {
+  id: string;
+  number: string;
+  customer: { id: string; name: string | null; email: string; avatarColor: string };
+  product: { id: string; title: string; coverTheme: string };
+  planName: string;
+  description: string;
+  amountCents: number;
+  status: string;
+  gateway: string;
+  createdAt: string;
+  paidAt: string | null;
+}
+
+function OrdersTab() {
+  const now = useSimNow();
+  const { toast } = useToast();
+  const { data, error, loading } = useCreatorFetch(() =>
+    api<{ orders: OrderRow[] }>("/api/creator/orders").then((r) => r.orders)
+  );
+  const [statusFilter, setStatusFilter] = useState("ALL");
+  const [query, setQuery] = useState("");
+  const [selected, setSelected] = useState<OrderRow | null>(null);
+
+  const nowMs = useMemo(() => new Date(now).getTime(), [now]);
+
+  if (loading) return <TableSkeleton rows={7} label="Orders" />;
+  if (error || !data) return <LoadError message={error || "Orders unavailable."} />;
+
+  const orders = data;
+  const paid = orders.filter((o) => o.status === "PAID");
+  const grossVolume = paid.reduce((s, o) => s + o.amountCents, 0);
+  const failedCount = orders.filter((o) => o.status === "FAILED").length;
+  const net30 = paid
+    .filter((o) => new Date(o.createdAt).getTime() >= nowMs - 30 * 86400000)
+    .reduce((s, o) => s + o.amountCents, 0);
+
+  const q = query.trim().toLowerCase();
+  const filtered = orders.filter((o) => {
+    if (statusFilter !== "ALL" && o.status !== statusFilter) return false;
+    if (!q) return true;
+    return (
+      (o.customer.name || "").toLowerCase().includes(q) ||
+      o.product.title.toLowerCase().includes(q) ||
+      o.planName.toLowerCase().includes(q)
+    );
+  });
+
+  return (
+    <div className="space-y-5">
+      <SectionHeader title="Orders" description={`${orders.length} invoice${orders.length === 1 ? "" : "s"} across your products`} />
+
+      {/* Stats */}
+      <div className="grid gap-4 sm:grid-cols-3">
+        <StatCard label="Gross volume" value={fmtMoney(grossVolume)} sub={`${paid.length} paid invoices`} icon={DollarSign} />
+        <StatCard
+          label="Failed charges"
+          value={String(failedCount)}
+          sub={failedCount > 0 ? "retrying via dunning" : "all clear"}
+          icon={XCircle}
+          className={cn(failedCount > 0 && "border-red-500/40 bg-red-500/[0.04]")}
+        />
+        <StatCard label="Net · 30 days" value={fmtMoney(net30)} sub="successful charges" icon={ReceiptText} />
+      </div>
+
+      {/* Filters */}
+      <div className="flex flex-wrap items-center gap-3">
+        <div className="flex gap-1.5 rounded-full border bg-card p-1" role="group" aria-label="Filter by status">
+          {(["ALL", "PAID", "FAILED"] as const).map((s) => (
+            <button
+              key={s}
+              onClick={() => setStatusFilter(s)}
+              aria-pressed={statusFilter === s}
+              className={cn(
+                "h-8 rounded-full px-3.5 text-xs font-semibold transition-colors",
+                statusFilter === s
+                  ? s === "FAILED"
+                    ? "bg-red-500/15 text-red-700 dark:text-red-400"
+                    : "bg-primary text-primary-foreground"
+                  : "text-muted-foreground hover:text-foreground"
+              )}
+            >
+              {s === "ALL" ? "All" : s === "PAID" ? "Paid" : "Failed"}
+            </button>
+          ))}
+        </div>
+        <div className="relative min-w-0 flex-1 sm:max-w-xs">
+          <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search customer or product…"
+            className="h-9 rounded-full pl-9"
+            aria-label="Search orders"
+          />
+        </div>
+      </div>
+
+      {orders.length === 0 ? (
+        <EmptyState
+          icon={Receipt}
+          title="No orders yet"
+          description="Invoices from purchases and renewals will appear here."
+        />
+      ) : filtered.length === 0 ? (
+        <EmptyState
+          icon={Search}
+          title="No matching orders"
+          description="Try clearing the search or switching the status filter."
+        />
+      ) : (
+        <Panel className="overflow-hidden">
+          <div className={cn("max-h-[70vh] overflow-auto", SCROLL_THIN)}>
+            <table className="w-full min-w-[860px] text-sm">
+              <TableHeader className="sticky top-0 z-10 bg-card shadow-[0_1px_0_0_var(--border)]">
+                <TableRow className="hover:bg-transparent">
+                  <TableHead className="pl-5">Invoice</TableHead>
+                  <TableHead>Customer</TableHead>
+                  <TableHead>Product</TableHead>
+                  <TableHead>Gateway</TableHead>
+                  <TableHead className="text-right">Amount</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead className="pr-5 text-right">Date</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {filtered.map((o) => (
+                  <TableRow key={o.id} className="cursor-pointer" onClick={() => setSelected(o)}>
+                    <TableCell className="pl-5 font-mono text-[13px] font-medium">{o.number}</TableCell>
+                    <TableCell>
+                      <div className="flex items-center gap-2.5">
+                        <UserAvatar name={o.customer.name || o.customer.email} color={o.customer.avatarColor} size="sm" />
+                        <span className="max-w-[140px] truncate text-[13px] font-medium">
+                          {o.customer.name || o.customer.email}
+                        </span>
+                      </div>
+                    </TableCell>
+                    <TableCell>
+                      <p className="max-w-[180px] truncate text-[13px]">{o.product.title}</p>
+                      <p className="text-xs text-muted-foreground">{o.planName}</p>
+                    </TableCell>
+                    <TableCell>
+                      <GatewayBadge gateway={o.gateway} />
+                    </TableCell>
+                    <TableCell className="text-right font-semibold tabular-nums">{fmtMoney(o.amountCents)}</TableCell>
+                    <TableCell>
+                      <StatusBadge status={o.status} />
+                    </TableCell>
+                    <TableCell className="pr-5 text-right text-xs tabular-nums text-muted-foreground">
+                      {fmtDateTime(o.createdAt)}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </table>
+          </div>
+        </Panel>
+      )}
+
+      {/* Invoice detail */}
+      <Dialog open={!!selected} onOpenChange={(o) => !o && setSelected(null)}>
+        <DialogContent className="sm:max-w-md">
+          {selected && (
+            <>
+              <DialogHeader>
+                <DialogTitle className="flex flex-wrap items-center gap-2.5 font-mono">
+                  {selected.number}
+                  <StatusBadge status={selected.status} />
+                </DialogTitle>
+                <DialogDescription>Invoice detail</DialogDescription>
+              </DialogHeader>
+              <div className="space-y-3 text-sm">
+                <div className="flex items-center gap-3 rounded-xl border p-3">
+                  <UserAvatar name={selected.customer.name || selected.customer.email} color={selected.customer.avatarColor} />
+                  <div className="min-w-0">
+                    <p className="truncate font-medium">{selected.customer.name || selected.customer.email}</p>
+                    <p className="truncate text-xs text-muted-foreground">{selected.customer.email}</p>
+                  </div>
+                </div>
+                <dl className="space-y-2.5">
+                  <div className="flex items-start justify-between gap-4">
+                    <dt className="text-muted-foreground">Product</dt>
+                    <dd className="text-right font-medium">
+                      {selected.product.title}
+                      <span className="block text-xs font-normal text-muted-foreground">{selected.planName} plan</span>
+                    </dd>
+                  </div>
+                  <div className="flex items-start justify-between gap-4">
+                    <dt className="text-muted-foreground">Description</dt>
+                    <dd className="max-w-[65%] text-right">{selected.description}</dd>
+                  </div>
+                  <div className="flex items-center justify-between gap-4">
+                    <dt className="text-muted-foreground">Gateway</dt>
+                    <dd>
+                      <GatewayBadge gateway={selected.gateway} />
+                    </dd>
+                  </div>
+                  <div className="flex items-center justify-between gap-4">
+                    <dt className="text-muted-foreground">Issued</dt>
+                    <dd className="tabular-nums">{fmtDateTime(selected.createdAt)}</dd>
+                  </div>
+                  <div className="flex items-center justify-between gap-4">
+                    <dt className="text-muted-foreground">Paid</dt>
+                    <dd className="tabular-nums">{selected.paidAt ? fmtDateTime(selected.paidAt) : "—"}</dd>
+                  </div>
+                  <div className="flex items-center justify-between gap-4 border-t pt-3">
+                    <dt className="font-semibold">Total</dt>
+                    <dd className="text-lg font-bold tabular-nums">{fmtMoney(selected.amountCents)}</dd>
+                  </div>
+                </dl>
+              </div>
+              <DialogFooter className="gap-2 sm:gap-0">
+                <CopyButton value={selected.number} label="Copy number" />
+                <Button
+                  variant="outline"
+                  onClick={() =>
+                    toast({
+                      title: "Refunds are simulated in this demo",
+                      description: "In production this would issue a prorated refund and fire invoice.refunded.",
+                    })
+                  }
+                >
+                  <RotateCcw className="h-4 w-4" /> Refund (simulated)
+                </Button>
+              </DialogFooter>
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
+
+// ============================================================================
+// TAB: WEBHOOKS (event-driven access console)
+// ============================================================================
+
+const ENDPOINT_PROVIDERS: Record<string, { label: string; icon: LucideIcon; cls: string }> = {
+  DISCORD_BOT: {
+    label: "Discord bot",
+    icon: Send,
+    cls: "bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border-indigo-500/25",
+  },
+  TELEGRAM_BOT: {
+    label: "Telegram bot",
+    icon: Send,
+    cls: "bg-sky-500/10 text-sky-600 dark:text-sky-400 border-sky-500/25",
+  },
+  GENERIC: { label: "Generic", icon: Webhook, cls: "bg-muted text-muted-foreground border-border" },
+};
+
+function WebhooksTab() {
+  const { toast } = useToast();
+  const now = useSimNow();
+  const refresh = useAppStore((s) => s.refresh);
+
+  const { data, error, loading, setData } = useCreatorFetch(async () => {
+    const [epsRes, delsRes] = await Promise.all([
+      api<{ endpoints: WebhookEndpointDTO[] }>("/api/webhooks/endpoints"),
+      api<{ deliveries: WebhookDeliveryDTO[] }>("/api/webhooks/deliveries"),
+    ]);
+    return { endpoints: epsRes.endpoints, deliveries: delsRes.deliveries };
+  });
+
+  const [addOpen, setAddOpen] = useState(false);
+  const [revealed, setRevealed] = useState<Set<string>>(new Set());
+  const [statusFilter, setStatusFilter] = useState("ALL");
+  const [endpointFilter, setEndpointFilter] = useState("ALL");
+  const [selectedDelivery, setSelectedDelivery] = useState<WebhookDeliveryDTO | null>(null);
+
+  async function toggleActive(ep: WebhookEndpointDTO, next: boolean) {
+    // Optimistic flip; revert on failure.
+    setData((prev) =>
+      prev
+        ? { ...prev, endpoints: prev.endpoints.map((e) => (e.id === ep.id ? { ...e, isActive: next } : e)) }
+        : prev
+    );
+    try {
+      await api(`/api/webhooks/endpoints/${ep.id}`, { method: "PATCH", json: { isActive: next } });
+      toast({
+        title: next ? "Endpoint activated" : "Endpoint paused",
+        description: next ? `${ep.name} will receive events again.` : `${ep.name} no longer receives events.`,
+      });
+      refresh();
+    } catch (e) {
+      setData((prev) =>
+        prev
+          ? { ...prev, endpoints: prev.endpoints.map((x) => (x.id === ep.id ? { ...x, isActive: !next } : x)) }
+          : prev
+      );
+      toast({ title: "Couldn't update the endpoint", description: (e as Error).message, variant: "destructive" });
+    }
+  }
+
+  async function deleteEndpoint(ep: WebhookEndpointDTO) {
+    try {
+      await api(`/api/webhooks/endpoints/${ep.id}`, { method: "DELETE" });
+      toast({ title: "Endpoint deleted", description: `${ep.name} and its delivery history were removed.` });
+      refresh();
+    } catch (e) {
+      toast({ title: "Couldn't delete the endpoint", description: (e as Error).message, variant: "destructive" });
+    }
+  }
+
+  if (loading) {
+    return (
+      <div className="space-y-5" aria-busy="true" aria-label="Loading webhooks">
+        <Skeleton className="h-16 rounded-2xl" />
+        <div className="grid gap-4 lg:grid-cols-2">
+          <Skeleton className="h-52 rounded-2xl" />
+          <Skeleton className="h-52 rounded-2xl" />
+        </div>
+        <Skeleton className="h-64 rounded-2xl" />
+      </div>
+    );
+  }
+  if (error || !data) return <LoadError message={error || "Webhooks unavailable."} />;
+
+  const { endpoints, deliveries } = data;
+  const filteredDeliveries = deliveries.filter(
+    (d) =>
+      (statusFilter === "ALL" || d.status === statusFilter) &&
+      (endpointFilter === "ALL" || d.endpoint.id === endpointFilter)
+  );
+
+  return (
+    <div className="space-y-6">
+      <SectionHeader
+        title="Webhooks"
+        description="Event-driven access management for your products"
+        action={
+          <Button onClick={() => setAddOpen(true)}>
+            <Plus className="h-4 w-4" /> Add endpoint
+          </Button>
+        }
+      />
+
+      {/* Info banner */}
+      <div className="flex items-start gap-3 rounded-2xl border border-teal-500/30 bg-teal-500/10 p-4">
+        <Zap className="mt-0.5 h-5 w-5 shrink-0 text-teal-600 dark:text-teal-400" />
+        <p className="text-sm leading-relaxed">
+          Every subscription event fans out to your endpoints with <strong>HMAC-SHA256 signatures</strong>. Discord and
+          Telegram bot endpoints automate role assignment the moment access is granted or revoked.
+        </p>
+      </div>
+
+      {/* Endpoints */}
+      <section aria-label="Endpoints">
+        <h2 className="mb-3 text-sm font-bold">
+          Endpoints <span className="ml-1 font-normal text-muted-foreground">({endpoints.length})</span>
+        </h2>
+        {endpoints.length === 0 ? (
+          <EmptyState
+            icon={Webhook}
+            title="No endpoints yet"
+            description="Register a Discord bot, Telegram bot or generic HTTPS endpoint to automate access and sync your CRM."
+            action={
+              <Button onClick={() => setAddOpen(true)}>
+                <Plus className="h-4 w-4" /> Add your first endpoint
+              </Button>
+            }
+          />
+        ) : (
+          <motion.div
+            className="grid gap-4 lg:grid-cols-2"
+            variants={stagger}
+            initial="hidden"
+            animate="show"
+          >
+            {endpoints.map((ep) => {
+              const provider = ENDPOINT_PROVIDERS[ep.provider] || ENDPOINT_PROVIDERS.GENERIC;
+              const ProviderIcon = provider.icon;
+              const isRevealed = revealed.has(ep.id);
+              return (
+                <motion.div key={ep.id} variants={fadeUp}>
+                  <Panel className={cn("flex h-full flex-col p-5", !ep.isActive && "opacity-70")}>
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex min-w-0 flex-wrap items-center gap-2">
+                        <span
+                          className={cn(
+                            "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-medium",
+                            provider.cls
+                          )}
+                        >
+                          <ProviderIcon className="h-3 w-3" />
+                          {provider.label}
+                        </span>
+                        <h3 className="min-w-0 truncate font-semibold">{ep.name}</h3>
+                      </div>
+                      <AlertDialog>
+                        <AlertDialogTrigger asChild>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8 shrink-0 text-muted-foreground hover:text-red-600"
+                            aria-label={`Delete ${ep.name}`}
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </Button>
+                        </AlertDialogTrigger>
+                        <AlertDialogContent>
+                          <AlertDialogHeader>
+                            <AlertDialogTitle>Delete this endpoint?</AlertDialogTitle>
+                            <AlertDialogDescription>
+                              {ep.name} will stop receiving events and its {ep.deliveryCount} delivery
+                              {ep.deliveryCount === 1 ? "" : " records"} will be permanently removed.
+                            </AlertDialogDescription>
+                          </AlertDialogHeader>
+                          <AlertDialogFooter>
+                            <AlertDialogCancel>Keep endpoint</AlertDialogCancel>
+                            <AlertDialogAction
+                              className="bg-red-600 text-white hover:bg-red-700"
+                              onClick={() => void deleteEndpoint(ep)}
+                            >
+                              Delete endpoint
+                            </AlertDialogAction>
+                          </AlertDialogFooter>
+                        </AlertDialogContent>
+                      </AlertDialog>
+                    </div>
+
+                    <div className="mt-3.5 space-y-2 text-xs">
+                      <div className="flex items-center gap-1.5">
+                        <span className="w-20 shrink-0 font-medium text-muted-foreground">URL</span>
+                        <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-muted-foreground" title={ep.url}>
+                          {ep.url}
+                        </span>
+                        <CopyButton value={ep.url} />
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <span className="w-20 shrink-0 font-medium text-muted-foreground">Secret</span>
+                        <span className="min-w-0 flex-1 truncate font-mono text-[11px]">
+                          {isRevealed ? ep.secret : "•".repeat(30)}
+                        </span>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-7 w-7 text-muted-foreground hover:text-foreground"
+                          onClick={() =>
+                            setRevealed((prev) => {
+                              const next = new Set(prev);
+                              if (next.has(ep.id)) next.delete(ep.id);
+                              else next.add(ep.id);
+                              return next;
+                            })
+                          }
+                          aria-label={isRevealed ? "Hide signing secret" : "Reveal signing secret"}
+                        >
+                          {isRevealed ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+                        </Button>
+                        <CopyButton value={ep.secret} />
+                      </div>
+                    </div>
+
+                    <div className="mt-3 flex flex-wrap gap-1.5">
+                      {ep.events.slice(0, 4).map((ev) => (
+                        <span
+                          key={ev}
+                          className="rounded-full bg-muted px-2 py-0.5 font-mono text-[10px] text-muted-foreground"
+                        >
+                          {ev}
+                        </span>
+                      ))}
+                      {ep.events.length > 4 && (
+                        <span
+                          className="rounded-full border border-dashed px-2 py-0.5 text-[10px] text-muted-foreground"
+                          title={ep.events.slice(4).join("\n")}
+                        >
+                          +{ep.events.length - 4} more
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="mt-auto flex items-center justify-between border-t pt-3.5 mt-4">
+                      <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                        <Send className="h-3.5 w-3.5" />
+                        {ep.deliveryCount} deliver{ep.deliveryCount === 1 ? "y" : "ies"}
+                      </span>
+                      <label className="flex cursor-pointer items-center gap-2 text-xs font-medium">
+                        <Switch
+                          checked={ep.isActive}
+                          onCheckedChange={(v) => void toggleActive(ep, v)}
+                          aria-label={`${ep.isActive ? "Pause" : "Activate"} ${ep.name}`}
+                        />
+                        {ep.isActive ? "Active" : "Paused"}
+                      </label>
+                    </div>
+                  </Panel>
+                </motion.div>
+              );
+            })}
+          </motion.div>
+        )}
+      </section>
+
+      {/* Send test event */}
+      <TestEventCard endpoints={endpoints} onSent={() => refresh()} />
+
+      {/* Delivery log */}
+      <section aria-label="Delivery log">
+        <div className="mb-3 flex flex-wrap items-end justify-between gap-3">
+          <div>
+            <h2 className="text-sm font-bold">Delivery log</h2>
+            <p className="mt-0.5 text-xs text-muted-foreground">Last {deliveries.length} attempts, newest first</p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Select value={statusFilter} onValueChange={setStatusFilter}>
+              <SelectTrigger className="h-9 w-[130px]" aria-label="Filter by status">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="ALL">All statuses</SelectItem>
+                <SelectItem value="DELIVERED">Delivered</SelectItem>
+                <SelectItem value="FAILED">Failed</SelectItem>
+              </SelectContent>
+            </Select>
+            <Select value={endpointFilter} onValueChange={setEndpointFilter}>
+              <SelectTrigger className="h-9 w-[190px]" aria-label="Filter by endpoint">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="ALL">All endpoints</SelectItem>
+                {endpoints.map((ep) => (
+                  <SelectItem key={ep.id} value={ep.id}>
+                    {ep.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+        </div>
+
+        {deliveries.length === 0 ? (
+          <EmptyState
+            icon={Send}
+            title="No deliveries yet"
+            description="Fire a test event above, or advance time in the time machine to generate real billing events."
+          />
+        ) : filteredDeliveries.length === 0 ? (
+          <EmptyState icon={Search} title="No matching deliveries" description="Try clearing the filters." />
+        ) : (
+          <Panel className="overflow-hidden">
+            <div className={cn("max-h-[60vh] overflow-auto", SCROLL_THIN)}>
+              <table className="w-full min-w-[760px] text-sm">
+                <TableHeader className="sticky top-0 z-10 bg-card shadow-[0_1px_0_0_var(--border)]">
+                  <TableRow className="hover:bg-transparent">
+                    <TableHead className="pl-5">Time</TableHead>
+                    <TableHead>Event</TableHead>
+                    <TableHead>Endpoint</TableHead>
+                    <TableHead>Status</TableHead>
+                    <TableHead>Response</TableHead>
+                    <TableHead className="pr-5 text-right">Attempts</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {filteredDeliveries.map((d) => (
+                    <TableRow key={d.id} className="cursor-pointer" onClick={() => setSelectedDelivery(d)}>
+                      <TableCell className="pl-5 text-xs text-muted-foreground">{relTime(d.createdAt, now)}</TableCell>
+                      <TableCell>
+                        <span className="rounded-md bg-muted px-2 py-1 font-mono text-[11px]">{d.eventType}</span>
+                      </TableCell>
+                      <TableCell>
+                        <span className="max-w-[200px] truncate text-[13px]">{d.endpoint.name}</span>
+                      </TableCell>
+                      <TableCell>
+                        <StatusBadge status={d.status} />
+                      </TableCell>
+                      <TableCell>
+                        <span
+                          className={cn(
+                            "font-mono text-xs font-semibold tabular-nums",
+                            d.responseCode == null
+                              ? "text-muted-foreground"
+                              : d.responseCode >= 500 || d.responseCode >= 400
+                                ? "text-red-600 dark:text-red-400"
+                                : "text-emerald-600 dark:text-emerald-400"
+                          )}
+                        >
+                          {d.responseCode ?? "—"}
+                        </span>
+                      </TableCell>
+                      <TableCell className="pr-5 text-right font-mono text-xs tabular-nums">{d.attempts}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </table>
+            </div>
+          </Panel>
+        )}
+      </section>
+
+      <AddEndpointDialog open={addOpen} onOpenChange={setAddOpen} onAdded={() => refresh()} />
+
+      {/* Delivery detail */}
+      <Dialog open={!!selectedDelivery} onOpenChange={(o) => !o && setSelectedDelivery(null)}>
+        <DialogContent className="max-h-[88vh] overflow-y-auto sm:max-w-2xl">
+          {selectedDelivery && (
+            <>
+              <DialogHeader>
+                <DialogTitle className="flex flex-wrap items-center gap-2.5 font-mono text-base">
+                  {selectedDelivery.eventType}
+                  <StatusBadge status={selectedDelivery.status} />
+                </DialogTitle>
+                <DialogDescription>
+                  Sent to {selectedDelivery.endpoint.name} · {fmtDateTime(selectedDelivery.createdAt)} ·{" "}
+                  {selectedDelivery.attempts} attempt{selectedDelivery.attempts === 1 ? "" : "s"}
+                </DialogDescription>
+              </DialogHeader>
+              <pre
+                className={cn(
+                  "max-h-80 overflow-auto rounded-xl border bg-zinc-950 p-4 font-mono text-xs leading-relaxed text-zinc-200",
+                  SCROLL_THIN
+                )}
+              >
+                {JSON.stringify(selectedDelivery.payload, null, 2)}
+              </pre>
+              <div className="flex items-start gap-2.5 rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-3 text-xs">
+                <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
+                <p className="leading-relaxed">
+                  Signed with the endpoint's HMAC-SHA256 secret in the{" "}
+                  <code className="rounded bg-muted px-1 py-0.5 font-mono">X-Vendly-Signature</code> header — always verify
+                  the signature before trusting a payload.
+                </p>
+              </div>
+              <DialogFooter>
+                <CopyButton value={JSON.stringify(selectedDelivery.payload, null, 2)} label="Copy payload" />
+              </DialogFooter>
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
+
+function TestEventCard({ endpoints, onSent }: { endpoints: WebhookEndpointDTO[]; onSent: () => void }) {
+  const { toast } = useToast();
+  const [eventType, setEventType] = useState<string>("invoice.paid");
+  const [endpointId, setEndpointId] = useState("all");
+  const [busy, setBusy] = useState(false);
+
+  async function sendTest() {
+    setBusy(true);
+    try {
+      const res = await api<{ ok: boolean; dispatched: number }>("/api/webhooks/test", {
+        json: { eventType, ...(endpointId !== "all" ? { endpointId } : {}) },
+      });
+      toast({
+        title: `Event dispatched to ${res.dispatched} endpoint${res.dispatched === 1 ? "" : "s"}`,
+        description: `${eventType} fired — check the delivery log below.`,
+      });
+      onSent();
+    } catch (e) {
+      toast({ title: "Test event failed", description: (e as Error).message, variant: "destructive" });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Panel className="p-5">
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <h2 className="text-sm font-bold">Send a test event</h2>
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            Dispatch a sample payload to verify an integration end-to-end.
+          </p>
+        </div>
+      </div>
+      <div className="mt-4 grid gap-2.5 sm:grid-cols-[1fr_1fr_auto]">
+        <Select value={eventType} onValueChange={setEventType}>
+          <SelectTrigger aria-label="Event type" className="w-full">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {WEBHOOK_EVENTS.map((ev) => (
+              <SelectItem key={ev} value={ev} className="font-mono text-xs">
+                {ev}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Select value={endpointId} onValueChange={setEndpointId}>
+          <SelectTrigger aria-label="Target endpoint" className="w-full">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All active endpoints</SelectItem>
+            {endpoints.map((ep) => (
+              <SelectItem key={ep.id} value={ep.id}>
+                {ep.name}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Button onClick={() => void sendTest()} disabled={busy || endpoints.length === 0}>
+          {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />} Send test event
+        </Button>
+      </div>
+      <p className="mt-2.5 text-[11px] text-muted-foreground">
+        Delivered to every active endpoint subscribed to this event — payloads are signed and retry automatically on
+        failure.
+      </p>
+    </Panel>
+  );
+}
+
+function AddEndpointDialog({
+  open,
+  onOpenChange,
+  onAdded,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onAdded: () => void;
+}) {
+  const { toast } = useToast();
+  const [name, setName] = useState("");
+  const [provider, setProvider] = useState("GENERIC");
+  const [url, setUrl] = useState("");
+  const [events, setEvents] = useState<string[]>([]);
+  const [formError, setFormError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (open) {
+      setName("");
+      setProvider("GENERIC");
+      setUrl("");
+      setEvents([]);
+      setFormError(null);
+      setBusy(false);
+    }
+  }, [open]);
+
+  function toggleEvent(ev: string) {
+    setEvents((prev) => (prev.includes(ev) ? prev.filter((x) => x !== ev) : [...prev, ev]));
+  }
+
+  async function submit(e: FormEvent) {
+    e.preventDefault();
+    if (name.trim().length < 3) return setFormError("Endpoint name must be at least 3 characters.");
+    if (!/^https?:\/\//.test(url.trim())) return setFormError("Endpoint URL must start with http:// or https://");
+    if (events.length === 0) return setFormError("Subscribe to at least one event.");
+    setFormError(null);
+    setBusy(true);
+    try {
+      await api("/api/webhooks/endpoints", {
+        json: { name: name.trim(), provider, url: url.trim(), events },
+      });
+      toast({ title: "Endpoint added", description: `${name.trim()} is ready to receive events.` });
+      onAdded();
+      onOpenChange(false);
+    } catch (err) {
+      toast({ title: "Couldn't add the endpoint", description: (err as Error).message, variant: "destructive" });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-h-[88vh] overflow-y-auto sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>Add an endpoint</DialogTitle>
+          <DialogDescription>Register an HTTPS endpoint to receive signed product events.</DialogDescription>
+        </DialogHeader>
+        <form id="add-endpoint-form" onSubmit={(e) => void submit(e)} className="space-y-4">
+          <div className="space-y-1.5">
+            <Label htmlFor="we-name">Name</Label>
+            <Input id="we-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Discord Bot — Access Manager" maxLength={60} />
+          </div>
+          <div className="space-y-1.5">
+            <Label>Provider</Label>
+            <Select value={provider} onValueChange={setProvider}>
+              <SelectTrigger aria-label="Provider" className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="GENERIC">
+                  <span className="flex items-center gap-2">
+                    <Webhook className="h-3.5 w-3.5" /> Generic (any HTTPS URL)
+                  </span>
+                </SelectItem>
+                <SelectItem value="DISCORD_BOT">
+                  <span className="flex items-center gap-2">
+                    <Send className="h-3.5 w-3.5" /> Discord bot
+                  </span>
+                </SelectItem>
+                <SelectItem value="TELEGRAM_BOT">
+                  <span className="flex items-center gap-2">
+                    <Send className="h-3.5 w-3.5" /> Telegram bot
+                  </span>
+                </SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="we-url">Endpoint URL</Label>
+            <Input
+              id="we-url"
+              value={url}
+              onChange={(e) => setUrl(e.target.value)}
+              placeholder="https://example.com/webhooks/vendly"
+              inputMode="url"
+            />
+          </div>
+          <fieldset className="space-y-2">
+            <legend className="text-sm font-medium">Events</legend>
+            <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
+              {WEBHOOK_EVENTS.map((ev) => {
+                const on = events.includes(ev);
+                return (
+                  <button
+                    key={ev}
+                    type="button"
+                    onClick={() => toggleEvent(ev)}
+                    aria-pressed={on}
+                    className={cn(
+                      "flex items-center gap-2 rounded-lg border px-2.5 py-2 text-left font-mono text-[11px] transition-colors",
+                      on
+                        ? "border-primary bg-primary/10 text-primary"
+                        : "text-muted-foreground hover:bg-muted hover:text-foreground"
+                    )}
+                  >
+                    {on ? <Check className="h-3.5 w-3.5 shrink-0" /> : <Plus className="h-3.5 w-3.5 shrink-0" />}
+                    <span className="truncate">{ev}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </fieldset>
+          <p className="flex items-start gap-2 rounded-xl border border-dashed p-3 text-xs text-muted-foreground">
+            <KeyRound className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            A unique signing secret will be generated automatically — find it (and copy it) on the endpoint card.
+          </p>
+          {formError && (
+            <p className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs font-medium text-red-600 dark:text-red-400">
+              {formError}
+            </p>
+          )}
+        </form>
+        <DialogFooter>
+          <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>
+            Cancel
+          </Button>
+          <Button type="submit" form="add-endpoint-form" disabled={busy}>
+            {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />} Add endpoint
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ============================================================================
+// TAB: TIME (billing time machine)
+// ============================================================================
+
+const RUN_STEPS: { icon: LucideIcon; cls: string; title: string; text: string }[] = [
+  {
+    icon: RefreshCw,
+    cls: "bg-emerald-500/12 text-emerald-600 dark:text-emerald-400",
+    title: "Renewals",
+    text: "Subscriptions due for renewal are charged on their stored payment method and a new invoice is created.",
+  },
+  {
+    icon: XCircle,
+    cls: "bg-red-500/12 text-red-600 dark:text-red-400",
+    title: "Dunning",
+    text: "Failed charges mark the subscription PAST_DUE and retry up to 3 times — then cancel and revoke access.",
+  },
+  {
+    icon: Sparkles,
+    cls: "bg-amber-500/12 text-amber-600 dark:text-amber-400",
+    title: "Trial conversion",
+    text: "Ended trials convert to a paid subscription — or fail like any other charge.",
+  },
+  {
+    icon: Ban,
+    cls: "bg-rose-500/12 text-rose-600 dark:text-rose-400",
+    title: "Scheduled cancels",
+    text: "cancel_at_period_end subscriptions terminate — Discord roles and license keys are revoked.",
+  },
+];
+
+function runEventIcon(ev: string): { icon: LucideIcon; cls: string } {
+  const l = ev.toLowerCase();
+  if (l.includes("renewed")) return { icon: RefreshCw, cls: "text-emerald-400" };
+  if (l.includes("canceled")) return { icon: Ban, cls: "text-rose-400" };
+  if (l.includes("failed")) return { icon: XCircle, cls: "text-red-400" };
+  if (l.includes("trial")) return { icon: Sparkles, cls: "text-amber-400" };
+  return { icon: ChevronRight, cls: "text-zinc-500" };
+}
+
+function TimeTab() {
+  const { toast } = useToast();
+  const clock = useAppStore((s) => s.clock);
+  const setClock = useAppStore((s) => s.setClock);
+  const refresh = useAppStore((s) => s.refresh);
+
+  const [busyDays, setBusyDays] = useState<number | null>(null);
+  const [resetting, setResetting] = useState(false);
+  const [result, setResult] = useState<BillingRunResult | null>(null);
+  const [customDays, setCustomDays] = useState(7);
+  const [customInput, setCustomInput] = useState("7");
+
+  const working = busyDays !== null || resetting;
+
+  function onCustomChange(raw: string) {
+    setCustomInput(raw);
+    const v = Math.round(Number(raw));
+    if (Number.isFinite(v) && v >= 1 && v <= 90) setCustomDays(v);
+  }
+
+  async function runAdvance(days: number) {
+    setBusyDays(days);
+    try {
+      const res = await api<BillingRunResult>("/api/billing/advance", { json: { days } });
+      setResult(res);
+      setClock({ simulated: true, now: res.newNow, label: `Simulated (+${res.advancedDays}d)` });
+      refresh();
+      toast({
+        title: `Time advanced by ${res.advancedDays} day${res.advancedDays === 1 ? "" : "s"}`,
+        description: "The billing engine ran — see the run log below.",
+      });
+    } catch (e) {
+      toast({ title: "Billing run failed", description: (e as Error).message, variant: "destructive" });
+    } finally {
+      setBusyDays(null);
+    }
+  }
+
+  async function runReset() {
+    setResetting(true);
+    try {
+      await api("/api/billing/reset", { json: {} });
+      setClock({ simulated: false, now: new Date().toISOString(), label: "Live" });
+      setResult(null);
+      refresh();
+      toast({ title: "Back to live time", description: "The clock follows real time again — billing was settled up to now." });
+    } catch (e) {
+      toast({ title: "Couldn't reset the clock", description: (e as Error).message, variant: "destructive" });
+    } finally {
+      setResetting(false);
+    }
+  }
+
+  const runStats: { label: string; value: number; icon: LucideIcon; cls: string }[] = result
+    ? [
+        { label: "Renewals", value: result.renewals, icon: RefreshCw, cls: "text-emerald-400" },
+        { label: "Failed", value: result.renewalsFailed, icon: XCircle, cls: "text-red-400" },
+        { label: "Canceled", value: result.canceled, icon: Ban, cls: "text-rose-400" },
+        { label: "Trials converted", value: result.trialsConverted, icon: Sparkles, cls: "text-amber-400" },
+        { label: "Invoices", value: result.invoicesCreated, icon: ReceiptText, cls: "text-teal-400" },
+      ]
+    : [];
+
+  return (
+    <div className="space-y-6">
+      <SectionHeader
+        title="Billing time machine"
+        description="Advance the simulated clock to watch renewals, trials and dunning play out in real data"
+      />
+
+      {/* Clock status + advance controls */}
+      <div className="grid gap-4 sm:gap-5 lg:grid-cols-5">
+        <Panel className="p-5 sm:p-6 lg:col-span-2">
+          <div className="flex items-center justify-between gap-3">
+            <p className="flex items-center gap-2 text-sm font-semibold">
+              <Timer className="h-4 w-4 text-primary" /> Current time
+            </p>
+            {clock.simulated ? (
+              <Badge variant="outline" className="gap-1.5 border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-400">
+                <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-500" />
+                Simulated
+              </Badge>
+            ) : (
+              <Badge variant="outline" className="gap-1.5 border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400">
+                <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-500" />
+                Live
+              </Badge>
+            )}
+          </div>
+          <p className="mt-4 text-2xl font-bold tabular-nums tracking-tight sm:text-3xl">{fmtDateTime(clock.now)}</p>
+          {clock.simulated ? (
+            <>
+              <p className="mt-1.5 text-xs text-muted-foreground">
+                {clock.label} — the billing engine treats this moment as now.
+              </p>
+              <Button variant="outline" className="mt-5" onClick={() => void runReset()} disabled={working}>
+                {resetting ? <Loader2 className="h-4 w-4 animate-spin" /> : <RotateCcw className="h-4 w-4" />}
+                Reset to live time
+              </Button>
+            </>
+          ) : (
+            <p className="mt-1.5 text-xs text-muted-foreground">
+              Following real time — advance the clock to simulate renewals, trial conversions and dunning.
+            </p>
+          )}
+        </Panel>
+
+        <Panel className="p-5 sm:p-6 lg:col-span-3">
+          <div className="mb-4">
+            <h2 className="text-sm font-bold">Advance time</h2>
+            <p className="mt-0.5 text-xs text-muted-foreground">
+              Runs the recurring billing engine as if the selected number of days had passed.
+            </p>
+          </div>
+          <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4">
+            {[1, 5, 7, 30].map((d) => (
+              <Button key={d} variant="outline" onClick={() => void runAdvance(d)} disabled={working}>
+                {busyDays === d ? <Loader2 className="h-4 w-4 animate-spin" /> : <FastForward className="h-4 w-4" />}
+                +{d} {d === 1 ? "day" : "days"}
+              </Button>
+            ))}
+          </div>
+          <div className="mt-5 space-y-3">
+            <div className="flex items-center justify-between text-xs font-medium text-muted-foreground">
+              <span>Custom amount</span>
+              <span className="tabular-nums">
+                {customDays} day{customDays === 1 ? "" : "s"}
+              </span>
+            </div>
+            <Slider
+              value={[customDays]}
+              min={1}
+              max={90}
+              step={1}
+              onValueChange={(v) => {
+                const n = v[0] ?? 1;
+                setCustomDays(n);
+                setCustomInput(String(n));
+              }}
+              aria-label="Days to advance"
+            />
+            <div className="flex gap-2.5">
+              <Input
+                type="number"
+                min={1}
+                max={90}
+                value={customInput}
+                onChange={(e) => onCustomChange(e.target.value)}
+                onBlur={() => setCustomInput(String(customDays))}
+                className="w-24"
+                aria-label="Days to advance"
+              />
+              <Button onClick={() => void runAdvance(customDays)} disabled={working}>
+                {busyDays === customDays ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Timer className="h-4 w-4" />
+                )}
+                Advance {customDays} {customDays === 1 ? "day" : "days"}
+              </Button>
+            </div>
+          </div>
+        </Panel>
+      </div>
+
+      {/* Run result — terminal log */}
+      <AnimatePresence>
+        {result && (
+          <motion.div
+            key="billing-run"
+            initial={{ opacity: 0, y: 12 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -8 }}
+            transition={{ duration: 0.3 }}
+          >
+            <div className="overflow-hidden rounded-xl border border-zinc-700/60 bg-zinc-900 font-mono text-zinc-100 shadow-lg">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-800 px-4 py-2.5 text-xs">
+                <span className="flex items-center gap-2 font-semibold">
+                  <Terminal className="h-3.5 w-3.5 text-emerald-400" />
+                  billing run — +{result.advancedDays}d
+                </span>
+                <span className="text-zinc-400">now → {fmtDateTime(result.newNow)}</span>
+              </div>
+              <div className="flex flex-wrap gap-2 px-4 pt-3.5">
+                {runStats.map((s) => (
+                  <span
+                    key={s.label}
+                    className="inline-flex items-center gap-1.5 rounded-full border border-zinc-700 bg-zinc-800/80 px-2.5 py-1 text-xs"
+                  >
+                    <s.icon className={cn("h-3.5 w-3.5", s.cls)} />
+                    <b className="tabular-nums">{s.value}</b>
+                    <span className="text-zinc-400">{s.label}</span>
+                  </span>
+                ))}
+              </div>
+              <motion.ul
+                variants={{ hidden: {}, show: { transition: { staggerChildren: 0.07 } } }}
+                initial="hidden"
+                animate="show"
+                className="space-y-1.5 px-4 py-4 text-xs sm:text-[13px]"
+              >
+                {result.events.length === 0 && (
+                  <li className="flex items-center gap-2 text-zinc-500">
+                    <ChevronRight className="h-3.5 w-3.5" />
+                    No billing events in this window — try advancing further.
+                  </li>
+                )}
+                {result.events.map((ev, i) => {
+                  const meta = runEventIcon(ev);
+                  const Icon = meta.icon;
+                  return (
+                    <motion.li
+                      key={i}
+                      variants={{ hidden: { opacity: 0, x: -8 }, show: { opacity: 1, x: 0 } }}
+                      className="flex items-start gap-2"
+                    >
+                      <Icon className={cn("mt-0.5 h-3.5 w-3.5 shrink-0", meta.cls)} />
+                      <span className="text-zinc-300">{ev}</span>
+                    </motion.li>
+                  );
+                })}
+              </motion.ul>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Explainer + scenarios */}
+      <div className="grid gap-4 sm:gap-5 lg:grid-cols-2">
+        <Panel className="p-5 sm:p-6">
+          <h2 className="text-sm font-bold">What happens on a billing run</h2>
+          <ul className="mt-4 space-y-4">
+            {RUN_STEPS.map((step) => (
+              <li key={step.title} className="flex items-start gap-3">
+                <span className={cn("mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg", step.cls)}>
+                  <step.icon className="h-4 w-4" />
+                </span>
+                <div>
+                  <p className="text-sm font-semibold">{step.title}</p>
+                  <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">{step.text}</p>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </Panel>
+
+        <div className="space-y-4 sm:space-y-5">
+          <h2 className="text-sm font-bold">Try these experiments</h2>
+          <Panel className="flex flex-col p-5">
+            <FlaskConical className="h-5 w-5 text-primary" />
+            <h3 className="mt-2.5 font-semibold">Advance 5 days</h3>
+            <p className="mt-1 flex-1 text-sm leading-relaxed text-muted-foreground">
+              Alex's Crypto Alpha trial ends → watch it convert to a paid $99/mo subscription (or fail).
+            </p>
+            <Button variant="outline" className="mt-4 self-start" onClick={() => void runAdvance(5)} disabled={working}>
+              {busyDays === 5 ? <Loader2 className="h-4 w-4 animate-spin" /> : <FastForward className="h-4 w-4" />}
+              Run +5 days
+            </Button>
+          </Panel>
+          <Panel className="flex flex-col p-5">
+            <FlaskConical className="h-5 w-5 text-primary" />
+            <h3 className="mt-2.5 font-semibold">Advance 31 days</h3>
+            <p className="mt-1 flex-1 text-sm leading-relaxed text-muted-foreground">
+              Hugo's cancel-at-period-end subscription cancels; David's declining card triggers dunning on Crypto Alpha;
+              everyone renews.
+            </p>
+            <Button variant="outline" className="mt-4 self-start" onClick={() => void runAdvance(31)} disabled={working}>
+              {busyDays === 31 ? <Loader2 className="h-4 w-4 animate-spin" /> : <FastForward className="h-4 w-4" />}
+              Run +31 days
+            </Button>
+          </Panel>
+        </div>
+      </div>
+    </div>
+  );
+}
