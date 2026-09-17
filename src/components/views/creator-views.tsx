@@ -3,9 +3,10 @@
 // CREATOR ANALYTICS DASHBOARD — "Creator Studio".
 // Owned by Task 2-c. Rendered when store.view === "creator".
 // Internal tab system (synced from params.creatorTab): overview | products |
-// subscribers | orders | promos | affiliates | webhooks | payouts | time
-// (billing time machine). Promos + payouts tabs added by Task 5-c; the
-// affiliates tab + the product edit dialog with plans editor by Task 8-b.
+// subscribers | orders | promos | affiliates | giveaways | webhooks |
+// payouts | time (billing time machine). Promos + payouts tabs added by
+// Task 5-c; the affiliates tab + the product edit dialog with plans editor
+// by Task 8-b; the giveaways tab by Task 11-b.
 
 import { useEffect, useMemo, useRef, useState, type ComponentProps, type FormEvent } from "react";
 import { AnimatePresence, motion, type Variants } from "framer-motion";
@@ -32,6 +33,7 @@ import type {
   AffiliateProgramDTO,
   AnalyticsDTO,
   BillingRunResult,
+  GiveawayCreatorDTO,
   PayoutBalanceDTO,
   PayoutDTO,
   PlanDTO,
@@ -42,8 +44,8 @@ import type {
   WebhookDeliveryDTO,
   WebhookEndpointDTO,
 } from "@/lib/types";
-import { CATEGORIES, WEBHOOK_EVENTS } from "@/lib/types";
-import { fmtCompact, fmtDate, fmtDateTime, fmtMoney } from "@/lib/format";
+import { CATEGORIES, COVER_THEMES, WEBHOOK_EVENTS } from "@/lib/types";
+import { COVER_THEMES as COVER_GRADIENTS, fmtCompact, fmtDate, fmtDateTime, fmtMoney } from "@/lib/format";
 import {
   CopyButton,
   EmptyState,
@@ -122,6 +124,7 @@ import {
   EyeOff,
   FastForward,
   FlaskConical,
+  Gift,
   Handshake,
   Info,
   KeyRound,
@@ -157,6 +160,7 @@ import {
   Timer,
   Trash2,
   TrendingUp,
+  Trophy,
   TriangleAlert,
   UserMinus,
   UserPlus,
@@ -179,6 +183,7 @@ type CreatorTab =
   | "orders"
   | "promos"
   | "affiliates"
+  | "giveaways"
   | "webhooks"
   | "payouts"
   | "time";
@@ -190,6 +195,7 @@ const CREATOR_TABS: { key: CreatorTab; label: string; icon: LucideIcon }[] = [
   { key: "orders", label: "Orders", icon: ReceiptText },
   { key: "promos", label: "Promos", icon: Tag },
   { key: "affiliates", label: "Affiliates", icon: Megaphone },
+  { key: "giveaways", label: "Giveaways", icon: Gift },
   { key: "webhooks", label: "Webhooks", icon: Webhook },
   { key: "payouts", label: "Payouts", icon: Banknote },
   { key: "time", label: "Time machine", icon: Timer },
@@ -607,6 +613,7 @@ export function CreatorViews() {
               {tab === "orders" && <OrdersTab />}
               {tab === "promos" && <PromosTab user={user} />}
               {tab === "affiliates" && <AffiliatesTab user={user} />}
+              {tab === "giveaways" && <GiveawaysTab user={user} />}
               {tab === "webhooks" && <WebhooksTab />}
               {tab === "payouts" && <PayoutsTab />}
               {tab === "time" && <TimeTab />}
@@ -4230,6 +4237,818 @@ function LaunchProgramDialog({
           </Button>
           <Button type="submit" form="launch-program-form" disabled={busy}>
             {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Rocket className="h-4 w-4" />} Launch program
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ============================================================================
+// TAB: GIVEAWAYS (prize drops — free entries, auto-drawn winners)
+// ============================================================================
+
+/**
+ * The creator endpoint also returns totalEntriesWeighted (sum of every
+ * entrant's entry count); the shared DTO type predates it, so extend locally.
+ */
+type CreatorGiveawayRow = GiveawayCreatorDTO & { totalEntriesWeighted: number };
+
+/** "Ends in 5d 12h" style countdown label for a LIVE drop. */
+function endsInLabel(endsAt: string, nowMs: number): string {
+  const diff = new Date(endsAt).getTime() - nowMs;
+  if (diff <= 0) return "Closing soon";
+  const days = Math.floor(diff / 86400000);
+  const hours = Math.floor((diff % 86400000) / 3600000);
+  const mins = Math.floor((diff % 3600000) / 60000);
+  if (days >= 1) return `Ends in ${days}d ${hours}h`;
+  if (hours >= 1) return `Ends in ${hours}h ${mins}m`;
+  return `Ends in ${mins}m`;
+}
+
+/**
+ * Ticks every 30s so LIVE countdowns stay fresh. Anchored to the simulated
+ * clock whenever it runs ahead of real time (the sim world is the truth for
+ * end dates); the time-machine refresh bumps the store nonce, which refetches
+ * this tab's data anyway.
+ */
+function useNowMs(): number {
+  const simNow = useSimNow();
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => setTick((n) => n + 1), 30_000);
+    return () => clearInterval(t);
+  }, []);
+  return useMemo(() => Math.max(Date.now(), new Date(simNow).getTime()), [tick, simNow]);
+}
+
+function GiveawaysTab({ user }: { user: SessionUser }) {
+  const { toast } = useToast();
+  const refresh = useAppStore((s) => s.refresh);
+  const navigate = useAppStore((s) => s.navigate);
+  const nowMs = useNowMs();
+
+  // Giveaways feed + the creator's own products (feeds the create dialog's
+  // product select — same catalog call the products tab uses).
+  const { data, error, loading } = useCreatorFetch(async () => {
+    const [giveawaysRes, productsRes] = await Promise.all([
+      api<{ giveaways: CreatorGiveawayRow[] }>("/api/giveaways/creator"),
+      api<{ products: ProductCardDTO[] }>(`/api/products?creatorId=${user.id}`),
+    ]);
+    return { giveaways: giveawaysRes.giveaways, products: productsRes.products };
+  });
+
+  const [createOpen, setCreateOpen] = useState(false);
+  const [confirmDraw, setConfirmDraw] = useState<CreatorGiveawayRow | null>(null);
+  const [confirmCancel, setConfirmCancel] = useState<CreatorGiveawayRow | null>(null);
+  const [drawingId, setDrawingId] = useState<string | null>(null);
+  const [cancelingId, setCancelingId] = useState<string | null>(null);
+
+  // LIVE drops first (ending soonest), then recently ended — mirrors the
+  // public feed's ordering.
+  const sorted = useMemo(() => {
+    const live = (data?.giveaways ?? []).filter((g) => g.status === "LIVE").sort((a, b) => a.endsAt.localeCompare(b.endsAt));
+    const ended = (data?.giveaways ?? [])
+      .filter((g) => g.status !== "LIVE")
+      .sort((a, b) => (b.drawnAt ?? b.endsAt).localeCompare(a.drawnAt ?? a.endsAt));
+    return [...live, ...ended];
+  }, [data]);
+
+  async function drawWinners(g: CreatorGiveawayRow) {
+    setDrawingId(g.id);
+    try {
+      const res = await api<{ ok: boolean; winners: { userId: string; name: string | null; email: string }[]; entryCount: number }>(
+        `/api/giveaways/${g.id}/draw`,
+        { json: {} }
+      );
+      const names = res.winners.map((w) => w.name || w.email).join(", ");
+      toast({
+        title: "Winners drawn",
+        description: `${names ? `${names} won ${g.title} — ` : ""}${g.title} closed · ${res.entryCount} entrant${
+          res.entryCount === 1 ? "" : "s"
+        } were notified.`,
+      });
+      refresh();
+    } catch (e) {
+      toast({ title: "Couldn't draw winners", description: (e as Error).message, variant: "destructive" });
+    } finally {
+      setDrawingId(null);
+    }
+  }
+
+  async function cancelDrop(g: CreatorGiveawayRow) {
+    setCancelingId(g.id);
+    try {
+      await api(`/api/giveaways/${g.id}`, { method: "PATCH", json: { cancel: true } });
+      toast({
+        title: "Drop canceled",
+        description: `${g.title} ended without drawing winners. Entries stay on record.`,
+      });
+      refresh();
+    } catch (e) {
+      toast({ title: "Couldn't cancel the drop", description: (e as Error).message, variant: "destructive" });
+    } finally {
+      setCancelingId(null);
+    }
+  }
+
+  if (loading) {
+    return (
+      <div className="space-y-5" aria-busy="true" aria-label="Loading giveaways">
+        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          {[0, 1, 2, 3].map((i) => (
+            <Skeleton key={i} className="h-28 rounded-2xl" />
+          ))}
+        </div>
+        <div className="grid gap-5 sm:grid-cols-2">
+          {[0, 1].map((i) => (
+            <Skeleton key={i} className="h-[26rem] rounded-2xl" />
+          ))}
+        </div>
+      </div>
+    );
+  }
+  if (error || !data) return <LoadError message={error || "Giveaways unavailable."} />;
+
+  const { giveaways, products } = data;
+  const liveCount = giveaways.filter((g) => g.status === "LIVE").length;
+  const totalEntries = giveaways.reduce((s, g) => s + g.entryCount, 0);
+  const totalWeighted = giveaways.reduce((s, g) => s + g.totalEntriesWeighted, 0);
+  const winnersCrowned = giveaways.reduce((s, g) => s + g.winners.length, 0);
+  const endedCount = giveaways.length - liveCount;
+  // recentEntries is capped at 8 rows — only trust the 7-day window when no
+  // drop's roster was truncated; otherwise fall back to an average.
+  const canComputeWeek = giveaways.every((g) => g.recentEntries.length >= g.entryCount);
+  const weekAgoMs = nowMs - 7 * 86400000;
+  const entriesThisWeek = canComputeWeek
+    ? giveaways.reduce(
+        (s, g) =>
+          s + g.recentEntries.filter((r) => new Date(r.createdAt).getTime() >= weekAgoMs).reduce((s2, r) => s2 + r.entries, 0),
+        0
+      )
+    : null;
+  const avgEntries = giveaways.length > 0 ? totalWeighted / giveaways.length : 0;
+
+  return (
+    <div className="space-y-5">
+      <SectionHeader
+        title="Giveaways"
+        description="Run prize drops to grow your audience — entries are free, winners drawn automatically."
+        action={
+          <Button onClick={() => setCreateOpen(true)}>
+            <Plus className="h-4 w-4" /> New giveaway
+          </Button>
+        }
+      />
+
+      {/* Live-drop explainer + time-machine shortcut */}
+      {liveCount > 0 && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-emerald-500/25 bg-emerald-500/10 p-4">
+          <p className="flex items-start gap-3 text-sm leading-relaxed">
+            <Gift className="mt-0.5 h-5 w-5 shrink-0 text-emerald-600 dark:text-emerald-400" />
+            <span>
+              Entries are free and winners are drawn automatically when the countdown hits zero —{" "}
+              <strong>advance the clock to watch a drop auto-close and notify winners</strong>. Members of the linked
+              product earn bonus entries.
+            </span>
+          </p>
+          <Button variant="outline" size="sm" className="shrink-0" onClick={() => navigate("creator", { creatorTab: "time" })}>
+            <FastForward className="h-4 w-4" /> Open time machine
+          </Button>
+        </div>
+      )}
+
+      {/* Stats */}
+      {giveaways.length > 0 && (
+        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          <StatCard label="Live drops" value={String(liveCount)} sub={`${giveaways.length} total`} icon={Zap} />
+          <StatCard
+            label="Total entries"
+            value={fmtCompact(totalEntries)}
+            sub={`${totalWeighted} incl. member bonuses`}
+            icon={Users}
+          />
+          <StatCard
+            label="Winners crowned"
+            value={String(winnersCrowned)}
+            sub={`${endedCount} drop${endedCount === 1 ? "" : "s"} ended`}
+            icon={Trophy}
+          />
+          {entriesThisWeek !== null ? (
+            <StatCard label="Entries this week" value={String(entriesThisWeek)} sub="last 7 days" icon={TrendingUp} />
+          ) : (
+            <StatCard
+              label="Avg entries / drop"
+              value={avgEntries % 1 === 0 ? String(avgEntries) : avgEntries.toFixed(1)}
+              sub="entries incl. member bonuses"
+              icon={TrendingUp}
+            />
+          )}
+        </div>
+      )}
+
+      {/* Drop cards */}
+      {giveaways.length === 0 ? (
+        <EmptyState
+          icon={Gift}
+          title="Run your first giveaway"
+          description="Free-to-enter prize drops turn visitors into followers — and members of your products earn bonus entries, so every drop rewards your existing subscribers too."
+          action={
+            <Button onClick={() => setCreateOpen(true)}>
+              <Plus className="h-4 w-4" /> New giveaway
+            </Button>
+          }
+        />
+      ) : (
+        <motion.div className="grid gap-5 sm:grid-cols-2" variants={stagger} initial="hidden" animate="show">
+          {sorted.map((g) => (
+            <motion.div key={g.id} variants={fadeUp}>
+              <GiveawayCard
+                g={g}
+                nowMs={nowMs}
+                drawing={drawingId === g.id}
+                canceling={cancelingId === g.id}
+                onDraw={setConfirmDraw}
+                onCancel={setConfirmCancel}
+              />
+            </motion.div>
+          ))}
+        </motion.div>
+      )}
+
+      <CreateGiveawayDialog open={createOpen} onOpenChange={setCreateOpen} products={products} onCreated={() => refresh()} />
+
+      {/* Draw winners confirm */}
+      <AlertDialog open={!!confirmDraw} onOpenChange={(o) => !o && setConfirmDraw(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Draw winners now?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This ends the drop and notifies winners immediately. {confirmDraw?.winnerCount} winner
+              {confirmDraw?.winnerCount === 1 ? "" : "s"} will be drawn from {confirmDraw?.entryCount} entrant
+              {confirmDraw?.entryCount === 1 ? "" : "s"} of “{confirmDraw?.title}” — entries are weighted, so more
+              entries mean better odds.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Not yet</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                const g = confirmDraw;
+                setConfirmDraw(null);
+                if (g) void drawWinners(g);
+              }}
+            >
+              <Trophy className="h-4 w-4" /> Draw winners
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Cancel drop confirm */}
+      <AlertDialog open={!!confirmCancel} onOpenChange={(o) => !o && setConfirmCancel(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Cancel this drop?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Ends the drop without drawing winners. “{confirmCancel?.title}” closes immediately and its{" "}
+              {confirmCancel?.entryCount} entrant{confirmCancel?.entryCount === 1 ? "" : "s"} keep their entries on
+              record — nobody wins the prize.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Keep it running</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-red-600 text-white hover:bg-red-700"
+              onClick={() => {
+                const g = confirmCancel;
+                setConfirmCancel(null);
+                if (g) void cancelDrop(g);
+              }}
+            >
+              Cancel drop
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </div>
+  );
+}
+
+/** One giveaway card — LIVE drops show countdown + draw/cancel actions, ENDED ones the winners roster. */
+function GiveawayCard({
+  g,
+  nowMs,
+  drawing,
+  canceling,
+  onDraw,
+  onCancel,
+}: {
+  g: CreatorGiveawayRow;
+  nowMs: number;
+  drawing: boolean;
+  canceling: boolean;
+  onDraw: (g: CreatorGiveawayRow) => void;
+  onCancel: (g: CreatorGiveawayRow) => void;
+}) {
+  const live = g.status === "LIVE";
+  // Sim-clock aware "now" for relative timestamps ("Drawn 5d ago") — fresher
+  // than the bootstrap snapshot the store carries.
+  const anchor = new Date(nowMs).toISOString();
+  const endedLabel = g.winners.length > 0 ? "Drawn" : "Ended";
+
+  return (
+    <Panel className="flex h-full flex-col overflow-hidden transition-shadow hover:shadow-md">
+      {/* Themed banner + status */}
+      <div className="relative">
+        <ProductCover
+          theme={g.coverTheme}
+          category="OTHER"
+          title={g.title}
+          className="h-24 sm:h-28"
+          iconClassName="h-20 w-20 sm:h-24 sm:w-24"
+        />
+        <div className="absolute inset-x-0 top-0 flex items-start justify-between gap-2 p-3">
+          {live ? (
+            <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-600/95 px-2.5 py-1 text-[11px] font-bold uppercase tracking-wide text-white shadow-sm">
+              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-white" aria-hidden />
+              Live
+            </span>
+          ) : (
+            <span className="inline-flex items-center rounded-full border border-border bg-card/95 px-2.5 py-1 text-[11px] font-bold uppercase tracking-wide text-muted-foreground shadow-sm">
+              Ended
+            </span>
+          )}
+          {live ? (
+            <span className="inline-flex items-center gap-1.5 rounded-full bg-card/95 px-2.5 py-1 text-[11px] font-semibold tabular-nums text-emerald-700 shadow-sm dark:text-emerald-400">
+              <Timer className="h-3.5 w-3.5" aria-hidden />
+              {endsInLabel(g.endsAt, nowMs)}
+            </span>
+          ) : (
+            <span className="inline-flex items-center gap-1.5 rounded-full bg-card/95 px-2.5 py-1 text-[11px] font-semibold tabular-nums text-muted-foreground shadow-sm">
+              <Trophy className="h-3.5 w-3.5" aria-hidden />
+              {endedLabel} {relTime(g.drawnAt ?? g.endsAt, anchor)}
+            </span>
+          )}
+        </div>
+        {g.prizeValueCents > 0 && (
+          <span className="absolute bottom-3 left-3 inline-flex items-center gap-1 rounded-full bg-card/95 px-2.5 py-1 text-[11px] font-bold tabular-nums shadow-sm">
+            <Gift className="h-3.5 w-3.5 text-amber-500" aria-hidden />
+            {fmtMoney(g.prizeValueCents)} prize value
+          </span>
+        )}
+      </div>
+
+      <div className="flex flex-1 flex-col p-5">
+        <h3 className="font-semibold leading-tight">{g.title}</h3>
+        <p className="mt-1.5 flex items-start gap-2 text-sm leading-snug">
+          <Gift className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" aria-hidden />
+          <span className="min-w-0 font-medium">{g.prize}</span>
+        </p>
+        <p className="mt-2 line-clamp-2 text-sm leading-relaxed text-muted-foreground">{g.description}</p>
+
+        {/* Linked product */}
+        <div className="mt-3 flex min-h-[2.5rem] items-center gap-2.5">
+          {g.product ? (
+            <>
+              <ProductCover
+                theme={g.product.coverTheme}
+                category={g.product.category}
+                title={g.product.title}
+                className="h-10 w-14 shrink-0 rounded-lg"
+                iconClassName="h-9 w-9"
+              />
+              <div className="min-w-0">
+                <p className="truncate text-xs font-semibold leading-tight">{g.product.title}</p>
+                <p className="mt-0.5 text-[11px] text-muted-foreground">
+                  {categoryLabel(g.product.category)} · members earn +{g.memberBonus} entries
+                </p>
+              </div>
+            </>
+          ) : (
+            <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              <Package className="h-4 w-4 shrink-0" aria-hidden /> No product linked — standalone drop
+            </p>
+          )}
+        </div>
+
+        {/* Performance mini-grid */}
+        <dl className="mt-4 grid grid-cols-3 gap-2">
+          <div className="rounded-lg bg-muted/50 px-2 py-2 text-center">
+            <dt className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Entries</dt>
+            <dd className="mt-0.5 text-sm font-bold tabular-nums">{g.entryCount}</dd>
+          </div>
+          <div className="rounded-lg bg-muted/50 px-2 py-2 text-center">
+            <dt className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Winners</dt>
+            <dd className="mt-0.5 text-sm font-bold tabular-nums">{live ? g.winnerCount : g.winners.length}</dd>
+          </div>
+          <div className="rounded-lg bg-muted/50 px-2 py-2 text-center">
+            <dt className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Member bonus</dt>
+            <dd className="mt-0.5 text-sm font-bold tabular-nums text-emerald-600 dark:text-emerald-400">
+              +{g.memberBonus}
+            </dd>
+          </div>
+        </dl>
+
+        {/* Recent entries */}
+        <div className="mt-4">
+          <p className="flex items-center gap-1.5 text-xs font-semibold">
+            <UserPlus className="h-3.5 w-3.5 text-primary" aria-hidden />
+            Recent entries <span className="font-normal text-muted-foreground">({g.entryCount})</span>
+          </p>
+          {g.recentEntries.length === 0 ? (
+            <p className="mt-2 rounded-xl border border-dashed p-3 text-center text-xs text-muted-foreground">
+              No entries yet — they&apos;ll pile up here as visitors join the drop.
+            </p>
+          ) : (
+            <ul className={cn("mt-2 max-h-48 space-y-1 overflow-y-auto pr-1", SCROLL_THIN)} aria-label={`Recent entries for ${g.title}`}>
+              {g.recentEntries.slice(0, 5).map((r) => (
+                <li key={r.id} className="flex items-center gap-2.5 rounded-lg bg-muted/40 px-2.5 py-1.5">
+                  <UserAvatar name={r.entrant.name || r.entrant.email} color={r.entrant.avatarColor} size="sm" />
+                  <div className="min-w-0 flex-1">
+                    <p className="flex items-center gap-1.5 text-[13px] font-medium leading-tight">
+                      <span className="truncate">{r.entrant.name || r.entrant.email}</span>
+                      {r.won && (
+                        <span className="inline-flex shrink-0 items-center gap-0.5 rounded-full border border-amber-500/25 bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700 dark:text-amber-400">
+                          <Trophy className="h-3 w-3" aria-hidden /> Won
+                        </span>
+                      )}
+                    </p>
+                    <p className="text-[11px] text-muted-foreground">{relTime(r.createdAt, anchor)}</p>
+                  </div>
+                  <span
+                    className={cn(
+                      "shrink-0 rounded-full px-2 py-0.5 text-[11px] font-semibold tabular-nums",
+                      r.entries > 1
+                        ? "bg-emerald-500/12 text-emerald-700 dark:text-emerald-400"
+                        : "bg-muted text-muted-foreground"
+                    )}
+                  >
+                    ×{r.entries}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+
+        {/* Footer: actions while LIVE, winners roster once ENDED */}
+        {live ? (
+          <div className="mt-auto border-t bg-muted/30 p-4">
+            <div className="flex flex-wrap items-center gap-2">
+              <Button className="min-h-11 flex-1 sm:flex-none" disabled={drawing || canceling} onClick={() => onDraw(g)}>
+                {drawing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trophy className="h-4 w-4" />}
+                Draw winners now
+              </Button>
+              <Button
+                variant="ghost"
+                className="min-h-11 text-muted-foreground hover:bg-red-500/10 hover:text-red-600"
+                disabled={drawing || canceling}
+                onClick={() => onCancel(g)}
+              >
+                {canceling ? <Loader2 className="h-4 w-4 animate-spin" /> : <Ban className="h-4 w-4" />}
+                Cancel drop
+              </Button>
+            </div>
+            <p className="mt-2.5 text-[11px] text-muted-foreground">
+              Ends {fmtDate(g.endsAt)} · winners are drawn automatically at the deadline
+            </p>
+          </div>
+        ) : (
+          <div className="mt-auto border-t bg-muted/30 p-4">
+            <p className="flex items-center gap-1.5 text-xs font-semibold">
+              <Trophy className="h-3.5 w-3.5 text-amber-500" aria-hidden />
+              Winners <span className="font-normal text-muted-foreground">(of {g.entryCount} entrants)</span>
+            </p>
+            {g.winners.length === 0 ? (
+              <p className="mt-2 rounded-xl border border-dashed bg-card p-2.5 text-center text-xs text-muted-foreground">
+                No winners drawn — this drop was canceled.
+              </p>
+            ) : (
+              <ul className="mt-2 space-y-1.5">
+                {g.winners.map((w) => (
+                  <li key={w.id} className="flex items-center gap-2.5 rounded-lg bg-card px-2.5 py-1.5">
+                    <UserAvatar name={w.entrant.name || w.entrant.email} color={w.entrant.avatarColor} size="sm" />
+                    <div className="min-w-0 flex-1">
+                      <p className="flex items-center gap-1.5 text-[13px] font-medium leading-tight">
+                        <span className="truncate">{w.entrant.name || w.entrant.email}</span>
+                        <span className="inline-flex shrink-0 items-center gap-0.5 rounded-full border border-amber-500/25 bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700 dark:text-amber-400">
+                          <Trophy className="h-3 w-3" aria-hidden /> Won
+                        </span>
+                      </p>
+                      <p className="text-[11px] text-muted-foreground">
+                        entered with {w.entries} {w.entries === 1 ? "entry" : "entries"}
+                      </p>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
+      </div>
+    </Panel>
+  );
+}
+
+// ============================================================================
+// Create giveaway dialog (launch a drop)
+// ============================================================================
+
+const GIVEAWAY_END_OPTIONS = [1, 2, 3, 5, 7, 14, 30];
+
+function CreateGiveawayDialog({
+  open,
+  onOpenChange,
+  products,
+  onCreated,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  products: ProductCardDTO[];
+  onCreated: () => void;
+}) {
+  const { toast } = useToast();
+  const [title, setTitle] = useState("");
+  const [description, setDescription] = useState("");
+  const [prize, setPrize] = useState("");
+  const [prizeValue, setPrizeValue] = useState("");
+  const [productId, setProductId] = useState("none");
+  const [endsInDays, setEndsInDays] = useState("7");
+  const [winnerCount, setWinnerCount] = useState("1");
+  const [memberBonus, setMemberBonus] = useState("2");
+  const [coverTheme, setCoverTheme] = useState<string>("emerald");
+  const [formError, setFormError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  // Reset the form each time the dialog opens.
+  useEffect(() => {
+    if (open) {
+      setTitle("");
+      setDescription("");
+      setPrize("");
+      setPrizeValue("");
+      setProductId("none");
+      setEndsInDays("7");
+      setWinnerCount("1");
+      setMemberBonus("2");
+      setCoverTheme("emerald");
+      setFormError(null);
+      setBusy(false);
+    }
+  }, [open]);
+
+  async function submit(e: FormEvent) {
+    e.preventDefault();
+    const t = title.trim();
+    if (t.length < 3 || t.length > 80) return setFormError("Title must be 3–80 characters.");
+    const d = description.trim();
+    if (d.length < 10 || d.length > 600) return setFormError("Description must be 10–600 characters.");
+    const p = prize.trim();
+    if (p.length < 3 || p.length > 200) return setFormError("Prize must be 3–200 characters.");
+    let prizeValueCents: number | undefined;
+    if (prizeValue.trim() !== "") {
+      const v = Number(prizeValue);
+      if (!Number.isFinite(v) || v < 0) return setFormError("Prize value must be a dollar amount.");
+      if (v > 100_000) return setFormError("Prize value must be $100,000 or less.");
+      prizeValueCents = Math.round(v * 100);
+    }
+    setFormError(null);
+    setBusy(true);
+    try {
+      await api("/api/giveaways", {
+        json: {
+          title: t,
+          description: d,
+          prize: p,
+          ...(prizeValueCents !== undefined ? { prizeValueCents } : {}),
+          ...(productId !== "none" ? { productId } : {}),
+          endsInDays: Number(endsInDays),
+          winnerCount: Number(winnerCount),
+          memberBonus: Number(memberBonus),
+          coverTheme,
+        },
+      });
+      const days = Number(endsInDays);
+      toast({
+        title: "Giveaway is live!",
+        description: `${t} is accepting free entries for the next ${days} ${days === 1 ? "day" : "days"}.`,
+      });
+      onCreated();
+      onOpenChange(false);
+    } catch (err) {
+      setFormError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-h-[88vh] overflow-y-auto sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>Launch a giveaway</DialogTitle>
+          <DialogDescription>
+            Free-to-enter prize drop with automatic winner draw. Drops convert visitors into members — bonus entries
+            reward your existing subscribers.
+          </DialogDescription>
+        </DialogHeader>
+        <form id="create-giveaway-form" onSubmit={(e) => void submit(e)} className="space-y-4">
+          <div className="space-y-1.5">
+            <Label htmlFor="ga-title">Title</Label>
+            <Input
+              id="ga-title"
+              value={title}
+              maxLength={80}
+              onChange={(e) => {
+                setTitle(e.target.value);
+                setFormError(null);
+              }}
+              placeholder="e.g. 1-Year Elite Membership Giveaway"
+            />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="ga-description">Description</Label>
+            <Textarea
+              id="ga-description"
+              value={description}
+              rows={3}
+              maxLength={600}
+              onChange={(e) => {
+                setDescription(e.target.value);
+                setFormError(null);
+              }}
+              placeholder="What's the drop, who can enter and what do winners get?"
+            />
+            <p className="text-[11px] text-muted-foreground">10–600 characters.</p>
+          </div>
+          <div className="grid gap-4 sm:grid-cols-[1fr_150px]">
+            <div className="space-y-1.5">
+              <Label htmlFor="ga-prize">Prize</Label>
+              <Input
+                id="ga-prize"
+                value={prize}
+                maxLength={200}
+                onChange={(e) => {
+                  setPrize(e.target.value);
+                  setFormError(null);
+                }}
+                placeholder="e.g. Ledger Nano X hardware wallet"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="ga-value">Value ($)</Label>
+              <div className="relative">
+                <Input
+                  id="ga-value"
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  inputMode="decimal"
+                  value={prizeValue}
+                  onChange={(e) => {
+                    setPrizeValue(e.target.value);
+                    setFormError(null);
+                  }}
+                  className="pl-7 text-base tabular-nums"
+                  aria-label="Prize value in dollars (optional)"
+                />
+                <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground">
+                  $
+                </span>
+              </div>
+            </div>
+          </div>
+          <div className="space-y-1.5">
+            <Label>Linked product</Label>
+            <Select
+              value={productId}
+              onValueChange={(v) => {
+                setProductId(v);
+                setFormError(null);
+              }}
+            >
+              <SelectTrigger aria-label="Product to promote with this drop" className="w-full">
+                <SelectValue placeholder="Pick a product" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="none">No product (standalone drop)</SelectItem>
+                {products.map((p) => (
+                  <SelectItem key={p.id} value={p.id}>
+                    {p.title}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <p className="text-[11px] text-muted-foreground">
+              Active members of the linked product automatically earn the bonus entries. Only your own products are
+              listed.
+            </p>
+          </div>
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+            <div className="space-y-1.5">
+              <Label>Ends in</Label>
+              <Select
+                value={endsInDays}
+                onValueChange={(v) => {
+                  setEndsInDays(v);
+                  setFormError(null);
+                }}
+              >
+                <SelectTrigger aria-label="Days until the drop ends" className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {GIVEAWAY_END_OPTIONS.map((d) => (
+                    <SelectItem key={d} value={String(d)}>
+                      {d} {d === 1 ? "day" : "days"}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1.5">
+              <Label>Winners</Label>
+              <Select
+                value={winnerCount}
+                onValueChange={(v) => {
+                  setWinnerCount(v);
+                  setFormError(null);
+                }}
+              >
+                <SelectTrigger aria-label="Number of winners to draw" className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {[1, 2, 3, 4, 5].map((n) => (
+                    <SelectItem key={n} value={String(n)}>
+                      {n}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1.5">
+              <Label>Member bonus</Label>
+              <Select
+                value={memberBonus}
+                onValueChange={(v) => {
+                  setMemberBonus(v);
+                  setFormError(null);
+                }}
+              >
+                <SelectTrigger aria-label="Bonus entries for members of the linked product" className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {[0, 1, 2, 3, 4, 5].map((n) => (
+                    <SelectItem key={n} value={String(n)}>
+                      +{n} {n === 1 ? "entry" : "entries"}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+          <div className="space-y-1.5">
+            <Label>Cover theme</Label>
+            <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Cover theme">
+              {COVER_THEMES.map((theme) => {
+                const selected = coverTheme === theme;
+                return (
+                  <button
+                    key={theme}
+                    type="button"
+                    onClick={() => {
+                      setCoverTheme(theme);
+                      setFormError(null);
+                    }}
+                    aria-label={`${theme} cover theme`}
+                    aria-pressed={selected}
+                    className={cn(
+                      "flex h-11 w-11 items-center justify-center rounded-full bg-gradient-to-br transition-transform focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
+                      COVER_GRADIENTS[theme] ?? COVER_GRADIENTS.emerald,
+                      selected ? "scale-110 ring-2 ring-ring ring-offset-2 ring-offset-background" : "hover:scale-105"
+                    )}
+                  >
+                    {selected && <Check className="h-4 w-4 text-white drop-shadow-sm" aria-hidden />}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+          {formError && (
+            <p className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs font-medium text-red-600 dark:text-red-400">
+              {formError}
+            </p>
+          )}
+        </form>
+        <DialogFooter className="gap-2 sm:gap-0">
+          <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>
+            Cancel
+          </Button>
+          <Button type="submit" form="create-giveaway-form" disabled={busy}>
+            {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Rocket className="h-4 w-4" />} Launch giveaway
           </Button>
         </DialogFooter>
       </DialogContent>

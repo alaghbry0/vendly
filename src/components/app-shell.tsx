@@ -21,7 +21,7 @@ import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
 import {
-  Bell, Banknote, Compass, CreditCard, KeyRound, LayoutDashboard, LogIn, Menu, Moon,
+  Bell, Banknote, Compass, CreditCard, Gift, KeyRound, LayoutDashboard, LogIn, Menu, Moon,
   Receipt, RefreshCw, Search, Star, Store, Sun, Tag, Timer, UserPlus, X, XCircle, AlertTriangle,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -43,6 +43,7 @@ const NOTIF_ICONS: Record<string, { icon: typeof Bell; cls: string }> = {
   star: { icon: Star, cls: "bg-amber-500/10 text-amber-500" },
   tag: { icon: Tag, cls: "bg-lime-500/10 text-lime-600 dark:text-lime-400" },
   bank: { icon: Banknote, cls: "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400" },
+  gift: { icon: Gift, cls: "bg-amber-500/10 text-amber-600 dark:text-amber-400" },
   bell: { icon: Bell, cls: "bg-muted text-muted-foreground" },
 };
 
@@ -498,6 +499,7 @@ function Footer() {
               <button className="w-fit text-left transition-colors hover:text-primary" onClick={() => navigate("portal", { portalTab: "licenses" })}>License keys</button>
               <button className="w-fit text-left transition-colors hover:text-primary" onClick={() => navigate("portal", { portalTab: "downloads" })}>Secure downloads</button>
               <button className="w-fit text-left transition-colors hover:text-primary" onClick={() => navigate("portal", { portalTab: "affiliates" })}>Affiliate earnings</button>
+              <button className="w-fit text-left transition-colors hover:text-primary" onClick={() => navigate("portal", { portalTab: "giveaways" })}>Giveaway entries</button>
               <span>Notifications</span>
             </div>
             <div className="flex flex-col gap-1.5">
@@ -506,6 +508,7 @@ function Footer() {
               <button className="w-fit text-left transition-colors hover:text-primary" onClick={() => navigate("creator", { creatorTab: "promos" })}>Promo codes</button>
               <button className="w-fit text-left transition-colors hover:text-primary" onClick={() => navigate("creator", { creatorTab: "webhooks" })}>Webhooks</button>
               <button className="w-fit text-left transition-colors hover:text-primary" onClick={() => navigate("creator", { creatorTab: "payouts" })}>Payouts</button>
+              <button className="w-fit text-left transition-colors hover:text-primary" onClick={() => navigate("creator", { creatorTab: "giveaways" })}>Giveaways</button>
             </div>
           </div>
         </div>

@@ -8,15 +8,15 @@ import { AnimatePresence, motion } from "framer-motion";
 import type { LucideIcon } from "lucide-react";
 import {
   ArrowLeft, ArrowRight, ArrowUpRight, BadgeCheck, Bitcoin, CalendarDays, Check, CircleAlert,
-  CreditCard, ExternalLink, FileDown, Heart, Info, KeyRound, Loader2, Lock, Mail, Megaphone, MessageSquare,
+  CreditCard, ExternalLink, FileDown, Gift, Heart, Info, KeyRound, Loader2, Lock, Mail, Megaphone, MessageSquare,
   MousePointerClick, PackageOpen, PenLine, RefreshCw, Search, SearchX, Send, ShieldCheck, ShoppingBag,
-  Sparkles, Star, Tag, Users, Wallet, X,
+  Sparkles, Star, Tag, Timer, Trophy, Users, Wallet, X,
 } from "lucide-react";
 
 import { useAppStore } from "@/lib/store";
 import { api, ApiError } from "@/lib/api";
-import { CATEGORIES, type AffiliateLinkDTO, type AssetDTO, type PlanDTO, type ProductCardDTO, type ProductDetailDTO, type PromoValidationDTO } from "@/lib/types";
-import { fmtBytes, fmtCompact, fmtDate, fmtMoney, timeAgo } from "@/lib/format";
+import { CATEGORIES, type AffiliateLinkDTO, type AssetDTO, type GiveawayDTO, type PlanDTO, type ProductCardDTO, type ProductDetailDTO, type PromoValidationDTO } from "@/lib/types";
+import { COVER_THEMES, fmtBytes, fmtCompact, fmtDate, fmtMoney, timeAgo } from "@/lib/format";
 import {
   CategoryIcon, CopyButton, EmptyState, GatewayBadge, ProductCover, ProviderBadge, SectionHeader,
   StatusBadge, UserAvatar,
@@ -468,6 +468,249 @@ function WishlistHeart({
 }
 
 // ---------------------------------------------------------------------------
+// Giveaways (live prize drops with a free entry flow)
+// ---------------------------------------------------------------------------
+
+/** "Ends in 5d 23h" / "Ends in 3h 12m" / "Ends in 40m" — recompute every 30s. */
+function countdownLabel(endsAt: string): string {
+  const ms = new Date(endsAt).getTime() - Date.now();
+  if (ms <= 0) return "Drawing…";
+  const mins = Math.floor(ms / 60000);
+  const days = Math.floor(mins / 1440);
+  const hours = Math.floor((mins % 1440) / 60);
+  if (days > 0) return `Ends in ${days}d ${hours}h`;
+  if (hours > 0) return `Ends in ${hours}h ${mins % 60}m`;
+  return `Ends in ${mins}m`;
+}
+
+function useCountdown(endsAt: string): string {
+  // Ticker drives recomputation every 30s; label derives from endsAt + tick.
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => setTick((n) => n + 1), 30000);
+    return () => clearInterval(t);
+  }, []);
+  return useMemo(() => countdownLabel(endsAt), [endsAt, tick]);
+}
+
+/** Live-pulse "LIVE" badge shared by the drop cards and the product banner. */
+function LiveDropBadge() {
+  return (
+    <span className="inline-flex items-center gap-1.5 rounded-full bg-black/35 px-2.5 py-1 text-[11px] font-bold uppercase tracking-wide text-white backdrop-blur-sm">
+      <span className="relative flex h-2 w-2">
+        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-300 opacity-75" />
+        <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-400" />
+      </span>
+      Live
+    </span>
+  );
+}
+
+/** Enter button + entered chip — shared by the discover card and product banner. */
+function GiveawayEnterButton({
+  giveaway,
+  onEntered,
+  size = "default",
+}: {
+  giveaway: GiveawayDTO;
+  onEntered: (id: string, entries: number) => void;
+  size?: "default" | "sm";
+}) {
+  const user = useAppStore((s) => s.user);
+  const { toast } = useToast();
+  const [busy, setBusy] = useState(false);
+
+  const isOwnDrop = !!(user && giveaway.product && giveaway.product.creator.id === user.id);
+
+  async function enter() {
+    if (!user) {
+      toast({
+        title: "Sign in to enter",
+        description: "Pick a demo account from the header, then come back to join the drop.",
+      });
+      return;
+    }
+    setBusy(true);
+    try {
+      const res = await api<{ ok: boolean; entries: number; bonus: boolean }>(`/api/giveaways/${giveaway.id}/enter`, {
+        json: {},
+      });
+      toast({
+        title: `You're in — ${res.entries} ${res.entries === 1 ? "entry" : "entries"}!`,
+        description: res.bonus
+          ? "Member bonus included. Winners are drawn when the timer ends."
+          : "Winners are drawn automatically when the timer ends.",
+      });
+      onEntered(giveaway.id, res.entries);
+    } catch (e) {
+      toast({ title: "Couldn't enter giveaway", description: (e as Error).message, variant: "destructive" });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (isOwnDrop) {
+    return (
+      <span className="inline-flex items-center gap-1.5 rounded-xl bg-muted px-3 py-2 text-xs font-medium text-muted-foreground">
+        <Info className="h-3.5 w-3.5" /> Your own drop
+      </span>
+    );
+  }
+
+  if (giveaway.myEntry != null) {
+    return (
+      <span className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-500/10 px-3.5 py-2 text-sm font-semibold text-emerald-600 dark:text-emerald-400">
+        <BadgeCheck className="h-4 w-4" />
+        You're in — {giveaway.myEntry} {giveaway.myEntry === 1 ? "entry" : "entries"}
+      </span>
+    );
+  }
+
+  return (
+    <Button size={size} className={size === "default" ? "h-11" : "h-9"} onClick={enter} disabled={busy}>
+      {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Gift className="h-4 w-4" />}
+      {busy ? "Entering…" : "Enter giveaway"}
+    </Button>
+  );
+}
+
+/** Discover-page drop card — banner, prize, countdown, stats and entry CTA. */
+function MarketplaceGiveawayCard({
+  giveaway,
+  index,
+  onEntered,
+}: {
+  giveaway: GiveawayDTO;
+  index: number;
+  onEntered: (id: string, entries: number) => void;
+}) {
+  const navigate = useAppStore((s) => s.navigate);
+  const countdown = useCountdown(giveaway.endsAt);
+
+  return (
+    <motion.article
+      initial={{ opacity: 0, y: 16 }}
+      whileInView={{ opacity: 1, y: 0 }}
+      viewport={{ once: true, margin: "-60px" }}
+      transition={{ duration: 0.35, delay: Math.min(index * 0.08, 0.4), ease: "easeOut" }}
+      className="card-shine group relative flex h-full flex-col overflow-hidden rounded-2xl border border-amber-500/20 bg-card shadow-sm transition-shadow duration-200 hover:shadow-lg"
+    >
+      {/* Themed prize banner */}
+      <div
+        className={cn(
+          "relative flex h-40 flex-col justify-between overflow-hidden bg-gradient-to-br p-4 text-white",
+          COVER_THEMES[giveaway.coverTheme] || COVER_THEMES.emerald
+        )}
+      >
+        <div aria-hidden className="absolute -bottom-6 -right-4 opacity-20">
+          <Gift className="h-28 w-28" strokeWidth={1.4} />
+        </div>
+        <div className="relative flex items-center justify-between">
+          <LiveDropBadge />
+          <span className="inline-flex items-center gap-1 rounded-full bg-black/35 px-2.5 py-1 text-[11px] font-semibold text-white backdrop-blur-sm">
+            <Timer className="h-3 w-3" /> {countdown}
+          </span>
+        </div>
+        <div className="relative">
+          {giveaway.prizeValueCents > 0 && (
+            <span className="inline-flex items-center gap-1 rounded-full bg-white/90 px-2.5 py-1 text-[11px] font-bold text-neutral-900 shadow-sm">
+              <Trophy className="h-3 w-3 text-amber-500" /> {fmtMoney(giveaway.prizeValueCents)} prize
+            </span>
+          )}
+          <p className="mt-2 text-[11px] font-medium uppercase tracking-wide text-white/75">
+            {giveaway.winnerCount > 1 ? `${giveaway.winnerCount} winners` : "1 winner"} ·{" "}
+            {giveaway.entryCount} {giveaway.entryCount === 1 ? "entry" : "entries"} so far
+          </p>
+        </div>
+      </div>
+
+      {/* Body */}
+      <div className="flex flex-1 flex-col gap-2.5 p-4">
+        <h3 className="text-[15px] font-semibold tracking-tight">{giveaway.title}</h3>
+        <p className="flex items-start gap-1.5 text-sm font-medium text-amber-700 dark:text-amber-400">
+          <Gift className="mt-0.5 h-4 w-4 shrink-0" />
+          <span className="line-clamp-2">{giveaway.prize}</span>
+        </p>
+        <p className="line-clamp-2 text-sm leading-relaxed text-muted-foreground">{giveaway.description}</p>
+
+        {giveaway.memberBonus > 0 && giveaway.product && (
+          <p className="inline-flex items-center gap-1.5 text-xs font-medium text-emerald-600 dark:text-emerald-400">
+            <Sparkles className="h-3.5 w-3.5" /> +{giveaway.memberBonus} bonus entries for members
+          </p>
+        )}
+
+        {giveaway.product && (
+          <button
+            type="button"
+            onClick={() => navigate("product", { productId: giveaway.product!.id })}
+            className="flex items-center gap-2 text-left"
+            aria-label={`View ${giveaway.product.title}`}
+          >
+            <UserAvatar name={giveaway.product.creator.name} color={giveaway.product.creator.avatarColor} size="sm" />
+            <span className="min-w-0">
+              <span className="block truncate text-xs font-semibold group-hover:text-primary">
+                {giveaway.product.title}
+              </span>
+              <span className="block truncate text-[11px] text-muted-foreground">
+                by {giveaway.product.creator.name ?? "creator"}
+              </span>
+            </span>
+          </button>
+        )}
+
+        <div className="mt-auto border-t pt-3.5">
+          <GiveawayEnterButton giveaway={giveaway} onEntered={onEntered} />
+        </div>
+      </div>
+    </motion.article>
+  );
+}
+
+/** Compact banner for the product page — promotes a live drop for this product. */
+function GiveawayBanner({ giveaway, onEntered }: { giveaway: GiveawayDTO; onEntered: (id: string, entries: number) => void }) {
+  const countdown = useCountdown(giveaway.endsAt);
+
+  return (
+    <motion.section
+      initial={{ opacity: 0, y: 12 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ delay: 0.08 }}
+      className="card-shine rounded-2xl border border-amber-500/25 bg-gradient-to-br from-amber-500/[0.08] via-transparent to-orange-500/[0.05] p-5"
+      aria-label="Live giveaway"
+    >
+      <div className="flex items-start gap-3">
+        <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-amber-400 to-orange-500 text-white shadow-sm">
+          <Gift className="h-5 w-5" />
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <LiveDropBadge />
+            <span className="inline-flex items-center gap-1 text-xs font-semibold text-amber-700 dark:text-amber-400">
+              <Timer className="h-3.5 w-3.5" /> {countdown}
+            </span>
+          </div>
+          <p className="mt-2 text-sm font-semibold">{giveaway.title}</p>
+          <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">
+            Win: <span className="font-medium text-foreground/80">{giveaway.prize}</span>
+            {giveaway.prizeValueCents > 0 && <> (worth {fmtMoney(giveaway.prizeValueCents)})</>}
+          </p>
+          <p className="mt-1 text-[11px] text-muted-foreground">
+            {giveaway.entryCount} {giveaway.entryCount === 1 ? "entry" : "entries"} ·{" "}
+            {giveaway.winnerCount} {giveaway.winnerCount === 1 ? "winner" : "winners"}
+            {giveaway.memberBonus > 0 && (
+              <span className="font-medium text-emerald-600 dark:text-emerald-400"> · +{giveaway.memberBonus} for members</span>
+            )}
+          </p>
+        </div>
+      </div>
+      <div className="mt-4">
+        <GiveawayEnterButton giveaway={giveaway} onEntered={onEntered} size="sm" />
+      </div>
+    </motion.section>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Product card (Whop-style)
 // ---------------------------------------------------------------------------
 
@@ -785,6 +1028,11 @@ const HOW_IT_WORKS = [
     title: "Earn as an affiliate",
     text: "Love a product? Grab a referral link from its page and earn up to 30% of every member you bring — tracked, settled and paid automatically.",
   },
+  {
+    icon: Gift,
+    title: "Win free in drops",
+    text: "Creators run prize giveaways — memberships, gear, lifetime passes. Entry is free, members get bonus entries, winners drawn on the clock.",
+  },
 ];
 
 function DiscoverView() {
@@ -801,9 +1049,11 @@ function DiscoverView() {
   const [sort, setSort] = useState("featured");
   const [products, setProducts] = useState<ProductCardDTO[] | null>(null);
   const [loading, setLoading] = useState(true);
+  const [giveaways, setGiveaways] = useState<GiveawayDTO[] | null>(null);
 
   const gridRef = useRef<HTMLDivElement>(null);
   const howRef = useRef<HTMLDivElement>(null);
+  const dropsRef = useRef<HTMLDivElement>(null);
 
   // Sync with external navigation params (e.g. header search).
   useEffect(() => {
@@ -840,7 +1090,24 @@ function DiscoverView() {
     };
   }, [searchText, category, sort, nonce, toast]);
 
+  // Live prize drops — public feed, fetched alongside the catalog.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await api<{ giveaways: GiveawayDTO[] }>("/api/giveaways?limit=6");
+        if (!cancelled) setGiveaways(res.giveaways);
+      } catch {
+        if (!cancelled) setGiveaways([]); // section simply hides
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [nonce]);
+
   const featured = useMemo(() => (products ?? []).filter((p) => p.featured), [products]);
+  const liveGiveaways = useMemo(() => (giveaways ?? []).filter((g) => g.status === "LIVE"), [giveaways]);
   const hasFilters = searchText.trim() !== "" || category !== "ALL";
   const totalMembers = (products ?? []).reduce((s, p) => s + p.membersCount, 0);
   const avgRating = products && products.length > 0 ? products.reduce((s, p) => s + p.rating, 0) / products.length : 0;
@@ -908,6 +1175,26 @@ function DiscoverView() {
                 How it works
               </Button>
             </div>
+
+            {/* Live-drops teaser — surfaces the giveaway section when drops are running */}
+            {liveGiveaways.length > 0 && (
+              <motion.button
+                type="button"
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: 0.35 }}
+                onClick={() => dropsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })}
+                className="group mt-5 inline-flex items-center gap-2 rounded-full border border-amber-500/30 bg-amber-500/10 py-1.5 pl-2 pr-3.5 text-xs font-semibold text-amber-700 transition-all hover:-translate-y-0.5 hover:border-amber-500/50 hover:bg-amber-500/15 hover:shadow-sm dark:text-amber-300"
+              >
+                <span className="relative flex h-5 w-5 items-center justify-center rounded-full bg-gradient-to-br from-amber-400 to-orange-500 text-white">
+                  <Gift className="h-3 w-3" />
+                </span>
+                {liveGiveaways.length} live {liveGiveaways.length === 1 ? "giveaway" : "giveaways"} — free to enter
+                <span className="transition-transform group-hover:translate-x-0.5" aria-hidden>
+                  <ArrowRight className="h-3.5 w-3.5" />
+                </span>
+              </motion.button>
+            )}
 
             <div className="mx-auto mt-10 max-w-xl border-t border-foreground/10 pt-7" aria-hidden="true" />
             <dl className="mx-auto flex max-w-xl flex-wrap items-center justify-center gap-x-10 gap-y-4">
@@ -1002,6 +1289,30 @@ function DiscoverView() {
           </div>
         )}
 
+        {/* Live giveaways — only without active filters */}
+        {!hasFilters && liveGiveaways.length > 0 && !loading && (
+          <div ref={dropsRef} className="mt-10 scroll-mt-20">
+            <SectionHeader
+              title="Live giveaways"
+              description="Free prize drops from creators — enter before the timer runs out"
+            />
+            <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
+              {liveGiveaways.map((g, i) => (
+                <MarketplaceGiveawayCard
+                  key={g.id}
+                  giveaway={g}
+                  index={i}
+                  onEntered={(id, entries) =>
+                    setGiveaways((prev) =>
+                      (prev ?? []).map((x) => (x.id === id ? { ...x, myEntry: entries, entryCount: x.entryCount + 1 } : x))
+                    )
+                  }
+                />
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* All products */}
         <div className="mt-10">
           <SectionHeader
@@ -1067,7 +1378,7 @@ function DiscoverView() {
               <h2 className="text-2xl font-extrabold tracking-tight md:text-3xl">How Vendly works</h2>
               <p className="mt-2 text-muted-foreground">From browsing to instant access — and earning.</p>
             </div>
-            <ol className="mt-10 grid gap-5 md:grid-cols-2 xl:grid-cols-4">
+            <ol className="mt-10 grid gap-5 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
               {HOW_IT_WORKS.map((step, i) => (
                 <motion.li
                   key={step.title}
@@ -1254,6 +1565,7 @@ function ProductDetailView() {
   const [notFound, setNotFound] = useState(false);
   const [selectedPlanId, setSelectedPlanId] = useState<string | null>(null);
   const [reviewOpen, setReviewOpen] = useState(false);
+  const [productGiveaway, setProductGiveaway] = useState<GiveawayDTO | null>(null);
 
   const load = useCallback(async () => {
     if (!params.productId) {
@@ -1277,6 +1589,24 @@ function ProductDetailView() {
   useEffect(() => {
     void load();
   }, [load, nonce]);
+
+  // Live drop promoting this product (silent — banner renders only when one exists).
+  useEffect(() => {
+    if (!params.productId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await api<{ giveaways: GiveawayDTO[] }>(`/api/giveaways?productId=${params.productId}&limit=1`);
+        if (cancelled) return;
+        setProductGiveaway(res.giveaways.find((g) => g.status === "LIVE") ?? null);
+      } catch {
+        // no drops — banner stays hidden
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [params.productId, nonce]);
 
   const plans = product ? product.plans : EMPTY_PLANS;
   const selectedPlan = useMemo(() => {
@@ -1459,7 +1789,15 @@ function ProductDetailView() {
         </div>
 
         {/* ------------------------------ Right column (sticky) ------------------------------ */}
-        <aside className="lg:sticky lg:top-20 lg:self-start" aria-label="Pricing">
+        <aside className="space-y-5 lg:sticky lg:top-20 lg:self-start" aria-label="Pricing">
+          {productGiveaway && (
+            <GiveawayBanner
+              giveaway={productGiveaway}
+              onEntered={(id, entries) =>
+                setProductGiveaway((prev) => (prev && prev.id === id ? { ...prev, myEntry: entries, entryCount: prev.entryCount + 1 } : prev))
+              }
+            />
+          )}
           <div className="rounded-3xl border bg-card p-5 shadow-sm md:p-6">
             {product.hasAccess ? (
               <div className="py-4 text-center">

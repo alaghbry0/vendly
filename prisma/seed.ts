@@ -36,6 +36,8 @@ async function main() {
   await db.affiliateCommission.deleteMany();
   await db.affiliateLink.deleteMany();
   await db.affiliateProgram.deleteMany();
+  await db.giveawayEntry.deleteMany();
+  await db.giveaway.deleteMany();
   await db.product.deleteMany();
   await db.user.deleteMany();
   await db.systemClock.deleteMany();
@@ -764,6 +766,94 @@ async function main() {
   await notif(alice.id, "affiliate_earned", "Referral commission — $14.70 pending", "Someone joined Trade Signals Pro through your link alex. It settles on the next billing run.", "tag", false, 3);
   await notif(bob.id, "affiliate_joined", "New affiliate — Gina Park", "They're now promoting Trade Signals Pro for 30% per referred first invoice.", "user-plus", true, 38);
 
+  // ============ Giveaways & drops ============
+  const mkEntry = (giveawayId: string, userId: string, entries: number, won: boolean, ago: number) =>
+    db.giveawayEntry.create({
+      data: { giveawayId, userId, entries, won, createdAt: daysAgo(ago) },
+    });
+
+  // LIVE drop #1 — Marcus promotes Trade Signals Pro (Alex deliberately NOT
+  // entered so the demo user can enter live)
+  const gTsp = await db.giveaway.create({
+    data: {
+      creatorId: bob.id,
+      productId: tradeSignals.id,
+      title: "1-Year Elite Membership Giveaway",
+      description:
+        "Two lucky winners get a full year of Elite — live session breakdowns, the complete backtest library and priority desk Q&A. Winners are drawn automatically when the timer hits zero.",
+      prize: "1-year Trade Signals Pro Elite membership + 1-on-1 strategy session",
+      prizeValueCents: 58800,
+      coverTheme: "emerald",
+      status: "LIVE",
+      endsAt: daysAhead(6),
+      winnerCount: 2,
+      memberBonus: 3,
+      createdAt: daysAgo(9),
+    },
+  });
+  // members (dave Elite, hank Pro) get the +3 member bonus
+  await mkEntry(gTsp.id, dave.id, 4, false, 8);
+  await mkEntry(gTsp.id, eve.id, 1, false, 7);
+  await mkEntry(gTsp.id, grace.id, 1, false, 6);
+  await mkEntry(gTsp.id, hank.id, 4, false, 4);
+  await mkEntry(gTsp.id, ivy.id, 1, false, 2);
+
+  // LIVE drop #2 — Aisha promotes Design Vault (Alex entered with 1 entry —
+  // his Personal sub lapsed, so no member bonus; grace/ivy carry 3 each)
+  const gDv = await db.giveaway.create({
+    data: {
+      creatorId: carol.id,
+      productId: designVault.id,
+      title: "Lifetime Design Vault Pass",
+      description:
+        "One winner takes the entire vault — every UI kit, icon pack and mockup, for life — plus a seat at next month's live Figma masterclass.",
+      prize: "Design Vault lifetime access + live Figma masterclass seat",
+      prizeValueCents: 24900,
+      coverTheme: "violet",
+      status: "LIVE",
+      endsAt: daysAhead(2),
+      winnerCount: 1,
+      memberBonus: 2,
+      createdAt: daysAgo(12),
+    },
+  });
+  await mkEntry(gDv.id, alice.id, 1, false, 11);
+  await mkEntry(gDv.id, grace.id, 3, false, 9);
+  await mkEntry(gDv.id, ivy.id, 3, false, 3);
+
+  // ENDED drop — Marcus's Crypto Alpha hardware-wallet drop, drawn 5 days
+  // ago; Hugo + Iris won, David/Farid had member-bonus odds
+  const gLedger = await db.giveaway.create({
+    data: {
+      creatorId: bob.id,
+      productId: cryptoAlpha.id,
+      title: "Ledger Nano X Drop",
+      description:
+        "A cold-storage hardware wallet for three lucky degens. Winners drawn when the countdown ended — congrats to Hugo and Iris!",
+      prize: "Ledger Nano X hardware wallet (sealed)",
+      prizeValueCents: 14900,
+      coverTheme: "amber",
+      status: "ENDED",
+      endsAt: daysAgo(5),
+      winnerCount: 2,
+      memberBonus: 3,
+      drawnAt: daysAgo(5),
+      createdAt: daysAgo(19),
+    },
+  });
+  await mkEntry(gLedger.id, dave.id, 4, false, 18);
+  await mkEntry(gLedger.id, frank.id, 4, false, 17);
+  await mkEntry(gLedger.id, hank.id, 1, true, 15);
+  await mkEntry(gLedger.id, eve.id, 1, false, 14);
+  await mkEntry(gLedger.id, ivy.id, 1, true, 13);
+  await mkEntry(gLedger.id, grace.id, 1, false, 12);
+
+  await notif(hank.id, "giveaway_won", "You won — Ledger Nano X Drop 🎉", "Your prize: Ledger Nano X hardware wallet (sealed). The creator will be in touch with delivery details.", "gift", false, 5);
+  await notif(ivy.id, "giveaway_won", "You won — Ledger Nano X Drop 🎉", "Your prize: Ledger Nano X hardware wallet (sealed). The creator will be in touch with delivery details.", "gift", true, 5);
+  await notif(bob.id, "giveaway_ended", "Giveaway ended — Ledger Nano X Drop", "6 entries · 2 winners drawn · Crypto Alpha Group", "gift", true, 5);
+  await notif(bob.id, "giveaway_entered", "New giveaway entry — 1-Year Elite Membership Giveaway", "Someone just entered your drop. (Trade Signals Pro)", "gift", false, 2);
+  await notif(carol.id, "giveaway_entered", "New giveaway entry — Lifetime Design Vault Pass", "Someone just entered your drop. (Design Vault)", "gift", false, 3);
+
   console.log("✅ Seed complete:", {
     users: await db.user.count(),
     products: await db.product.count(),
@@ -782,6 +872,8 @@ async function main() {
     affiliatePrograms: await db.affiliateProgram.count(),
     affiliateLinks: await db.affiliateLink.count(),
     affiliateCommissions: await db.affiliateCommission.count(),
+    giveaways: await db.giveaway.count(),
+    giveawayEntries: await db.giveawayEntry.count(),
   });
 }
 

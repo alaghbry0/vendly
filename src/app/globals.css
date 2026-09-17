@@ -171,3 +171,14 @@
     background: linear-gradient(105deg, transparent 40%, oklch(1 0 0 / 0.07) 50%, transparent 60%);
   }
 }
+
+/* Printable receipts (portal Invoices tab): while a receipt dialog is open, a
+   hidden #receipt-print copy of the paper is portalled as a direct body child.
+   When printing, every other body child collapses (display:none) so the
+   receipt — plain static flow, no fixed/transform chrome — renders flat at the
+   top of page 1. Without #receipt-print on the page the rule is inert. */
+@media print {
+  body:has(#receipt-print) > :not(#receipt-print) {
+    display: none !important;
+  }
+}

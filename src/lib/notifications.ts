@@ -15,6 +15,7 @@ export type NotificationIcon =
   | "tag"
   | "bank"
   | "share"
+  | "gift"
   | "bell";
 
 export async function notify(opts: {
@@ -65,6 +66,11 @@ export function notificationTarget(type: string): { view: "portal" | "creator"; 
       return { view: "portal", tab: "affiliates" };
     case "affiliate_joined":
       return { view: "creator", tab: "affiliates" };
+    case "giveaway_won":
+      return { view: "portal", tab: "giveaways" };
+    case "giveaway_entered":
+    case "giveaway_ended":
+      return { view: "creator", tab: "giveaways" };
     default:
       return null;
   }

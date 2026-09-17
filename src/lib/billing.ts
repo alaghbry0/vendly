@@ -7,6 +7,7 @@ import { renewalDiscount, recordRedemption } from "@/lib/promos";
 import { notify } from "@/lib/notifications";
 import { settlePendingPayouts } from "@/lib/payouts";
 import { createReferralCommission, settlePendingCommissions } from "@/lib/affiliates";
+import { closeExpiredGiveaways } from "@/lib/giveaways";
 
 // ============ Subscription lifecycle engine ============
 
@@ -510,6 +511,11 @@ export async function runBilling(): Promise<BillingRunSummary> {
   const commissionsSettled = await settlePendingCommissions(now);
   if (commissionsSettled > 0)
     events.push(`${commissionsSettled} affiliate commission${commissionsSettled === 1 ? "" : "s"} settled`);
+
+  // 6) Close expired giveaways and draw their winners.
+  const giveawaysDrawn = await closeExpiredGiveaways(now);
+  if (giveawaysDrawn > 0)
+    events.push(`${giveawaysDrawn} giveaway${giveawaysDrawn === 1 ? "" : "s"} ended — winners drawn`);
 
   const clock = await getClockState();
   return {

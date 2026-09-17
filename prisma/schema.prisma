@@ -36,6 +36,8 @@ model User {
   affiliatePrograms AffiliateProgram[]
   affiliateLinks   AffiliateLink[]
   affiliateCommissions AffiliateCommission[]
+  giveaways        Giveaway[]
+  giveawayEntries  GiveawayEntry[]
 }
 
 // ============ Catalog ============
@@ -69,6 +71,7 @@ model Product {
   promoCodes    PromoCode[]
   wishlistItems WishlistItem[]
   affiliateProgram AffiliateProgram?
+  giveaways      Giveaway[]
 }
 
 model Plan {
@@ -386,4 +389,40 @@ model AffiliateCommission {
   status         String    @default("PENDING") // PENDING | PAID
   createdAt      DateTime  @default(now())
   paidAt         DateTime?
+}
+
+// ============ Giveaways & drops ============
+model Giveaway {
+  id              String   @id @default(cuid())
+  creatorId       String
+  creator         User     @relation(fields: [creatorId], references: [id])
+  productId       String?  // optional product the drop promotes
+  product         Product? @relation(fields: [productId], references: [id])
+  title           String
+  description     String
+  prize           String   // what the winner(s) receive
+  prizeValueCents Int      @default(0) // display only
+  coverTheme      String   @default("emerald") // gradient key
+  status          String   @default("LIVE") // LIVE | ENDED
+  endsAt          DateTime
+  winnerCount     Int      @default(1)
+  memberBonus     Int      @default(2) // extra entries for active members of the linked product
+  drawnAt         DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  entries GiveawayEntry[]
+}
+
+model GiveawayEntry {
+  id         String   @id @default(cuid())
+  giveawayId String
+  giveaway   Giveaway @relation(fields: [giveawayId], references: [id])
+  userId     String
+  user       User     @relation(fields: [userId], references: [id])
+  entries    Int      @default(1) // 1 + memberBonus when the entrant is an active member
+  won        Boolean  @default(false)
+  createdAt  DateTime @default(now())
+
+  @@unique([giveawayId, userId])
 }

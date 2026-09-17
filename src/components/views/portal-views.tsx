@@ -3,18 +3,21 @@
 // CUSTOMER SELF-SERVICE BILLING PORTAL — "My Hub".
 // Owned by Task 2-b. Rendered when store.view === "portal".
 // Internal tab system (synced from params.portalTab): overview | subscriptions |
-// licenses | downloads | wishlist | affiliates | invoices | payment-methods |
-// settings.
+// licenses | downloads | wishlist | affiliates | giveaways | invoices |
+// payment-methods | settings.
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ComponentProps, type FormEvent } from "react";
+import { createPortal } from "react-dom";
 import { AnimatePresence, motion, type Variants } from "framer-motion";
 import { useAppStore } from "@/lib/store";
 import { api, ApiError } from "@/lib/api";
 import type {
   AffiliateLinkDTO,
+  GiveawayDTO,
   GrantDTO,
   InvoiceDTO,
   LicenseDTO,
+  MyGiveawayEntryDTO,
   PaymentMethodDTO,
   PlanDTO,
   ProductCardDTO,
@@ -85,6 +88,7 @@ import {
   ArrowLeftRight,
   AtSign,
   BadgeCheck,
+  BadgePercent,
   Ban,
   Banknote,
   Bitcoin,
@@ -109,6 +113,7 @@ import {
   FileImage,
   FileText,
   FileVideo,
+  Gift,
   Heart,
   HeartOff,
   Info,
@@ -119,6 +124,7 @@ import {
   MonitorSmartphone,
   MousePointerClick,
   Plus,
+  Printer,
   ReceiptText,
   Repeat,
   RotateCcw,
@@ -129,9 +135,11 @@ import {
   Star,
   Store,
   Target,
+  Ticket,
   Timer,
   Trash2,
   TriangleAlert,
+  Trophy,
   UserPlus,
   Users,
   Wallet,
@@ -149,6 +157,7 @@ type PortalTab =
   | "downloads"
   | "wishlist"
   | "affiliates"
+  | "giveaways"
   | "invoices"
   | "payment-methods"
   | "settings";
@@ -160,6 +169,7 @@ const PORTAL_TABS: { key: PortalTab; label: string; icon: LucideIcon }[] = [
   { key: "downloads", label: "Downloads", icon: Download },
   { key: "wishlist", label: "Wishlist", icon: Heart },
   { key: "affiliates", label: "Affiliates", icon: Share2 },
+  { key: "giveaways", label: "Giveaways", icon: Gift },
   { key: "invoices", label: "Invoices", icon: ReceiptText },
   { key: "payment-methods", label: "Payment methods", icon: Wallet },
   { key: "settings", label: "Settings", icon: Settings },
@@ -176,6 +186,8 @@ interface PortalData {
   grants: GrantDTO[];
   wishlist: WishlistItemDTO[];
   affiliateLinks: AffiliateLinkDTO[];
+  giveaways: GiveawayDTO[];
+  myGiveawayEntries: MyGiveawayEntryDTO[];
 }
 
 const stagger: Variants = { hidden: {}, show: { transition: { staggerChildren: 0.06 } } };
@@ -253,7 +265,7 @@ function usePortalData() {
     let alive = true;
     const load = async () => {
       try {
-        const [subsRes, invoicesRes, methodsRes, licensesRes, grantsRes, wishlistRes, affiliatesRes] =
+        const [subsRes, invoicesRes, methodsRes, licensesRes, grantsRes, wishlistRes, affiliatesRes, giveawaysRes, mineRes] =
           await Promise.all([
             api<{ subscriptions: SubscriptionDTO[] }>("/api/subscriptions"),
             api<{ invoices: InvoiceDTO[] }>("/api/invoices"),
@@ -262,6 +274,8 @@ function usePortalData() {
             api<{ grants: GrantDTO[] }>("/api/grants"),
             api<{ items: WishlistItemDTO[] }>("/api/wishlist"),
             api<{ links: AffiliateLinkDTO[] }>("/api/affiliates/links"),
+            api<{ giveaways: GiveawayDTO[] }>("/api/giveaways"),
+            api<{ entries: MyGiveawayEntryDTO[] }>("/api/giveaways/mine"),
           ]);
         if (!alive) return;
         setData({
@@ -272,6 +286,8 @@ function usePortalData() {
           grants: grantsRes.grants,
           wishlist: wishlistRes.items,
           affiliateLinks: affiliatesRes.links,
+          giveaways: giveawaysRes.giveaways,
+          myGiveawayEntries: mineRes.entries,
         });
         setError(null);
       } catch (e) {
@@ -297,7 +313,48 @@ function usePortalData() {
     setData((prev) => (prev ? { ...prev, wishlist: prev.wishlist.filter((w) => w.product.id !== productId) } : prev));
   }, []);
 
-  return { data, error, loading: !data && !error, removeWishlistItem };
+  // Enter a giveaway (idempotent on the server). The local copy is patched in
+  // place — myEntry + entryCount update and the entry joins myGiveawayEntries —
+  // the same spirit as the wishlist removal, so cards settle instantly.
+  const enterGiveaway = useCallback(async (
+    giveawayId: string
+  ): Promise<{ entries: number; bonus: boolean }> => {
+    const res = await api<{ ok: true; entries: number; bonus: boolean }>(`/api/giveaways/${giveawayId}/enter`, {
+      method: "POST",
+      json: {},
+    });
+    setData((prev) => {
+      if (!prev) return prev;
+      const giveaways = prev.giveaways.map((g) =>
+        g.id === giveawayId
+          ? {
+              ...g,
+              myEntry: res.entries,
+              entryCount: g.entryCount + (g.myEntry == null ? 1 : 0),
+            }
+          : g
+      );
+      const entered = giveaways.find((g) => g.id === giveawayId) ?? prev.giveaways.find((g) => g.id === giveawayId);
+      const myGiveawayEntries = prev.myGiveawayEntries.some((e) => e.giveaway.id === giveawayId)
+        ? prev.myGiveawayEntries.map((e) => (e.giveaway.id === giveawayId ? { ...e, entries: res.entries } : e))
+        : entered
+          ? [
+              {
+                id: `entry-${giveawayId}`,
+                entries: res.entries,
+                won: false,
+                createdAt: new Date().toISOString(),
+                giveaway: entered,
+              },
+              ...prev.myGiveawayEntries,
+            ]
+          : prev.myGiveawayEntries;
+      return { ...prev, giveaways, myGiveawayEntries };
+    });
+    return res;
+  }, []);
+
+  return { data, error, loading: !data && !error, removeWishlistItem, enterGiveaway };
 }
 
 // ============================================================================
@@ -309,7 +366,7 @@ export function PortalViews() {
   const refresh = useAppStore((s) => s.refresh);
   const navigate = useAppStore((s) => s.navigate);
   const rawTab = useAppStore((s) => s.params.portalTab);
-  const { data, error, removeWishlistItem } = usePortalData();
+  const { data, error, removeWishlistItem, enterGiveaway } = usePortalData();
 
   // The active tab is fully store-driven: internal tab clicks write the param
   // via navigate(), and deep links from other views are picked up for free.
@@ -463,6 +520,14 @@ export function PortalViews() {
                 <WishlistTab items={data.wishlist} subs={data.subs} onRemove={removeWishlistItem} />
               )}
               {tab === "affiliates" && <AffiliatesTab links={data.affiliateLinks} />}
+              {tab === "giveaways" && (
+                <GiveawaysTab
+                  giveaways={data.giveaways}
+                  myEntries={data.myGiveawayEntries}
+                  user={user}
+                  onEnter={enterGiveaway}
+                />
+              )}
               {tab === "invoices" && (
                 <InvoicesTab
                   invoices={data.invoices}
@@ -2396,6 +2461,374 @@ function AffiliatesTab({ links }: { links: AffiliateLinkDTO[] }) {
 }
 
 // ============================================================================
+// Tab: Giveaways
+// ============================================================================
+
+/** Ticking "now" that respects the time machine: the store's clock snapshot
+ *  anchors the timeline and real elapsed time advances it, so live countdowns
+ *  stay correct whether the clock is live or simulated. One interval per tab
+ *  (cleaned up on unmount) feeds every drop card via a `now` prop. */
+function useTickingNow(): Date {
+  const clockNow = useAppStore((s) => s.clock.now);
+  const anchorRef = useRef({ clockMs: +new Date(clockNow), realMs: Date.now() });
+  const [nowMs, setNowMs] = useState(() => anchorRef.current.clockMs);
+
+  // Re-anchor whenever a fresh clock snapshot arrives (advance / reset).
+  if (anchorRef.current.clockMs !== +new Date(clockNow)) {
+    anchorRef.current = { clockMs: +new Date(clockNow), realMs: Date.now() };
+  }
+
+  useEffect(() => {
+    const sync = () => {
+      const a = anchorRef.current;
+      setNowMs(a.clockMs + (Date.now() - a.realMs));
+    };
+    sync();
+    const t = window.setInterval(sync, 30_000);
+    return () => window.clearInterval(t);
+  }, [clockNow]);
+
+  return new Date(nowMs);
+}
+
+/** "2d 5h" / "5h 12m" / "8m" for the "Ends in Xd Yh" countdown chip. */
+function countdownLabel(endsAt: string, now: Date): string {
+  const diff = +new Date(endsAt) - +now;
+  if (diff <= 0) return "Ending";
+  const days = Math.floor(diff / 86_400_000);
+  const hours = Math.floor((diff % 86_400_000) / 3_600_000);
+  const minutes = Math.floor((diff % 3_600_000) / 60_000);
+  if (days >= 1) return `${days}d ${hours}h`;
+  if (hours >= 1) return `${hours}h ${minutes}m`;
+  return `${minutes}m`;
+}
+
+function GiveawayCard({
+  giveaway,
+  user,
+  now,
+  index,
+  busy,
+  onEnter,
+}: {
+  giveaway: GiveawayDTO;
+  user: SessionUser;
+  now: Date;
+  index: number;
+  busy: boolean;
+  onEnter: (giveaway: GiveawayDTO) => void;
+}) {
+  const navigate = useAppStore((s) => s.navigate);
+  // The drop's own creator (creators can only link their own products).
+  const product = giveaway.product;
+  const own = product?.creator.id === user.id;
+  const myEntry = giveaway.myEntry;
+  const entered = myEntry != null;
+
+  return (
+    <motion.article
+      initial={{ opacity: 0, y: 14 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{
+        opacity: { duration: 0.25, delay: Math.min(index * 0.06, 0.36) },
+        y: { duration: 0.3, ease: "easeOut", delay: Math.min(index * 0.06, 0.36) },
+      }}
+      className="h-full"
+    >
+      <div className="group flex h-full flex-col overflow-hidden rounded-2xl border bg-card text-left shadow-sm transition-all duration-200 hover:-translate-y-1 hover:shadow-lg focus-within:ring-2 focus-within:ring-emerald-500/40">
+        {/* Themed banner with LIVE badge, countdown + prize value chips */}
+        <div className="relative overflow-hidden">
+          <ProductCover
+            theme={giveaway.coverTheme}
+            category={product?.category ?? "OTHER"}
+            title={giveaway.title}
+            className="aspect-[16/8] w-full transition-transform duration-300 group-hover:scale-105"
+            iconClassName="h-24 w-24"
+          />
+          <span className="absolute left-3 top-3 inline-flex items-center gap-1.5 rounded-full bg-emerald-600/95 px-2.5 py-1 text-[11px] font-bold uppercase tracking-wide text-white shadow-sm backdrop-blur-sm">
+            <span className="relative flex h-2 w-2" aria-hidden>
+              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-white/70" />
+              <span className="relative inline-flex h-2 w-2 rounded-full bg-white" />
+            </span>
+            Live
+          </span>
+          <span className="absolute right-3 top-3 inline-flex items-center gap-1 rounded-full bg-black/45 px-2.5 py-1 text-[11px] font-semibold text-white tabular-nums shadow-sm backdrop-blur-sm">
+            <Timer className="h-3 w-3" aria-hidden /> Ends in {countdownLabel(giveaway.endsAt, now)}
+          </span>
+          {giveaway.prizeValueCents > 0 && (
+            <span className="absolute bottom-3 left-3 inline-flex items-center gap-1 rounded-full bg-black/45 px-2.5 py-1 text-[11px] font-semibold text-white tabular-nums shadow-sm backdrop-blur-sm">
+              <Banknote className="h-3 w-3" aria-hidden /> {fmtMoney(giveaway.prizeValueCents)} prize value
+            </span>
+          )}
+        </div>
+
+        {/* Body */}
+        <div className="flex flex-1 flex-col gap-3 p-4">
+          <h3 className="text-[15px] font-semibold tracking-tight">{giveaway.title}</h3>
+          <p className="flex items-start gap-1.5 text-sm font-medium">
+            <Gift className="mt-0.5 h-4 w-4 shrink-0 text-emerald-500" aria-hidden />
+            <span className="min-w-0 line-clamp-2">{giveaway.prize}</span>
+          </p>
+          <p className="line-clamp-2 text-sm text-muted-foreground">{giveaway.description}</p>
+
+          {/* Entry stats */}
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 text-xs text-muted-foreground">
+            <span className="inline-flex items-center gap-1 tabular-nums">
+              <Users className="h-3.5 w-3.5" aria-hidden />
+              {giveaway.entryCount} {giveaway.entryCount === 1 ? "entry" : "entries"}
+            </span>
+            <span className="inline-flex items-center rounded-full border bg-muted/40 px-2 py-0.5 font-medium tabular-nums">
+              {giveaway.winnerCount} {giveaway.winnerCount === 1 ? "winner" : "winners"}
+            </span>
+          </div>
+
+          {giveaway.memberBonus > 0 && product && (
+            <p className="inline-flex w-fit items-center gap-1 text-xs font-medium text-amber-600 dark:text-amber-400">
+              <BadgePercent className="h-3.5 w-3.5" aria-hidden />
+              +{giveaway.memberBonus} entries for members
+            </p>
+          )}
+
+          {/* Creator + product */}
+          {product && (
+            <div className="flex items-center gap-2">
+              <UserAvatar name={product.creator.name} color={product.creator.avatarColor} size="sm" />
+              <span className="min-w-0 truncate text-xs text-muted-foreground">
+                by {product.creator.name ?? "Creator"} ·{" "}
+                <button
+                  type="button"
+                  onClick={() => navigate("product", { productId: product.id })}
+                  className="rounded-sm font-medium text-foreground hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/40"
+                >
+                  {product.title}
+                </button>
+              </span>
+            </div>
+          )}
+
+          {/* Enter / entered / own drop */}
+          <div className="mt-auto border-t pt-3">
+            {own ? (
+              <span className="inline-flex items-center gap-1.5 rounded-full border bg-muted/40 px-3 py-1.5 text-xs font-medium text-muted-foreground">
+                <Info className="h-3.5 w-3.5" aria-hidden /> Your own drop
+              </span>
+            ) : entered ? (
+              <div>
+                <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1.5 text-xs font-semibold text-emerald-700 dark:text-emerald-400">
+                  <CircleCheck className="h-3.5 w-3.5" aria-hidden /> You&apos;re in — {myEntry}{" "}
+                  {myEntry === 1 ? "entry" : "entries"}
+                </span>
+                {myEntry != null && myEntry > 1 && (
+                  <p className="mt-1.5 text-[11px] text-muted-foreground">Member bonus included</p>
+                )}
+              </div>
+            ) : (
+              <Button
+                className="h-11 w-full rounded-xl"
+                disabled={busy}
+                onClick={() => onEnter(giveaway)}
+              >
+                {busy ? (
+                  <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+                ) : (
+                  <Gift className="h-4 w-4" aria-hidden />
+                )}
+                Enter giveaway
+              </Button>
+            )}
+          </div>
+        </div>
+      </div>
+    </motion.article>
+  );
+}
+
+function GiveawaysTab({
+  giveaways,
+  myEntries,
+  user,
+  onEnter,
+}: {
+  giveaways: GiveawayDTO[];
+  myEntries: MyGiveawayEntryDTO[];
+  user: SessionUser;
+  onEnter: (giveawayId: string) => Promise<{ entries: number; bonus: boolean }>;
+}) {
+  const { toast } = useToast();
+  const navigate = useAppStore((s) => s.navigate);
+  const now = useTickingNow();
+  const [enteringId, setEnteringId] = useState<string | null>(null);
+
+  const live = useMemo(() => giveaways.filter((g) => g.status === "LIVE"), [giveaways]);
+  const ended = useMemo(() => giveaways.filter((g) => g.status === "ENDED"), [giveaways]);
+  const wins = useMemo(() => myEntries.filter((e) => e.won), [myEntries]);
+  const myLiveEntries = live.reduce((sum, g) => sum + (g.myEntry ?? 0), 0);
+
+  async function enter(giveaway: GiveawayDTO) {
+    setEnteringId(giveaway.id);
+    try {
+      const res = await onEnter(giveaway.id);
+      toast({
+        title: `You're in! ${res.entries} ${res.entries === 1 ? "entry" : "entries"}`,
+        description: res.bonus
+          ? `Member bonus included — good luck in “${giveaway.title}”.`
+          : `Good luck in “${giveaway.title}”.`,
+      });
+    } catch (e) {
+      toast({
+        title: "Couldn't enter the giveaway",
+        description: e instanceof Error ? e.message : "Please try again.",
+        variant: "destructive",
+      });
+    } finally {
+      setEnteringId(null);
+    }
+  }
+
+  return (
+    <motion.section variants={stagger} initial="hidden" animate="show" className="space-y-5">
+      <motion.div variants={fadeUp}>
+        <SectionHeader
+          title="Giveaways"
+          description="Enter free drops from creators — win prizes, memberships and gear."
+        />
+      </motion.div>
+
+      {/* My wins celebration */}
+      {wins.length > 0 && (
+        <motion.div
+          variants={fadeUp}
+          className="relative overflow-hidden rounded-2xl bg-gradient-to-r from-emerald-600 via-teal-600 to-cyan-600 p-5 text-white shadow-sm sm:p-6"
+        >
+          {/* Confetti */}
+          <span className="absolute left-[7%] top-3 h-2.5 w-2.5 rotate-12 rounded-[3px] bg-amber-300/90" aria-hidden />
+          <span className="absolute left-[20%] bottom-4 h-2 w-2 -rotate-45 rounded-full bg-white/70" aria-hidden />
+          <span className="absolute left-[44%] top-2 h-1.5 w-1.5 rotate-12 rounded-full bg-white/60" aria-hidden />
+          <span className="absolute right-[26%] bottom-3 h-2 w-3 -rotate-6 rounded-full bg-lime-300/90" aria-hidden />
+          <span className="absolute right-[11%] top-4 h-2.5 w-2.5 rotate-45 rounded-[2px] bg-cyan-200/90" aria-hidden />
+          <div className="relative flex items-start gap-4">
+            <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-white/15">
+              <Trophy className="h-5 w-5 text-amber-200" aria-hidden />
+            </span>
+            <div className="min-w-0">
+              <h2 className="text-lg font-bold tracking-tight">Congratulations!</h2>
+              <p className="mt-0.5 text-sm text-emerald-50/90">
+                You won {wins.length} {wins.length === 1 ? "giveaway" : "giveaways"} — the creators will
+                be in touch with your prizes.
+              </p>
+              <ul className="mt-3 space-y-1.5">
+                {wins.map((w) => (
+                  <li key={w.id} className="flex items-start gap-2 text-sm">
+                    <Gift className="mt-0.5 h-4 w-4 shrink-0 text-amber-200" aria-hidden />
+                    <span className="min-w-0">
+                      <span className="font-semibold">{w.giveaway.title}</span> — {w.giveaway.prize}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </div>
+        </motion.div>
+      )}
+
+      {live.length === 0 ? (
+        <motion.div variants={fadeUp}>
+          <EmptyState
+            icon={Gift}
+            title="No live drops right now"
+            description="Check back soon — creators run prize drops all the time."
+            action={
+              <Button className="rounded-xl" onClick={() => navigate("discover")}>
+                <Store className="h-4 w-4" aria-hidden /> Browse marketplace
+              </Button>
+            }
+          />
+        </motion.div>
+      ) : (
+        <>
+          {/* Stats */}
+          <motion.div variants={fadeUp} className="grid gap-4 sm:grid-cols-3">
+            <StatCard
+              label="Active drops"
+              value={String(live.length)}
+              sub="open for entries right now"
+              icon={Gift}
+            />
+            <StatCard
+              label="Your entries"
+              value={String(myLiveEntries)}
+              sub={
+                live.some((g) => g.myEntry != null)
+                  ? `across ${live.filter((g) => g.myEntry != null).length} drop${
+                      live.filter((g) => g.myEntry != null).length === 1 ? "" : "s"
+                    }`
+                  : "enter your first drop below"
+              }
+              icon={Ticket}
+            />
+            <StatCard
+              label="Wins"
+              value={String(wins.length)}
+              sub={wins.length ? "prizes coming your way" : "good luck!"}
+              icon={Trophy}
+            />
+          </motion.div>
+
+          {/* Live drops grid */}
+          <motion.div variants={fadeUp} className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+            {live.map((giveaway, index) => (
+              <GiveawayCard
+                key={giveaway.id}
+                giveaway={giveaway}
+                user={user}
+                now={now}
+                index={index}
+                busy={enteringId === giveaway.id}
+                onEnter={enter}
+              />
+            ))}
+          </motion.div>
+        </>
+      )}
+
+      {/* Ended drops */}
+      {ended.length > 0 && (
+        <motion.div variants={fadeUp} className="space-y-3">
+          <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+            Ended drops
+          </h3>
+          <Panel className="overflow-hidden">
+            <ul className="divide-y">
+              {ended.map((g) => (
+                <li key={g.id} className="flex flex-wrap items-center gap-3 p-4 sm:px-5">
+                  <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-muted text-muted-foreground">
+                    <Gift className="h-4.5 w-4.5" aria-hidden />
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm font-semibold">{g.title}</p>
+                    <p className="truncate text-xs text-muted-foreground tabular-nums">
+                      {g.winnerCount} {g.winnerCount === 1 ? "winner" : "winners"} · Ended{" "}
+                      {timeAgo(g.drawnAt ?? g.endsAt)}
+                    </p>
+                  </div>
+                  {g.myWin ? (
+                    <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1 text-xs font-semibold text-emerald-700 dark:text-emerald-400">
+                      <Trophy className="h-3.5 w-3.5" aria-hidden /> You won!
+                    </span>
+                  ) : g.myEntry != null ? (
+                    <span className="shrink-0 text-xs text-muted-foreground">No luck this time</span>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+          </Panel>
+        </motion.div>
+      )}
+    </motion.section>
+  );
+}
+
+// ============================================================================
 // Tab: Invoices
 // ============================================================================
 
@@ -2436,6 +2869,173 @@ function downloadReceipt(inv: InvoiceDTO, email: string | null) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
+/** Gateway names for the printable receipt (plain text, no badge chrome). */
+const RECEIPT_GATEWAYS: Record<string, string> = {
+  STRIPE: "Stripe (card)",
+  PAYPAL: "PayPal",
+  CRYPTO: "Crypto wallet",
+};
+
+/** One labeled amount line on the receipt paper. */
+function ReceiptRow({ label, value, strong, tone }: { label: string; value: string; strong?: boolean; tone?: string }) {
+  return (
+    <div className="flex items-baseline justify-between gap-4 text-[13px]">
+      <span className="text-neutral-500">{label}</span>
+      <span className={cn("font-mono tabular-nums text-neutral-900", strong && "text-base font-bold", tone)}>
+        {value}
+      </span>
+    </div>
+  );
+}
+
+/** The receipt paper itself — always light colors (bg-white / neutral-9xx
+ *  text) so it prints correctly even from dark mode. Rendered twice: inside
+ *  the dialog (screen) and as a hidden body-level #receipt-print copy that the
+ *  @media print rule in globals.css promotes to the whole printed page. */
+function ReceiptPaper({ invoice, user, generatedAt }: { invoice: InvoiceDTO; user: SessionUser; generatedAt: string }) {
+  const paid = invoice.status === "PAID";
+  const discount = invoice.discountCents ?? 0;
+  const subtotal = invoice.amountCents + discount;
+  // Stamp shows the invoice's real status (PAID gets the emerald stamp).
+  const stampCls = paid
+    ? "border-emerald-600 text-emerald-700"
+    : invoice.status === "FAILED"
+      ? "border-red-500 text-red-500"
+      : "border-neutral-400 text-neutral-500";
+
+  return (
+    <div className="w-full bg-white text-neutral-900">
+      {/* Store header */}
+      <div className="border-b border-dashed border-neutral-300 px-5 pb-4 pt-5 text-center">
+        <p className="text-lg font-black tracking-[0.35em]">VENDLY</p>
+        <p className="mt-1 text-[11px] font-semibold uppercase tracking-[0.25em] text-neutral-500">Receipt</p>
+        <div className="mt-2 flex flex-wrap items-center justify-center gap-x-2 gap-y-0.5 font-mono text-[11px] text-neutral-500">
+          <span className="font-semibold text-neutral-700">{invoice.number}</span>
+          <span aria-hidden>·</span>
+          <span className="tabular-nums">{fmtDate(invoice.paidAt ?? invoice.createdAt)}</span>
+        </div>
+      </div>
+
+      {/* Seller + billed to */}
+      <div className="grid grid-cols-1 gap-3 border-b border-dashed border-neutral-300 px-5 py-4 sm:grid-cols-2">
+        <div className="min-w-0">
+          <p className="text-[10px] font-semibold uppercase tracking-wide text-neutral-400">Seller</p>
+          <p className="mt-0.5 truncate text-[13px] font-semibold">Vendly Marketplace</p>
+          <p className="truncate text-xs text-neutral-500">
+            {invoice.product?.title ?? "Digital marketplace"}
+          </p>
+        </div>
+        <div className="min-w-0 sm:text-right">
+          <p className="text-[10px] font-semibold uppercase tracking-wide text-neutral-400">Billed to</p>
+          <p className="mt-0.5 truncate text-[13px] font-semibold">{user.name || "Member"}</p>
+          <p className="truncate text-xs text-neutral-500">{user.email}</p>
+        </div>
+      </div>
+
+      {/* Line items + totals */}
+      <div className="border-b border-dashed border-neutral-300 px-5 py-4">
+        <p className="text-[10px] font-semibold uppercase tracking-wide text-neutral-400">Item</p>
+        <p className="mt-1 text-[13px] font-medium leading-snug">{invoice.description}</p>
+        {invoice.periodStart && invoice.periodEnd && (
+          <p className="mt-0.5 font-mono text-[11px] tabular-nums text-neutral-500">
+            Service period: {fmtDate(invoice.periodStart)} – {fmtDate(invoice.periodEnd)}
+          </p>
+        )}
+        <div className="mt-3 space-y-1.5">
+          <ReceiptRow label="Subtotal" value={fmtMoney(subtotal, { cents: true })} />
+          {discount > 0 && (
+            <ReceiptRow
+              label={`Discount${invoice.promoCode ? ` · ${invoice.promoCode}` : ""}`}
+              value={`−${fmtMoney(discount, { cents: true })}`}
+              tone="text-emerald-600"
+            />
+          )}
+          <div className="my-1.5 border-t border-dashed border-neutral-200" aria-hidden />
+          <ReceiptRow
+            label={paid ? "Total paid" : "Total"}
+            value={fmtMoney(invoice.amountCents, { cents: true })}
+            strong
+          />
+          <ReceiptRow
+            label="Payment method"
+            value={invoice.gateway ? (RECEIPT_GATEWAYS[invoice.gateway] ?? invoice.gateway) : "—"}
+          />
+        </div>
+      </div>
+
+      {/* Stamp + footer */}
+      <div className="px-5 pb-5 pt-4 text-center">
+        <span
+          className={cn(
+            "inline-block -rotate-6 rounded-md border-[3px] px-3.5 py-1 text-sm font-black tracking-[0.3em]",
+            stampCls
+          )}
+        >
+          {invoice.status}
+        </span>
+        <p className="mt-4 text-[11px] text-neutral-600">Thank you for your purchase — vendly.example</p>
+        <p className="mt-1 font-mono text-[10px] text-neutral-400">
+          Receipt generated {fmtDateTime(generatedAt)}
+        </p>
+        <div
+          aria-hidden
+          className="mx-auto mt-4 h-9 w-44 [background:repeating-linear-gradient(90deg,#171717_0_2px,transparent_2px_5px,#171717_5px_6px,transparent_6px_9px,#171717_9px_12px,transparent_12px_16px)]"
+        />
+      </div>
+    </div>
+  );
+}
+
+function ReceiptDialog({
+  invoice,
+  user,
+  open,
+  onOpenChange,
+}: {
+  invoice: InvoiceDTO | null;
+  user: SessionUser;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const generatedAt = useMemo(() => new Date().toISOString(), [invoice?.id]);
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="gap-0 overflow-hidden p-0 sm:max-w-sm">
+        <DialogTitle className="sr-only">
+          Receipt {invoice ? `for ${invoice.number}` : ""}
+        </DialogTitle>
+        <DialogDescription className="sr-only">
+          Printable payment receipt{invoice ? ` for invoice ${invoice.number}` : ""}.
+        </DialogDescription>
+        {invoice && <ReceiptPaper invoice={invoice} user={user} generatedAt={generatedAt} />}
+        <DialogFooter className="flex-row justify-end gap-2 border-t border-neutral-200 bg-white px-5 py-4">
+          <Button variant="outline" className="rounded-xl" onClick={() => onOpenChange(false)}>
+            Close
+          </Button>
+          <Button className="rounded-xl" onClick={() => window.print()} disabled={!invoice}>
+            <Printer className="h-4 w-4" aria-hidden /> Print receipt
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+
+      {/* Print-only copy, portalled as a direct body child: the @media print
+          rule in globals.css display:none's every other body child, so this
+          static-flow node (no fixed/transform chrome to fight) prints flat at
+          the top of page 1. Hidden on screen. */}
+      {invoice &&
+        createPortal(
+          <div id="receipt-print" className="hidden print:block">
+            <div className="mx-auto w-full max-w-md">
+              <ReceiptPaper invoice={invoice} user={user} generatedAt={generatedAt} />
+            </div>
+          </div>,
+          document.body
+        )}
+    </Dialog>
+  );
+}
+
 function InvoicesTab({
   invoices,
   subs,
@@ -2452,6 +3052,7 @@ function InvoicesTab({
   const clockNow = useAppStore((s) => s.clock.now);
   const [statusFilter, setStatusFilter] = useState("ALL");
   const [selected, setSelected] = useState<InvoiceDTO | null>(null);
+  const [receipt, setReceipt] = useState<InvoiceDTO | null>(null);
 
   const paid = invoices.filter((i) => i.status === "PAID");
   const lifetimePaid = paid.reduce((sum, i) => sum + i.amountCents, 0);
@@ -2546,7 +3147,7 @@ function InvoicesTab({
                     <TableHead className="hidden sm:table-cell">Method</TableHead>
                     <TableHead className="text-right">Amount</TableHead>
                     <TableHead>Status</TableHead>
-                    <TableHead className="w-10 pr-5" aria-label="Open invoice" />
+                    <TableHead className="w-28 pr-5" aria-label="Invoice actions" />
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -2578,7 +3179,21 @@ function InvoicesTab({
                         <StatusBadge status={inv.status} />
                       </TableCell>
                       <TableCell className="pr-5">
-                        <ChevronRight className="h-4 w-4 text-muted-foreground" aria-hidden />
+                        <div className="flex items-center justify-end gap-1">
+                          <Button
+                            variant="ghost"
+                            className="h-11 w-11 shrink-0 rounded-lg px-0 text-muted-foreground"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setReceipt(inv);
+                            }}
+                            aria-label={`View printable receipt for ${inv.number}`}
+                            title="View receipt"
+                          >
+                            <ReceiptText className="h-4 w-4" aria-hidden />
+                          </Button>
+                          <ChevronRight className="h-4 w-4 text-muted-foreground" aria-hidden />
+                        </div>
                       </TableCell>
                     </TableRow>
                   ))}
@@ -2651,6 +3266,14 @@ function InvoicesTab({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* ---- Printable receipt dialog ---- */}
+      <ReceiptDialog
+        invoice={receipt}
+        user={user}
+        open={!!receipt}
+        onOpenChange={(o) => !o && setReceipt(null)}
+      />
 
     </motion.section>
   );

@@ -350,6 +350,51 @@ export const WEBHOOK_EVENTS = [
   "access.revoked",
 ] as const;
 
+// ============ Giveaways & drops ============
+export interface GiveawayDTO {
+  id: string;
+  title: string;
+  description: string;
+  prize: string;
+  prizeValueCents: number;
+  coverTheme: string;
+  status: "LIVE" | "ENDED";
+  endsAt: string;
+  winnerCount: number;
+  memberBonus: number;
+  drawnAt: string | null;
+  createdAt: string;
+  entryCount: number;
+  product: { id: string; title: string; coverTheme: string; category: string; creator: { id: string; name: string | null; avatarColor: string } } | null;
+  myEntry: number | null; // my entry count (null = not entered)
+  myWin: boolean; // did I win (ended giveaways)
+}
+
+export interface GiveawayEntryRowDTO {
+  id: string;
+  entries: number;
+  won: boolean;
+  createdAt: string;
+  entrant: { id: string; name: string | null; email: string; avatarColor: string };
+}
+
+export interface GiveawayCreatorDTO extends GiveawayDTO {
+  winners: GiveawayEntryRowDTO[];
+  recentEntries: GiveawayEntryRowDTO[];
+}
+
+export interface MyGiveawayEntryDTO {
+  id: string;
+  entries: number;
+  won: boolean;
+  createdAt: string;
+  giveaway: GiveawayDTO;
+}
+
+export const COVER_THEMES = [
+  "emerald", "teal", "amber", "rose", "violet", "cyan", "lime", "orange",
+] as const;
+
 export const STATUS_META: Record<string, { label: string; tone: string }> = {
   ACTIVE: { label: "Active", tone: "success" },
   TRIALING: { label: "Trialing", tone: "info" },
@@ -364,4 +409,6 @@ export const STATUS_META: Record<string, { label: string; tone: string }> = {
   REVOKED: { label: "Revoked", tone: "destructive" },
   SYNCED: { label: "Synced", tone: "success" },
   EXPIRED: { label: "Expired", tone: "muted" },
+  LIVE: { label: "Live", tone: "success" },
+  ENDED: { label: "Ended", tone: "muted" },
 };
