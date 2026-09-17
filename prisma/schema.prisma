@@ -29,6 +29,10 @@ model User {
   accessGrants     AccessGrant[]
   downloadTokens   DownloadToken[]
   webhookEndpoints WebhookEndpoint[]
+  promoCodes       PromoCode[]
+  wishlistItems    WishlistItem[]
+  notifications    Notification[]
+  payouts          Payout[]
 }
 
 // ============ Catalog ============
@@ -59,6 +63,8 @@ model Product {
   assets        DigitalAsset[]
   accessGrants  AccessGrant[]
   reviews       Review[]
+  promoCodes    PromoCode[]
+  wishlistItems WishlistItem[]
 }
 
 model Plan {
@@ -99,6 +105,8 @@ model Subscription {
   canceledAt        DateTime?
   trialEndsAt       DateTime?
   dunningAttempts   Int       @default(0)
+  promoCodeId       String?
+  promoCyclesUsed   Int       @default(0) // how many invoices the promo discount has been applied to
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @updatedAt
 
@@ -138,6 +146,8 @@ model Invoice {
   currency       String    @default("usd")
   status         String    @default("PAID") // PAID | FAILED | REFUNDED | OPEN
   gateway        String?
+  discountCents  Int       @default(0) // promo discount applied to this invoice
+  promoCode      String?   // the code applied, for display
   periodStart    DateTime?
   periodEnd      DateTime?
   paidAt         DateTime?
@@ -256,4 +266,72 @@ model SystemClock {
   simulatedNow DateTime?
   label       String    @default("Live")
   updatedAt   DateTime  @updatedAt
+}
+
+// ============ Promotions ============
+model PromoCode {
+  id             String   @id @default(cuid())
+  creatorId      String
+  creator        User     @relation(fields: [creatorId], references: [id])
+  productId      String?  // null = applies to every product the creator owns
+  product        Product? @relation(fields: [productId], references: [id])
+  code           String   @unique
+  kind           String   @default("PERCENT") // PERCENT | FIXED
+  value          Int      // percent (1-100) when PERCENT, cents when FIXED
+  maxRedemptions Int      @default(0) // 0 = unlimited
+  timesRedeemed  Int      @default(0)
+  durationMonths Int      @default(1) // billing cycles the discount applies to
+  expiresAt      DateTime?
+  active         Boolean  @default(true)
+  createdAt      DateTime @default(now())
+
+  redemptions PromoRedemption[]
+}
+
+model PromoRedemption {
+  id             String     @id @default(cuid())
+  promoId        String
+  promo          PromoCode  @relation(fields: [promoId], references: [id])
+  userId         String
+  subscriptionId String
+  invoiceId      String?
+  discountCents  Int
+  createdAt      DateTime  @default(now())
+}
+
+// ============ Engagement ============
+model WishlistItem {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  productId String
+  product   Product  @relation(fields: [productId], references: [id])
+  createdAt DateTime @default(now())
+
+  @@unique([userId, productId])
+}
+
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  type      String   // invoice_paid | payment_failed | past_due | subscription_created | subscription_canceled | subscription_renewed | trial_converted | license_created | review_new | promo_redeemed | payout_paid | payout_pending
+  title     String
+  body      String?
+  icon      String   @default("bell") // receipt | alert | user-plus | x-circle | refresh | key | star | tag | bank
+  read      Boolean  @default(false)
+  createdAt DateTime @default(now())
+}
+
+// ============ Creator payouts ============
+model Payout {
+  id          String    @id @default(cuid())
+  creatorId   String
+  creator     User      @relation(fields: [creatorId], references: [id])
+  amountCents Int       // net amount paid out to the creator
+  feeCents    Int       @default(0) // platform fee withheld for this payout period
+  status      String    @default("PENDING") // PENDING | PAID
+  method      String    @default("BANK") // BANK | PAYPAL | CRYPTO
+  createdAt   DateTime  @default(now())
+  paidAt      DateTime?
 }

@@ -2,10 +2,11 @@ import { db } from "@/lib/db";
 import { errorResponse, HttpError, requireUser } from "@/lib/session";
 import { chargeStripeCard, chargePaypal, quoteCrypto, detectCardBrand, type Gateway } from "@/lib/gateways";
 import { provisionSubscription } from "@/lib/billing";
+import { validatePromoForPlan } from "@/lib/promos";
 
 // POST /api/checkout — multi-gateway subscription checkout
 // body: { planId, gateway: STRIPE|PAYPAL|CRYPTO, card?: {number,expMonth,expYear,cvc},
-//         paypalEmail?, walletAddress?, saveMethod?, startTrial? }
+//         paypalEmail?, walletAddress?, saveMethod?, startTrial?, promoCode? }
 export async function POST(req: Request) {
   try {
     const user = await requireUser(req);
@@ -26,13 +27,26 @@ export async function POST(req: Request) {
 
     const startTrial = !!body.startTrial && plan.trialDays > 0;
 
+    // Promo code — validated server-side against the plan being purchased
+    let promoCodeId: string | null = null;
+    let discountCents = 0;
+    let promoCodeLabel: string | null = null;
+    if (body.promoCode) {
+      const check = await validatePromoForPlan(String(body.promoCode), plan.id);
+      if (!check.valid) throw new HttpError(400, check.reason || "Invalid promo code.");
+      promoCodeId = check.promo!.id;
+      promoCodeLabel = check.promo!.code;
+      discountCents = check.discountCents!;
+    }
+    const chargeCents = startTrial ? 0 : Math.max(0, plan.priceCents - discountCents);
+
     // ---------- STRIPE ----------
     if (gateway === "STRIPE") {
       const card = body.card || {};
       const number = String(card.number || "").replace(/\s/g, "");
       const charge = await chargeStripeCard(
         { number, expMonth: Number(card.expMonth), expYear: Number(card.expYear), cvc: String(card.cvc || "") },
-        startTrial ? 0 : plan.priceCents
+        startTrial ? 0 : chargeCents
       );
       if (!charge.ok) throw new HttpError(402, charge.error || "Payment failed.");
 
@@ -58,14 +72,15 @@ export async function POST(req: Request) {
         paymentMethodId: pmId,
         chargedNow: !startTrial,
         txnId: charge.txnId,
+        promoCodeId,
       });
-      return Response.json({ status: "COMPLETED", ...result }, { status: 201 });
+      return Response.json({ status: "COMPLETED", ...result, discountCents, promoCode: promoCodeLabel }, { status: 201 });
     }
 
     // ---------- PAYPAL ----------
     if (gateway === "PAYPAL") {
       const email = String(body.paypalEmail || "").trim().toLowerCase();
-      const charge = await chargePaypal(email, startTrial ? 0 : plan.priceCents);
+      const charge = await chargePaypal(email, startTrial ? 0 : chargeCents);
       if (!charge.ok) throw new HttpError(402, charge.error || "PayPal payment failed.");
 
       let pmId: string | null = null;
@@ -82,8 +97,9 @@ export async function POST(req: Request) {
         paymentMethodId: pmId,
         chargedNow: !startTrial,
         txnId: charge.txnId,
+        promoCodeId,
       });
-      return Response.json({ status: "COMPLETED", ...result }, { status: 201 });
+      return Response.json({ status: "COMPLETED", ...result, discountCents, promoCode: promoCodeLabel }, { status: 201 });
     }
 
     // ---------- CRYPTO ----------
@@ -108,15 +124,18 @@ export async function POST(req: Request) {
         currentPeriodStart: now,
         currentPeriodEnd: new Date(now.getTime() + 30 * 86400000),
         trialEndsAt,
+        promoCodeId,
         dunningAttempts: -1, // marker: awaiting 1st crypto payment
       },
     });
-    const quote = quoteCrypto(startTrial ? 0 : plan.priceCents);
+    const quote = quoteCrypto(startTrial ? 0 : chargeCents);
     return Response.json(
       {
         status: "PENDING_CRYPTO",
         subscriptionId: sub.id,
         quote,
+        discountCents,
+        promoCode: promoCodeLabel,
         plan: { id: plan.id, name: plan.name, priceCents: plan.priceCents, interval: plan.interval },
       },
       { status: 202 }

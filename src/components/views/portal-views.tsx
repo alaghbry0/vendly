@@ -3,7 +3,7 @@
 // CUSTOMER SELF-SERVICE BILLING PORTAL — "My Hub".
 // Owned by Task 2-b. Rendered when store.view === "portal".
 // Internal tab system (synced from params.portalTab): overview | subscriptions |
-// licenses | downloads | invoices | payment-methods | settings.
+// licenses | downloads | wishlist | invoices | payment-methods | settings.
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ComponentProps, type FormEvent } from "react";
 import { AnimatePresence, motion, type Variants } from "framer-motion";
@@ -15,12 +15,16 @@ import type {
   LicenseDTO,
   PaymentMethodDTO,
   PlanDTO,
+  ProductCardDTO,
   ProductDetailDTO,
   SessionUser,
   SubscriptionDTO,
+  WishlistItemDTO,
 } from "@/lib/types";
-import { fmtBytes, fmtDate, fmtDateTime, fmtMoney, timeAgo, timeUntil } from "@/lib/format";
+import { CATEGORIES } from "@/lib/types";
+import { fmtBytes, fmtCompact, fmtDate, fmtDateTime, fmtMoney, timeAgo, timeUntil } from "@/lib/format";
 import {
+  CategoryIcon,
   CopyButton,
   EmptyState,
   GatewayBadge,
@@ -99,6 +103,8 @@ import {
   FileImage,
   FileText,
   FileVideo,
+  Heart,
+  HeartOff,
   Info,
   KeyRound,
   LayoutDashboard,
@@ -112,10 +118,12 @@ import {
   Settings,
   ShieldAlert,
   ShieldCheck,
+  Star,
   Store,
   Timer,
   Trash2,
   TriangleAlert,
+  Users,
   Wallet,
   type LucideIcon,
 } from "lucide-react";
@@ -129,6 +137,7 @@ type PortalTab =
   | "subscriptions"
   | "licenses"
   | "downloads"
+  | "wishlist"
   | "invoices"
   | "payment-methods"
   | "settings";
@@ -138,6 +147,7 @@ const PORTAL_TABS: { key: PortalTab; label: string; icon: LucideIcon }[] = [
   { key: "subscriptions", label: "Memberships", icon: Repeat },
   { key: "licenses", label: "Licenses", icon: KeyRound },
   { key: "downloads", label: "Downloads", icon: Download },
+  { key: "wishlist", label: "Wishlist", icon: Heart },
   { key: "invoices", label: "Invoices", icon: ReceiptText },
   { key: "payment-methods", label: "Payment methods", icon: Wallet },
   { key: "settings", label: "Settings", icon: Settings },
@@ -152,6 +162,7 @@ interface PortalData {
   methods: PaymentMethodDTO[];
   licenses: LicenseDTO[];
   grants: GrantDTO[];
+  wishlist: WishlistItemDTO[];
 }
 
 const stagger: Variants = { hidden: {}, show: { transition: { staggerChildren: 0.06 } } };
@@ -229,12 +240,13 @@ function usePortalData() {
     let alive = true;
     const load = async () => {
       try {
-        const [subsRes, invoicesRes, methodsRes, licensesRes, grantsRes] = await Promise.all([
+        const [subsRes, invoicesRes, methodsRes, licensesRes, grantsRes, wishlistRes] = await Promise.all([
           api<{ subscriptions: SubscriptionDTO[] }>("/api/subscriptions"),
           api<{ invoices: InvoiceDTO[] }>("/api/invoices"),
           api<{ paymentMethods: PaymentMethodDTO[] }>("/api/payment-methods"),
           api<{ licenses: LicenseDTO[] }>("/api/licenses"),
           api<{ grants: GrantDTO[] }>("/api/grants"),
+          api<{ items: WishlistItemDTO[] }>("/api/wishlist"),
         ]);
         if (!alive) return;
         setData({
@@ -243,6 +255,7 @@ function usePortalData() {
           methods: methodsRes.paymentMethods,
           licenses: licensesRes.licenses,
           grants: grantsRes.grants,
+          wishlist: wishlistRes.items,
         });
         setError(null);
       } catch (e) {
@@ -255,7 +268,20 @@ function usePortalData() {
     };
   }, [nonce, userId]);
 
-  return { data, error, loading: !data && !error };
+  // Un-save a wishlist product (POST /api/wishlist toggles). The local copy is
+  // patched in place instead of refetching everything, so AnimatePresence exit
+  // animations stay snappy and the tab survives round-trips.
+  const removeWishlistItem = useCallback(async (productId: string) => {
+    const res = await api<{ saved: boolean }>("/api/wishlist", { method: "POST", json: { productId } });
+    if (res.saved) {
+      // Toggle raced a double-fire and the item got re-saved — resync from the server.
+      useAppStore.getState().refresh();
+      return;
+    }
+    setData((prev) => (prev ? { ...prev, wishlist: prev.wishlist.filter((w) => w.product.id !== productId) } : prev));
+  }, []);
+
+  return { data, error, loading: !data && !error, removeWishlistItem };
 }
 
 // ============================================================================
@@ -267,7 +293,7 @@ export function PortalViews() {
   const refresh = useAppStore((s) => s.refresh);
   const navigate = useAppStore((s) => s.navigate);
   const rawTab = useAppStore((s) => s.params.portalTab);
-  const { data, error } = usePortalData();
+  const { data, error, removeWishlistItem } = usePortalData();
 
   // The active tab is fully store-driven: internal tab clicks write the param
   // via navigate(), and deep links from other views are picked up for free.
@@ -417,6 +443,9 @@ export function PortalViews() {
               )}
               {tab === "licenses" && <LicensesTab licenses={data.licenses} reload={refresh} />}
               {tab === "downloads" && <DownloadsTab subs={data.subs} />}
+              {tab === "wishlist" && (
+                <WishlistTab items={data.wishlist} subs={data.subs} onRemove={removeWishlistItem} />
+              )}
               {tab === "invoices" && (
                 <InvoicesTab
                   invoices={data.invoices}
@@ -1742,6 +1771,282 @@ function DownloadsTab({ subs }: { subs: SubscriptionDTO[] }) {
           </motion.div>
         ))
       )}
+    </motion.section>
+  );
+}
+
+// ============================================================================
+// Tab: Wishlist
+// ============================================================================
+
+/** Cheapest monthly plan ("from $X/mo"), falling back to the cheapest yearly
+ *  plan ("/yr") — the same rule the marketplace product cards use. */
+function wishlistFromPrice(product: ProductCardDTO): { cents: number; suffix: string } | null {
+  const active = product.plans.filter((p) => p.active);
+  const monthly = active.filter((p) => p.interval === "month");
+  if (monthly.length > 0) return { cents: Math.min(...monthly.map((p) => p.priceCents)), suffix: "/mo" };
+  const yearly = active.filter((p) => p.interval === "year");
+  if (yearly.length > 0) return { cents: Math.min(...yearly.map((p) => p.priceCents)), suffix: "/yr" };
+  return null;
+}
+
+function WishlistStars({ value, count }: { value: number; count: number }) {
+  return (
+    <span className="inline-flex items-center gap-1.5" role="img" aria-label={`Rated ${value.toFixed(1)} out of 5`}>
+      <span className="flex items-center gap-0.5" aria-hidden>
+        {[1, 2, 3, 4, 5].map((i) => (
+          <Star
+            key={i}
+            className={cn(
+              "h-3.5 w-3.5",
+              i <= Math.round(value)
+                ? "fill-amber-400 text-amber-400"
+                : "fill-muted-foreground/15 text-muted-foreground/30"
+            )}
+          />
+        ))}
+      </span>
+      <span className="text-xs text-muted-foreground">({fmtCompact(count)})</span>
+    </span>
+  );
+}
+
+function WishlistCard({
+  item,
+  index,
+  isMember,
+  removing,
+  onRemove,
+}: {
+  item: WishlistItemDTO;
+  index: number;
+  isMember: boolean;
+  removing: boolean;
+  onRemove: () => void;
+}) {
+  const navigate = useAppStore((s) => s.navigate);
+  const product = item.product;
+  const price = wishlistFromPrice(product);
+  const categoryLabel = CATEGORIES.find((c) => c.key === product.category)?.label ?? product.category;
+  const viewProduct = () => navigate("product", { productId: product.id });
+
+  return (
+    <motion.article
+      layout
+      initial={{ opacity: 0, y: 14 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, scale: 0.95, transition: { duration: 0.18, ease: "easeIn" } }}
+      transition={{
+        opacity: { duration: 0.25, delay: Math.min(index * 0.06, 0.36) },
+        y: { duration: 0.3, ease: "easeOut", delay: Math.min(index * 0.06, 0.36) },
+        layout: { type: "spring", stiffness: 350, damping: 32 },
+      }}
+      className="h-full"
+    >
+      {/* Clickable card: everything except the remove button opens the product. */}
+      <div
+        onClick={viewProduct}
+        className="group flex h-full cursor-pointer flex-col overflow-hidden rounded-2xl border bg-card text-left shadow-sm transition-all duration-200 hover:-translate-y-1 hover:shadow-lg focus-within:ring-2 focus-within:ring-emerald-500/40"
+      >
+        {/* Cover */}
+        <div className="relative overflow-hidden">
+          <ProductCover
+            theme={product.coverTheme}
+            category={product.category}
+            title={product.title}
+            className="aspect-video w-full transition-transform duration-300 group-hover:scale-105"
+            iconClassName="h-24 w-24"
+          />
+          <span className="absolute left-3 top-3 inline-flex items-center gap-1.5 rounded-full bg-black/35 px-2.5 py-1 text-[11px] font-semibold text-white backdrop-blur-sm">
+            <CategoryIcon category={product.category} className="h-3 w-3" aria-hidden />
+            {categoryLabel}
+          </span>
+          {isMember && (
+            <span className="absolute right-3 top-3 inline-flex items-center gap-1 rounded-full bg-emerald-600/95 px-2.5 py-1 text-[11px] font-semibold text-white shadow-sm backdrop-blur-sm">
+              <BadgeCheck className="h-3 w-3" aria-hidden /> You're a member
+            </span>
+          )}
+        </div>
+
+        {/* Body */}
+        <div className="flex flex-1 flex-col gap-2.5 p-4">
+          <div className="flex items-center gap-2">
+            <UserAvatar name={product.creator.name} color={product.creator.avatarColor} size="sm" />
+            <span className="truncate text-xs font-medium text-muted-foreground">
+              {product.creator.name ?? "Creator"}
+            </span>
+          </div>
+          <div>
+            <h3 className="text-[15px] font-semibold tracking-tight">{product.title}</h3>
+            {product.tagline && <p className="mt-0.5 line-clamp-2 text-sm text-muted-foreground">{product.tagline}</p>}
+          </div>
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 text-xs text-muted-foreground">
+            <WishlistStars value={product.rating} count={product.reviewCount} />
+            <span className="inline-flex items-center gap-1">
+              <Users className="h-3.5 w-3.5" aria-hidden />
+              {fmtCompact(product.membersCount)} members
+            </span>
+          </div>
+          {product.accessType.length > 0 && (
+            <div className="flex flex-wrap gap-1.5">
+              {product.accessType.map((a) => (
+                <ProviderBadge key={a} provider={a} />
+              ))}
+            </div>
+          )}
+
+          {/* Price, saved caption + actions */}
+          <div className="mt-auto space-y-3 border-t pt-3">
+            <div className="flex flex-wrap items-baseline justify-between gap-x-2 gap-y-1">
+              {price ? (
+                <p className="text-sm">
+                  <span className="text-xs text-muted-foreground">from </span>
+                  <span className="text-base font-bold tabular-nums">{fmtMoney(price.cents)}</span>
+                  <span className="text-xs text-muted-foreground">{price.suffix}</span>
+                </p>
+              ) : (
+                <p className="text-sm text-muted-foreground">Free</p>
+              )}
+              <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground">
+                <Heart className="h-3 w-3 fill-emerald-500/60 text-emerald-500/60" aria-hidden />
+                Saved {timeAgo(item.createdAt)}
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <Button
+                className="h-11 flex-1 rounded-xl"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  viewProduct();
+                }}
+              >
+                View product
+              </Button>
+              <Button
+                variant="ghost"
+                className="h-11 w-11 shrink-0 rounded-xl px-0 text-muted-foreground hover:bg-red-500/10 hover:text-red-600 dark:hover:text-red-400"
+                disabled={removing}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onRemove();
+                }}
+                aria-label={`Remove ${product.title} from wishlist`}
+                title="Remove from wishlist"
+              >
+                {removing ? (
+                  <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+                ) : (
+                  <HeartOff className="h-4 w-4" aria-hidden />
+                )}
+              </Button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </motion.article>
+  );
+}
+
+function WishlistTab({
+  items,
+  subs,
+  onRemove,
+}: {
+  items: WishlistItemDTO[];
+  subs: SubscriptionDTO[];
+  onRemove: (productId: string) => Promise<void>;
+}) {
+  const { toast } = useToast();
+  const navigate = useAppStore((s) => s.navigate);
+  const [removingId, setRemovingId] = useState<string | null>(null);
+
+  // Products the member currently holds a membership for (incl. trials & past-due).
+  const ownedProductIds = useMemo(
+    () => new Set(subs.filter((s) => ACTIVE_STATUSES.includes(s.status)).map((s) => s.product.id)),
+    [subs]
+  );
+
+  async function remove(item: WishlistItemDTO) {
+    setRemovingId(item.product.id);
+    try {
+      await onRemove(item.product.id);
+      toast({
+        title: "Removed from wishlist",
+        description: `${item.product.title} was unsaved.`,
+      });
+    } catch (e) {
+      toast({
+        title: "Couldn't update wishlist",
+        description: e instanceof Error ? e.message : "Please try again.",
+        variant: "destructive",
+      });
+    } finally {
+      setRemovingId(null);
+    }
+  }
+
+  return (
+    <motion.section variants={stagger} initial="hidden" animate="show" className="space-y-5">
+      <motion.div variants={fadeUp}>
+        <SectionHeader
+          title="Wishlist"
+          description="Products you saved for later."
+          action={
+            <Badge variant="secondary" className="rounded-full px-3 tabular-nums">
+              {items.length} {items.length === 1 ? "item" : "items"}
+            </Badge>
+          }
+        />
+      </motion.div>
+
+      {/* Grid ↔ empty swap: when the last card is removed the grid fades out
+          first (mode="wait"), then the empty state eases in. */}
+      <AnimatePresence mode="wait">
+        {items.length === 0 ? (
+          <motion.div
+            key="wishlist-empty"
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -6 }}
+            transition={{ duration: 0.25, ease: "easeOut" }}
+          >
+            <EmptyState
+              icon={Heart}
+              title="Your wishlist is empty"
+              description="Browse the marketplace and tap the heart on any product to save it for later."
+              action={
+                <Button className="rounded-xl" onClick={() => navigate("discover")}>
+                  <Store className="h-4 w-4" /> Browse marketplace
+                </Button>
+              }
+            />
+          </motion.div>
+        ) : (
+          <motion.div
+            key="wishlist-grid"
+            layout
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0, transition: { duration: 0.2 } }}
+            className="relative grid gap-4 sm:grid-cols-2 xl:grid-cols-3"
+          >
+            {/* popLayout: the exiting card lifts out of the grid so the
+                remaining cards reflow immediately with layout springs. */}
+            <AnimatePresence mode="popLayout">
+              {items.map((item, index) => (
+                <WishlistCard
+                  key={item.id}
+                  item={item}
+                  index={index}
+                  isMember={ownedProductIds.has(item.product.id)}
+                  removing={removingId === item.product.id}
+                  onRemove={() => remove(item)}
+                />
+              ))}
+            </AnimatePresence>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </motion.section>
   );
 }

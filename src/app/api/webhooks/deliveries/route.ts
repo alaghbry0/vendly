@@ -1,4 +1,5 @@
 import { db } from "@/lib/db";
+import { getNow } from "@/lib/clock";
 import { errorResponse, requireUser } from "@/lib/session";
 import type { WebhookDeliveryDTO } from "@/lib/types";
 
@@ -46,7 +47,7 @@ export async function GET(req: Request) {
       };
     });
 
-    return Response.json({ deliveries: data });
+    return Response.json({ deliveries: data, now: (await getNow()).toISOString() });
   } catch (e) {
     return errorResponse(e);
   }

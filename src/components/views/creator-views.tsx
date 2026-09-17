@@ -3,7 +3,8 @@
 // CREATOR ANALYTICS DASHBOARD — "Creator Studio".
 // Owned by Task 2-c. Rendered when store.view === "creator".
 // Internal tab system (synced from params.creatorTab): overview | products |
-// subscribers | orders | webhooks | time (billing time machine).
+// subscribers | orders | promos | webhooks | payouts | time (billing time
+// machine). Promos + payouts tabs added by Task 5-c.
 
 import { useEffect, useMemo, useRef, useState, type ComponentProps, type FormEvent } from "react";
 import { AnimatePresence, motion, type Variants } from "framer-motion";
@@ -29,9 +30,12 @@ import { api } from "@/lib/api";
 import type {
   AnalyticsDTO,
   BillingRunResult,
+  PayoutBalanceDTO,
+  PayoutDTO,
   PlanDTO,
   ProductCardDTO,
   ProductDetailDTO,
+  PromoCodeDTO,
   SessionUser,
   WebhookDeliveryDTO,
   WebhookEndpointDTO,
@@ -79,6 +83,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import {
   Select,
   SelectContent,
@@ -95,20 +100,26 @@ import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
 import {
   Activity,
+  ArrowDownToLine,
   ArrowRight,
   Ban,
+  Banknote,
+  BadgePercent,
   Bitcoin,
+  CalendarClock,
   CalendarRange,
   Check,
   ChevronDown,
   ChevronRight,
   CreditCard,
+  Dices,
   DollarSign,
   Eye,
   EyeOff,
   FastForward,
   FlaskConical,
   KeyRound,
+  Landmark,
   LayoutDashboard,
   Loader2,
   MoreHorizontal,
@@ -121,6 +132,7 @@ import {
   Receipt,
   ReceiptText,
   RefreshCw,
+  Repeat,
   RotateCcw,
   Search,
   Send,
@@ -128,6 +140,7 @@ import {
   Sparkles,
   Star,
   Store,
+  Tag,
   Terminal,
   Timer,
   Trash2,
@@ -147,14 +160,24 @@ import {
 // Tabs, constants & helpers
 // ============================================================================
 
-type CreatorTab = "overview" | "products" | "subscribers" | "orders" | "webhooks" | "time";
+type CreatorTab =
+  | "overview"
+  | "products"
+  | "subscribers"
+  | "orders"
+  | "promos"
+  | "webhooks"
+  | "payouts"
+  | "time";
 
 const CREATOR_TABS: { key: CreatorTab; label: string; icon: LucideIcon }[] = [
   { key: "overview", label: "Overview", icon: LayoutDashboard },
   { key: "products", label: "Products", icon: Package },
   { key: "subscribers", label: "Subscribers", icon: Users },
   { key: "orders", label: "Orders", icon: ReceiptText },
+  { key: "promos", label: "Promos", icon: Tag },
   { key: "webhooks", label: "Webhooks", icon: Webhook },
+  { key: "payouts", label: "Payouts", icon: Banknote },
   { key: "time", label: "Time machine", icon: Timer },
 ];
 
@@ -460,7 +483,9 @@ export function CreatorViews() {
       animate={{ opacity: 1 }}
       transition={{ duration: 0.3 }}
     >
-      <div className="grid gap-8 lg:grid-cols-[15rem_1fr]">
+      {/* grid-cols-1 = minmax(0,1fr) so the 8-pill mobile tab row scrolls inside
+          its overflow-x-auto wrapper instead of blowing out the page width. */}
+      <div className="grid grid-cols-1 gap-8 lg:grid-cols-[15rem_1fr]">
         {/* ---------- Sidebar (desktop) ---------- */}
         <aside className="hidden lg:block">
           <nav className="sticky top-20 w-60" aria-label="Creator Studio sections">
@@ -566,7 +591,9 @@ export function CreatorViews() {
               {tab === "products" && <ProductsTab user={user} />}
               {tab === "subscribers" && <SubscribersTab />}
               {tab === "orders" && <OrdersTab />}
+              {tab === "promos" && <PromosTab user={user} />}
               {tab === "webhooks" && <WebhooksTab />}
+              {tab === "payouts" && <PayoutsTab />}
               {tab === "time" && <TimeTab />}
             </motion.div>
           </AnimatePresence>
@@ -2234,6 +2261,564 @@ function OrdersTab() {
 }
 
 // ============================================================================
+// TAB: PROMOS (discount codes)
+// ============================================================================
+
+interface PromoRow extends PromoCodeDTO {
+  discountGivenCents: number;
+}
+
+/** Client-side code generator matching the server's alphabet (no ambiguous chars). */
+function generatePromoCode(): string {
+  const alphabet = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+  let out = "";
+  for (let i = 0; i < 8; i++) out += alphabet[Math.floor(Math.random() * alphabet.length)];
+  return out;
+}
+
+function promoValueLabel(p: PromoRow): string {
+  return p.kind === "PERCENT" ? `${p.value}% OFF` : `${fmtMoney(p.value)} OFF`;
+}
+
+function promoDurationLabel(months: number): string {
+  return months <= 1 ? "First invoice only" : `Applies to ${months} invoices`;
+}
+
+function promoStatus(p: PromoRow, nowMs: number): { expired: boolean; exhausted: boolean; muted: boolean } {
+  const expired = !!p.expiresAt && new Date(p.expiresAt).getTime() <= nowMs;
+  const exhausted = p.maxRedemptions > 0 && p.timesRedeemed >= p.maxRedemptions;
+  return { expired, exhausted, muted: expired || exhausted || !p.active };
+}
+
+function PromosTab({ user }: { user: SessionUser }) {
+  const { toast } = useToast();
+  const refresh = useAppStore((s) => s.refresh);
+  const now = useSimNow();
+
+  // Products feed the "applies to" select in the create dialog — same catalog
+  // call (creator filter) the products tab already uses.
+  const { data, error, loading, setData } = useCreatorFetch(async () => {
+    const [promosRes, productsRes] = await Promise.all([
+      api<{ promos: PromoRow[] }>("/api/promos"),
+      api<{ products: ProductCardDTO[] }>(`/api/products?creatorId=${user.id}`),
+    ]);
+    return { promos: promosRes.promos, products: productsRes.products };
+  });
+
+  const [createOpen, setCreateOpen] = useState(false);
+
+  const nowMs = useMemo(() => new Date(now).getTime(), [now]);
+
+  async function togglePromo(promo: PromoRow, next: boolean) {
+    // Optimistic flip; revert on failure.
+    setData((prev) =>
+      prev
+        ? { ...prev, promos: prev.promos.map((p) => (p.id === promo.id ? { ...p, active: next } : p)) }
+        : prev
+    );
+    try {
+      await api(`/api/promos/${promo.id}`, { method: "PATCH", json: { active: next } });
+      toast({
+        title: next ? "Promo code activated" : "Promo code paused",
+        description: next
+          ? `${promo.code} is accepted at checkout again.`
+          : `${promo.code} will be rejected at checkout until reactivated.`,
+      });
+    } catch (e) {
+      setData((prev) =>
+        prev
+          ? { ...prev, promos: prev.promos.map((p) => (p.id === promo.id ? { ...p, active: !next } : p)) }
+          : prev
+      );
+      toast({ title: "Couldn't update the code", description: (e as Error).message, variant: "destructive" });
+    }
+  }
+
+  async function deletePromo(promo: PromoRow) {
+    try {
+      await api(`/api/promos/${promo.id}`, { method: "DELETE" });
+      toast({
+        title: "Promo code deleted",
+        description: `${promo.code} and its ${promo.timesRedeemed} redemption record${
+          promo.timesRedeemed === 1 ? "" : "s"
+        } were removed.`,
+      });
+      setData((prev) => (prev ? { ...prev, promos: prev.promos.filter((p) => p.id !== promo.id) } : prev));
+    } catch (e) {
+      toast({ title: "Couldn't delete the code", description: (e as Error).message, variant: "destructive" });
+    }
+  }
+
+  if (loading) {
+    return (
+      <div className="space-y-5" aria-busy="true" aria-label="Loading promo codes">
+        <div className="grid gap-4 sm:grid-cols-3">
+          {[0, 1, 2].map((i) => (
+            <Skeleton key={i} className="h-28 rounded-2xl" />
+          ))}
+        </div>
+        <div className="grid gap-5 md:grid-cols-2">
+          {[0, 1].map((i) => (
+            <Skeleton key={i} className="h-64 rounded-2xl" />
+          ))}
+        </div>
+      </div>
+    );
+  }
+  if (error || !data) return <LoadError message={error || "Promo codes unavailable."} />;
+
+  const { promos, products } = data;
+  const activeCodes = promos.filter((p) => !promoStatus(p, nowMs).muted).length;
+  const totalRedemptions = promos.reduce((s, p) => s + p.timesRedeemed, 0);
+  const totalGiven = promos.reduce((s, p) => s + p.discountGivenCents, 0);
+
+  return (
+    <div className="space-y-5">
+      <SectionHeader
+        title="Promos"
+        description={`${promos.length} code${promos.length === 1 ? "" : "s"} · ${activeCodes} live at checkout`}
+        action={
+          <Button onClick={() => setCreateOpen(true)}>
+            <Plus className="h-4 w-4" /> Create code
+          </Button>
+        }
+      />
+
+      {/* Stats */}
+      <div className="grid gap-4 sm:grid-cols-3">
+        <StatCard label="Active codes" value={String(activeCodes)} sub={`${promos.length} total`} icon={Tag} />
+        <StatCard label="Total redemptions" value={String(totalRedemptions)} sub="across all codes" icon={Repeat} />
+        <StatCard
+          label="Discount given"
+          value={fmtMoney(totalGiven, { cents: true })}
+          sub="lifetime"
+          icon={BadgePercent}
+        />
+      </div>
+
+      {/* Codes */}
+      {promos.length === 0 ? (
+        <EmptyState
+          icon={Tag}
+          title="No promo codes yet"
+          description="Create a code to run launch discounts, reward members or drive a seasonal sale — buyers apply it right in checkout."
+          action={
+            <Button onClick={() => setCreateOpen(true)}>
+              <Plus className="h-4 w-4" /> Create your first promo code
+            </Button>
+          }
+        />
+      ) : (
+        <motion.div className="grid gap-5 md:grid-cols-2" variants={stagger} initial="hidden" animate="show">
+          {promos.map((p) => {
+            const st = promoStatus(p, nowMs);
+            const usage = p.maxRedemptions > 0 ? Math.min(100, (p.timesRedeemed / p.maxRedemptions) * 100) : 0;
+            return (
+              <motion.div key={p.id} variants={fadeUp}>
+                <Panel className={cn("flex h-full flex-col p-5 transition-shadow hover:shadow-md", st.muted && "opacity-70")}>
+                  {/* Code + badges */}
+                  <div className="flex items-center gap-1.5">
+                    <span className="select-all font-mono text-xl font-bold tracking-[0.08em]">{p.code}</span>
+                    <CopyButton value={p.code} label="Copy" />
+                  </div>
+                  <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
+                    <span
+                      className={cn(
+                        "rounded-full border px-2.5 py-0.5 text-[11px] font-semibold",
+                        p.kind === "PERCENT"
+                          ? "border-emerald-500/25 bg-emerald-500/12 text-emerald-700 dark:text-emerald-400"
+                          : "border-amber-500/25 bg-amber-500/12 text-amber-700 dark:text-amber-400"
+                      )}
+                    >
+                      {promoValueLabel(p)}
+                    </span>
+                    {st.expired && <StatusBadge status="EXPIRED" />}
+                    {st.exhausted && (
+                      <Badge
+                        variant="outline"
+                        className="border-rose-500/25 bg-rose-500/10 text-rose-600 dark:text-rose-400"
+                      >
+                        Fully redeemed
+                      </Badge>
+                    )}
+                    {!p.active && (
+                      <Badge
+                        variant="outline"
+                        className="border-amber-500/25 bg-amber-500/10 text-amber-700 dark:text-amber-400"
+                      >
+                        Inactive
+                      </Badge>
+                    )}
+                  </div>
+
+                  {/* Meta */}
+                  <dl className="mt-4 grid gap-x-4 gap-y-2 text-xs text-muted-foreground sm:grid-cols-2">
+                    <div className="flex min-w-0 items-center gap-1.5">
+                      <Package className="h-3.5 w-3.5 shrink-0" />
+                      <dt className="sr-only">Scope</dt>
+                      <dd className="truncate" title={p.productTitle || "All products"}>
+                        {p.productTitle || "All products"}
+                      </dd>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <CalendarRange className="h-3.5 w-3.5 shrink-0" />
+                      <dt className="sr-only">Duration</dt>
+                      <dd>{promoDurationLabel(p.durationMonths)}</dd>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <CalendarClock className="h-3.5 w-3.5 shrink-0" />
+                      <dt className="sr-only">Expiry</dt>
+                      <dd>
+                        {p.expiresAt
+                          ? st.expired
+                            ? `Expired ${fmtDate(p.expiresAt)}`
+                            : `Expires ${fmtDate(p.expiresAt)}`
+                          : "No expiry"}
+                      </dd>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <BadgePercent className="h-3.5 w-3.5 shrink-0" />
+                      <dt className="sr-only">Discount given</dt>
+                      <dd className="tabular-nums">{fmtMoney(p.discountGivenCents, { cents: true })} given</dd>
+                    </div>
+                  </dl>
+
+                  {/* Usage */}
+                  <div className="mt-4">
+                    {p.maxRedemptions > 0 ? (
+                      <>
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="font-medium">Usage</span>
+                          <span className="tabular-nums text-muted-foreground">
+                            {p.timesRedeemed} / {p.maxRedemptions} redemptions
+                          </span>
+                        </div>
+                        <Progress
+                          value={usage}
+                          className="mt-1.5 h-2 transition-all"
+                          aria-label={`${p.code}: ${p.timesRedeemed} of ${p.maxRedemptions} redemptions used`}
+                        />
+                      </>
+                    ) : (
+                      <p className="text-xs text-muted-foreground">
+                        <span className="font-semibold tabular-nums text-foreground">{p.timesRedeemed}</span>{" "}
+                        redemption{p.timesRedeemed === 1 ? "" : "s"} · unlimited
+                      </p>
+                    )}
+                  </div>
+
+                  {/* Footer actions */}
+                  <div className="mt-auto flex items-center justify-between gap-3 border-t pt-3.5">
+                    <span className="text-xs text-muted-foreground">Created {fmtDate(p.createdAt)}</span>
+                    <div className="flex items-center gap-1">
+                      <AlertDialog>
+                        <AlertDialogTrigger asChild>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8 text-muted-foreground hover:text-red-600"
+                            aria-label={`Delete ${p.code}`}
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </Button>
+                        </AlertDialogTrigger>
+                        <AlertDialogContent>
+                          <AlertDialogHeader>
+                            <AlertDialogTitle>Delete this promo code?</AlertDialogTitle>
+                            <AlertDialogDescription>
+                              {p.code} will stop working immediately and its {p.timesRedeemed} redemption record
+                              {p.timesRedeemed === 1 ? "" : "s"} will be permanently removed. Members who already
+                              redeemed it keep their granted discounts.
+                            </AlertDialogDescription>
+                          </AlertDialogHeader>
+                          <AlertDialogFooter>
+                            <AlertDialogCancel>Keep code</AlertDialogCancel>
+                            <AlertDialogAction
+                              className="bg-red-600 text-white hover:bg-red-700"
+                              onClick={() => void deletePromo(p)}
+                            >
+                              Delete code
+                            </AlertDialogAction>
+                          </AlertDialogFooter>
+                        </AlertDialogContent>
+                      </AlertDialog>
+                      <label className="flex cursor-pointer items-center gap-2 text-xs font-medium">
+                        <Switch
+                          checked={p.active}
+                          onCheckedChange={(v) => void togglePromo(p, v)}
+                          aria-label={`${p.active ? "Pause" : "Activate"} ${p.code}`}
+                        />
+                        {p.active ? "Active" : "Paused"}
+                      </label>
+                    </div>
+                  </div>
+                </Panel>
+              </motion.div>
+            );
+          })}
+        </motion.div>
+      )}
+
+      <CreatePromoDialog open={createOpen} onOpenChange={setCreateOpen} products={products} onCreated={() => refresh()} />
+    </div>
+  );
+}
+
+// ============================================================================
+// Create promo dialog
+// ============================================================================
+
+function CreatePromoDialog({
+  open,
+  onOpenChange,
+  onCreated,
+  products,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onCreated: () => void;
+  products: ProductCardDTO[];
+}) {
+  const { toast } = useToast();
+  const [code, setCode] = useState("");
+  const [kind, setKind] = useState<"PERCENT" | "FIXED">("PERCENT");
+  const [value, setValue] = useState("");
+  const [productId, setProductId] = useState("ALL");
+  const [maxRedemptions, setMaxRedemptions] = useState("");
+  const [durationMonths, setDurationMonths] = useState("1");
+  const [expiresAt, setExpiresAt] = useState("");
+  const [formError, setFormError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  // Reset the form each time the dialog opens.
+  useEffect(() => {
+    if (open) {
+      setCode("");
+      setKind("PERCENT");
+      setValue("");
+      setProductId("ALL");
+      setMaxRedemptions("");
+      setDurationMonths("1");
+      setExpiresAt("");
+      setFormError(null);
+      setBusy(false);
+    }
+  }, [open]);
+
+  async function submit(e: FormEvent) {
+    e.preventDefault();
+    const trimmed = code.trim().toUpperCase();
+    if (trimmed && !/^[A-Z0-9-]{3,24}$/.test(trimmed)) {
+      return setFormError("Codes use 3–24 letters, numbers and dashes.");
+    }
+    let discountValue: number;
+    if (kind === "PERCENT") {
+      const pct = Number(value);
+      if (!Number.isFinite(pct) || pct <= 0 || pct > 100) return setFormError("Enter a percent between 1 and 100.");
+      discountValue = Math.round(pct);
+    } else {
+      const dollars = Number(value);
+      if (!Number.isFinite(dollars) || dollars <= 0) return setFormError("Enter a dollar amount greater than $0.");
+      discountValue = Math.round(dollars * 100); // 2 decimals → cents
+      if (discountValue > 100000) return setFormError("Fixed discounts can't exceed $1,000.");
+    }
+    setFormError(null);
+    setBusy(true);
+    try {
+      const res = await api<{ promo: PromoRow }>("/api/promos", {
+        json: {
+          code: trimmed || undefined, // server auto-generates when empty
+          kind,
+          value: discountValue,
+          productId,
+          maxRedemptions: Math.max(0, Math.round(Number(maxRedemptions) || 0)),
+          durationMonths: Number(durationMonths) || 1,
+          expiresAt: expiresAt || undefined,
+        },
+      });
+      toast({
+        title: "Promo code created",
+        description: `${res.promo.code} is live — buyers can apply it at checkout.`,
+      });
+      onCreated();
+      onOpenChange(false);
+    } catch (err) {
+      // 409 duplicates and 400 validation errors surface inline.
+      setFormError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-h-[88vh] overflow-y-auto sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>Create a promo code</DialogTitle>
+          <DialogDescription>
+            Discounts apply per invoice for as long as the duration lasts — percent or fixed amount.
+          </DialogDescription>
+        </DialogHeader>
+        <form id="create-promo-form" onSubmit={(e) => void submit(e)} className="space-y-4">
+          {/* Code */}
+          <div className="space-y-1.5">
+            <Label htmlFor="promo-code">Code</Label>
+            <div className="flex gap-2">
+              <Input
+                id="promo-code"
+                value={code}
+                onChange={(e) => setCode(e.target.value.toUpperCase())}
+                placeholder="Auto-generated if empty"
+                maxLength={24}
+                className="font-mono uppercase tracking-[0.08em]"
+                autoComplete="off"
+              />
+              <Button
+                type="button"
+                variant="outline"
+                size="icon"
+                className="h-9 w-11 shrink-0"
+                onClick={() => setCode(generatePromoCode())}
+                aria-label="Generate a random code"
+                title="Generate a random code"
+              >
+                <Dices className="h-4 w-4" />
+              </Button>
+            </div>
+            <p className="text-[11px] text-muted-foreground">
+              Leave empty and Vendly generates a unique 8-character code — or roll the dice.
+            </p>
+          </div>
+
+          {/* Kind + value */}
+          <div className="grid gap-2.5 sm:grid-cols-2">
+            <div className="space-y-1.5">
+              <Label>Discount type</Label>
+              <Select value={kind} onValueChange={(v) => setKind(v === "FIXED" ? "FIXED" : "PERCENT")}>
+                <SelectTrigger aria-label="Discount type" className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="PERCENT">Percent off</SelectItem>
+                  <SelectItem value="FIXED">Fixed amount off</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="promo-value">{kind === "PERCENT" ? "Discount" : "Amount (USD)"}</Label>
+              <div className="relative">
+                {kind === "FIXED" && (
+                  <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground">
+                    $
+                  </span>
+                )}
+                <Input
+                  id="promo-value"
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  inputMode="decimal"
+                  value={value}
+                  onChange={(e) => setValue(e.target.value)}
+                  placeholder={kind === "PERCENT" ? "20" : "10.00"}
+                  className={cn(kind === "FIXED" && "pl-7", kind === "PERCENT" && "pr-8")}
+                />
+                {kind === "PERCENT" && (
+                  <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground">
+                    %
+                  </span>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Product scope */}
+          <div className="space-y-1.5">
+            <Label>Applies to</Label>
+            <Select value={productId} onValueChange={setProductId}>
+              <SelectTrigger aria-label="Product scope" className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="ALL">All products</SelectItem>
+                {products.map((p) => (
+                  <SelectItem key={p.id} value={p.id}>
+                    {p.title}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <p className="text-[11px] text-muted-foreground">
+              Scoping to one product rejects the code everywhere else.
+            </p>
+          </div>
+
+          {/* Max redemptions + duration */}
+          <div className="grid gap-2.5 sm:grid-cols-2">
+            <div className="space-y-1.5">
+              <Label htmlFor="promo-max">Max redemptions</Label>
+              <Input
+                id="promo-max"
+                type="number"
+                min="0"
+                value={maxRedemptions}
+                onChange={(e) => setMaxRedemptions(e.target.value)}
+                placeholder="Unlimited"
+              />
+              <p className="text-[11px] text-muted-foreground">0 or empty = unlimited.</p>
+            </div>
+            <div className="space-y-1.5">
+              <Label>Duration</Label>
+              <Select value={durationMonths} onValueChange={setDurationMonths}>
+                <SelectTrigger aria-label="Duration" className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="1">First invoice only</SelectItem>
+                  {[2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map((m) => (
+                    <SelectItem key={m} value={String(m)}>
+                      Applies to {m} invoices
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+
+          {/* Expiry */}
+          <div className="space-y-1.5">
+            <Label htmlFor="promo-expiry">Expiry date (optional)</Label>
+            <Input
+              id="promo-expiry"
+              type="date"
+              value={expiresAt}
+              onChange={(e) => setExpiresAt(e.target.value)}
+            />
+            <p className="text-[11px] text-muted-foreground">
+              The code stops working after this date — leave empty for no expiry.
+            </p>
+          </div>
+
+          {formError && (
+            <p className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs font-medium text-red-600 dark:text-red-400">
+              {formError}
+            </p>
+          )}
+        </form>
+        <DialogFooter className="gap-2 sm:gap-0">
+          <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>
+            Cancel
+          </Button>
+          <Button type="submit" form="create-promo-form" disabled={busy}>
+            {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Tag className="h-4 w-4" />} Create code
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ============================================================================
 // TAB: WEBHOOKS (event-driven access console)
 // ============================================================================
 
@@ -2253,16 +2838,19 @@ const ENDPOINT_PROVIDERS: Record<string, { label: string; icon: LucideIcon; cls:
 
 function WebhooksTab() {
   const { toast } = useToast();
-  const now = useSimNow();
+  const fallbackNow = useSimNow();
   const refresh = useAppStore((s) => s.refresh);
 
   const { data, error, loading, setData } = useCreatorFetch(async () => {
     const [epsRes, delsRes] = await Promise.all([
       api<{ endpoints: WebhookEndpointDTO[] }>("/api/webhooks/endpoints"),
-      api<{ deliveries: WebhookDeliveryDTO[] }>("/api/webhooks/deliveries"),
+      api<{ deliveries: WebhookDeliveryDTO[]; now: string }>("/api/webhooks/deliveries"),
     ]);
-    return { endpoints: epsRes.endpoints, deliveries: delsRes.deliveries };
+    return { endpoints: epsRes.endpoints, deliveries: delsRes.deliveries, now: delsRes.now };
   });
+  // Compare delivery timestamps against the server's clock at fetch time —
+  // the store clock snapshot goes stale the moment new deliveries land.
+  const now = data?.now ?? fallbackNow;
 
   const [addOpen, setAddOpen] = useState(false);
   const [revealed, setRevealed] = useState<Set<string>>(new Set());
@@ -2848,6 +3436,405 @@ function AddEndpointDialog({
           </Button>
           <Button type="submit" form="add-endpoint-form" disabled={busy}>
             {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />} Add endpoint
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ============================================================================
+// TAB: PAYOUTS (creator balance & withdrawals)
+// ============================================================================
+
+const PAYOUT_METHODS: Record<string, { label: string; icon: LucideIcon; cls: string; note: string }> = {
+  BANK: {
+    label: "Bank transfer",
+    icon: Landmark,
+    cls: "border-emerald-500/25 bg-emerald-500/12 text-emerald-600 dark:text-emerald-400",
+    note: "1-2 business days",
+  },
+  PAYPAL: {
+    label: "PayPal",
+    icon: Wallet,
+    cls: "border-teal-500/25 bg-teal-500/12 text-teal-600 dark:text-teal-400",
+    note: "Credited to your balance",
+  },
+  CRYPTO: {
+    label: "On-chain",
+    icon: Bitcoin,
+    cls: "border-amber-500/25 bg-amber-500/12 text-amber-700 dark:text-amber-400",
+    note: "gas paid by receiver",
+  },
+};
+
+function payoutMethodMeta(method: string) {
+  return PAYOUT_METHODS[method] || PAYOUT_METHODS.BANK;
+}
+
+function PayoutsTab() {
+  const navigate = useAppStore((s) => s.navigate);
+  const refresh = useAppStore((s) => s.refresh);
+
+  const { data, error, loading } = useCreatorFetch(() =>
+    api<{ balance: PayoutBalanceDTO; payouts: PayoutDTO[] }>("/api/payouts")
+  );
+
+  const [withdrawOpen, setWithdrawOpen] = useState(false);
+
+  if (loading) {
+    return (
+      <div className="space-y-5" aria-busy="true" aria-label="Loading payouts">
+        <Skeleton className="h-64 rounded-2xl" />
+        <Skeleton className="h-24 rounded-2xl" />
+        <Skeleton className="h-56 rounded-2xl" />
+      </div>
+    );
+  }
+  if (error || !data) return <LoadError message={error || "Payouts unavailable."} />;
+
+  const { balance, payouts } = data;
+  const canWithdraw = balance.availableCents >= 500;
+
+  // Creators with no products/invoices yet — keep the tab friendly.
+  if (balance.grossRevenueCents === 0 && payouts.length === 0) {
+    return (
+      <div className="space-y-5">
+        <SectionHeader title="Payouts" description="Your earnings, withdrawals and settlement history" />
+        <EmptyState
+          icon={Banknote}
+          title="No revenue to pay out yet"
+          description="Every paid invoice nets out a 3% platform fee — the rest lands here as withdrawable balance after your first sale."
+          action={
+            <Button onClick={() => navigate("creator", { creatorTab: "products" })}>
+              <Package className="h-4 w-4" /> Create a product
+            </Button>
+          }
+        />
+      </div>
+    );
+  }
+
+  const secondary: { label: string; value: string; sub: string }[] = [
+    {
+      label: "Pending",
+      value: fmtMoney(balance.pendingCents, { cents: true }),
+      sub: payouts.some((p) => p.status === "PENDING") ? "awaiting settlement" : "no withdrawals in flight",
+    },
+    {
+      label: "Lifetime paid",
+      value: fmtMoney(balance.lifetimePaidCents, { cents: true }),
+      sub: "withdrawals completed",
+    },
+    {
+      label: "Platform fees to date",
+      value: fmtMoney(balance.platformFeeCents, { cents: true }),
+      sub: "3% of gross revenue",
+    },
+    {
+      label: "Gross revenue",
+      value: fmtMoney(balance.grossRevenueCents, { cents: true }),
+      sub: "all paid invoices",
+    },
+  ];
+
+  return (
+    <div className="space-y-5">
+      <SectionHeader title="Payouts" description="Your earnings, withdrawals and settlement history" />
+
+      {/* Hero balance */}
+      <Panel className="relative overflow-hidden">
+        <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-emerald-500/10 via-transparent to-transparent" />
+        <div className="relative p-5 sm:p-7">
+          <div className="flex flex-wrap items-start justify-between gap-6">
+            <div>
+              <p className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
+                <Banknote className="h-4 w-4 text-emerald-600 dark:text-emerald-400" /> Available balance
+              </p>
+              <p className="mt-2 text-4xl font-bold tracking-tight tabular-nums sm:text-5xl">
+                {fmtMoney(balance.availableCents, { cents: true })}
+              </p>
+              <p className="mt-2.5 text-xs leading-relaxed text-muted-foreground">
+                Vendly holds back a 3% platform fee on every payment.
+              </p>
+            </div>
+            <div className="flex flex-col items-stretch gap-2">
+              <Button size="lg" className="h-11" onClick={() => setWithdrawOpen(true)} disabled={!canWithdraw}>
+                <ArrowDownToLine className="h-4 w-4" /> Withdraw
+              </Button>
+              <p className="max-w-[220px] text-center text-[11px] leading-relaxed text-muted-foreground">
+                {canWithdraw ? "Minimum withdrawal is $5.00." : "Unlocks at $5.00 earned."}
+              </p>
+            </div>
+          </div>
+
+          {/* Secondary stats */}
+          <div className="mt-6 grid gap-3 border-t pt-5 sm:grid-cols-2 lg:grid-cols-4">
+            {secondary.map((s) => (
+              <div key={s.label} className="rounded-xl bg-muted/40 p-3.5">
+                <p className="text-xs font-medium text-muted-foreground">{s.label}</p>
+                <p className="mt-1 text-lg font-bold tabular-nums">{s.value}</p>
+                <p className="mt-0.5 text-[11px] text-muted-foreground">{s.sub}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      </Panel>
+
+      {/* Info banner */}
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-amber-500/30 bg-amber-500/10 p-4">
+        <p className="flex items-start gap-3 text-sm leading-relaxed">
+          <Timer className="mt-0.5 h-5 w-5 shrink-0 text-amber-600 dark:text-amber-400" />
+          <span>
+            Payouts settle when the billing engine runs — advance the time machine to simulate the settlement window
+            closing.
+          </span>
+        </p>
+        <Button
+          variant="outline"
+          size="sm"
+          className="shrink-0"
+          onClick={() => navigate("creator", { creatorTab: "time" })}
+        >
+          <FastForward className="h-4 w-4" /> Open time machine
+        </Button>
+      </div>
+
+      {/* History */}
+      <section aria-label="Payout history">
+        <div className="mb-3">
+          <h2 className="text-sm font-bold">Payout history</h2>
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            Newest first · fees are the period's 3% holdback, not an extra charge
+          </p>
+        </div>
+        {payouts.length === 0 ? (
+          <EmptyState
+            icon={Banknote}
+            title="No withdrawals yet"
+            description="Request your first payout once you've earned at least $5.00 — it settles the next time the billing engine runs."
+          />
+        ) : (
+          <Panel className="overflow-hidden">
+            <div className={cn("max-h-[60vh] overflow-auto", SCROLL_THIN)}>
+              <table className="w-full min-w-[760px] text-sm">
+                <TableHeader className="sticky top-0 z-10 bg-card shadow-[0_1px_0_0_var(--border)]">
+                  <TableRow className="hover:bg-transparent">
+                    <TableHead className="pl-5">Requested</TableHead>
+                    <TableHead>Method</TableHead>
+                    <TableHead className="text-right">Amount</TableHead>
+                    <TableHead className="text-right">Fee</TableHead>
+                    <TableHead>Status</TableHead>
+                    <TableHead className="pr-5 text-right">Paid</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {payouts.map((p) => {
+                    const meta = payoutMethodMeta(p.method);
+                    const MethodIcon = meta.icon;
+                    return (
+                      <TableRow key={p.id}>
+                        <TableCell className="pl-5 text-xs tabular-nums text-muted-foreground">
+                          {fmtDateTime(p.createdAt)}
+                        </TableCell>
+                        <TableCell>
+                          <span className="inline-flex items-center gap-2">
+                            <span className={cn("flex h-7 w-7 items-center justify-center rounded-lg border", meta.cls)}>
+                              <MethodIcon className="h-3.5 w-3.5" />
+                            </span>
+                            <span className="text-[13px] font-medium">{meta.label}</span>
+                          </span>
+                        </TableCell>
+                        <TableCell className="text-right font-semibold tabular-nums">
+                          {fmtMoney(p.amountCents, { cents: true })}
+                        </TableCell>
+                        <TableCell className="text-right text-xs tabular-nums text-muted-foreground">
+                          {fmtMoney(p.feeCents, { cents: true })}
+                        </TableCell>
+                        <TableCell>
+                          {p.status === "PENDING" ? (
+                            <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-500/25 bg-amber-500/10 px-2.5 py-0.5 text-[11px] font-medium text-amber-700 dark:text-amber-400">
+                              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-500" />
+                              Settles on next billing run
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/25 bg-emerald-500/12 px-2.5 py-0.5 text-[11px] font-medium text-emerald-700 dark:text-emerald-400">
+                              <Check className="h-3 w-3" /> Paid
+                            </span>
+                          )}
+                        </TableCell>
+                        <TableCell className="pr-5 text-right text-xs tabular-nums text-muted-foreground">
+                          {p.paidAt ? fmtDate(p.paidAt) : "—"}
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })}
+                </TableBody>
+              </table>
+            </div>
+          </Panel>
+        )}
+      </section>
+
+      <WithdrawDialog
+        open={withdrawOpen}
+        onOpenChange={setWithdrawOpen}
+        balance={balance}
+        onWithdrawn={() => refresh()}
+      />
+    </div>
+  );
+}
+
+// ============================================================================
+// Withdraw dialog
+// ============================================================================
+
+function WithdrawDialog({
+  open,
+  onOpenChange,
+  balance,
+  onWithdrawn,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  balance: PayoutBalanceDTO;
+  onWithdrawn: () => void;
+}) {
+  const { toast } = useToast();
+  const [amount, setAmount] = useState("");
+  const [method, setMethod] = useState("BANK");
+  const [formError, setFormError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  // Prefill with the full available balance each time the dialog opens.
+  useEffect(() => {
+    if (open) {
+      setAmount((balance.availableCents / 100).toFixed(2));
+      setMethod("BANK");
+      setFormError(null);
+      setBusy(false);
+    }
+  }, [open, balance.availableCents]);
+
+  async function submit(e: FormEvent) {
+    e.preventDefault();
+    const cents = Math.round(Number(amount) * 100);
+    if (!Number.isFinite(cents) || cents < 500) {
+      return setFormError("Minimum withdrawal is $5.00.");
+    }
+    if (cents > balance.availableCents) {
+      return setFormError(`You can withdraw up to ${fmtMoney(balance.availableCents, { cents: true })}.`);
+    }
+    setFormError(null);
+    setBusy(true);
+    try {
+      await api("/api/payouts", { json: { amountCents: cents, method } });
+      toast({
+        title: "Withdrawal requested",
+        description: "It settles the next time the billing engine runs — advance the time machine to close the window.",
+      });
+      onWithdrawn();
+      onOpenChange(false);
+    } catch (err) {
+      // 400s (min amount / exceeds balance) surface inline.
+      setFormError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Withdraw funds</DialogTitle>
+          <DialogDescription>Request a payout from your available balance.</DialogDescription>
+        </DialogHeader>
+        <form id="withdraw-form" onSubmit={(e) => void submit(e)} className="space-y-4">
+          <div className="space-y-1.5">
+            <Label htmlFor="wd-amount">Amount (USD)</Label>
+            <div className="relative">
+              <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground">
+                $
+              </span>
+              <Input
+                id="wd-amount"
+                type="number"
+                min="5.00"
+                max={(balance.availableCents / 100).toFixed(2)}
+                step="0.01"
+                inputMode="decimal"
+                value={amount}
+                onChange={(e) => setAmount(e.target.value)}
+                className="pl-7 pr-16 text-base tabular-nums"
+              />
+              <button
+                type="button"
+                onClick={() => setAmount((balance.availableCents / 100).toFixed(2))}
+                className="absolute right-2 top-1/2 -translate-y-1/2 rounded-md px-2 py-1 text-[11px] font-semibold text-primary transition-colors hover:bg-primary/10"
+              >
+                Max
+              </button>
+            </div>
+            <p className="text-[11px] text-muted-foreground">
+              Up to {fmtMoney(balance.availableCents, { cents: true })} available · minimum $5.00.
+            </p>
+          </div>
+
+          <fieldset className="space-y-2">
+            <legend className="text-sm font-medium">Delivery method</legend>
+            <RadioGroup value={method} onValueChange={setMethod} className="grid gap-2.5">
+              {(["BANK", "PAYPAL", "CRYPTO"] as const).map((m) => {
+                const meta = PAYOUT_METHODS[m];
+                const Icon = meta.icon;
+                const selected = method === m;
+                return (
+                  <div key={m} className="relative">
+                    <RadioGroupItem value={m} id={`wd-${m}`} className="peer sr-only" />
+                    <label
+                      htmlFor={`wd-${m}`}
+                      className={cn(
+                        "flex cursor-pointer items-center gap-3 rounded-xl border p-3 transition-all peer-focus-visible:ring-2 peer-focus-visible:ring-ring",
+                        selected
+                          ? "border-primary bg-primary/5 ring-1 ring-primary"
+                          : "hover:border-primary/40 hover:bg-muted/40"
+                      )}
+                    >
+                      <span className={cn("flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border", meta.cls)}>
+                        <Icon className="h-4 w-4" />
+                      </span>
+                      <span className="min-w-0 flex-1">
+                        <span className="block text-sm font-semibold leading-tight">{meta.label}</span>
+                        <span className="block text-xs text-muted-foreground">{meta.note}</span>
+                      </span>
+                      {selected && <Check className="h-4 w-4 shrink-0 text-primary" strokeWidth={3} aria-label="Selected" />}
+                    </label>
+                  </div>
+                );
+              })}
+            </RadioGroup>
+          </fieldset>
+
+          <p className="flex items-start gap-2 rounded-xl border border-dashed p-3 text-xs leading-relaxed text-muted-foreground">
+            <Timer className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            Withdrawals settle as PENDING and are paid when the billing engine next runs — advance the time machine to
+            simulate it.
+          </p>
+
+          {formError && (
+            <p className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs font-medium text-red-600 dark:text-red-400">
+              {formError}
+            </p>
+          )}
+        </form>
+        <DialogFooter className="gap-2 sm:gap-0">
+          <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>
+            Cancel
+          </Button>
+          <Button type="submit" form="withdraw-form" disabled={busy}>
+            {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowDownToLine className="h-4 w-4" />}
+            Request withdrawal
           </Button>
         </DialogFooter>
       </DialogContent>

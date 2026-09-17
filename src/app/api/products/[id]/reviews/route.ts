@@ -1,5 +1,6 @@
 import { db } from "@/lib/db";
 import { errorResponse, HttpError, requireUser } from "@/lib/session";
+import { notify } from "@/lib/notifications";
 
 // POST /api/products/[id]/reviews — leave a review (requires access)
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -23,6 +24,14 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     await db.product.update({
       where: { id },
       data: { rating: Math.round((agg._avg.rating || 5) * 10) / 10, reviewCount: agg._count },
+    });
+
+    await notify({
+      userId: product.creatorId,
+      type: "review_new",
+      title: `New ${"★".repeat(rating)} review — ${product.title}`,
+      body: `"${comment.slice(0, 90)}${comment.length > 90 ? "..." : ""}" — ${user.name || user.email}`,
+      icon: "star",
     });
 
     return Response.json({

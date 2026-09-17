@@ -8,13 +8,13 @@ import { AnimatePresence, motion } from "framer-motion";
 import type { LucideIcon } from "lucide-react";
 import {
   ArrowLeft, ArrowRight, ArrowUpRight, BadgeCheck, Bitcoin, CalendarDays, Check, CircleAlert,
-  CreditCard, FileDown, Info, KeyRound, Loader2, Lock, Mail, MessageSquare, PackageOpen, PenLine,
-  RefreshCw, Search, SearchX, Send, ShieldCheck, ShoppingBag, Sparkles, Star, Users, Wallet, X,
+  CreditCard, FileDown, Heart, Info, KeyRound, Loader2, Lock, Mail, MessageSquare, PackageOpen, PenLine,
+  RefreshCw, Search, SearchX, Send, ShieldCheck, ShoppingBag, Sparkles, Star, Tag, Users, Wallet, X,
 } from "lucide-react";
 
 import { useAppStore } from "@/lib/store";
 import { api, ApiError } from "@/lib/api";
-import { CATEGORIES, type AssetDTO, type PlanDTO, type ProductCardDTO, type ProductDetailDTO } from "@/lib/types";
+import { CATEGORIES, type AssetDTO, type PlanDTO, type ProductCardDTO, type ProductDetailDTO, type PromoValidationDTO } from "@/lib/types";
 import { fmtBytes, fmtCompact, fmtDate, fmtMoney, timeAgo } from "@/lib/format";
 import {
   CategoryIcon, CopyButton, EmptyState, GatewayBadge, ProductCover, ProviderBadge, SectionHeader,
@@ -60,6 +60,8 @@ interface CheckoutResultDTO {
   invoiceId?: string;
   licenseKeyId?: string | null;
   isTrial?: boolean;
+  discountCents?: number;
+  promoCode?: string | null;
   quote?: CryptoQuoteDTO;
 }
 
@@ -69,7 +71,13 @@ interface CheckoutReceipt {
   licenseKeyId: string | null;
   isTrial: boolean;
   gateway: string;
+  discountCents: number;
+  promoCode: string | null;
 }
+
+// A validated promo applied to the checkout — `planId` is the plan it was last
+// validated against (discounts are plan-scoped server-side).
+type AppliedPromo = PromoValidationDTO & { planId: string };
 
 function intervalSuffix(interval: string): string {
   return interval === "year" ? "/yr" : "/mo";
@@ -155,10 +163,133 @@ function CategoryChip({
 }
 
 // ---------------------------------------------------------------------------
+// Wishlist (hearts on Discover cards + Save on product detail)
+// ---------------------------------------------------------------------------
+
+/** Loads the signed-in user's wishlist ids and provides an optimistic toggle. */
+function useWishlist() {
+  const nonce = useAppStore((s) => s.nonce);
+  const userId = useAppStore((s) => s.user?.id);
+  const { toast } = useToast();
+  const [ids, setIds] = useState<Set<string> | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await api<{ productIds: string[] }>("/api/wishlist");
+        if (!cancelled) setIds(new Set(res.productIds));
+      } catch {
+        if (!cancelled) setIds(new Set()); // hearts simply render unsaved
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [nonce, userId]);
+
+  // Optimistic flip → server truth on success → revert + destructive toast on failure.
+  async function toggle(product: { id: string; title: string }): Promise<boolean> {
+    const base = ids ?? new Set<string>();
+    const wasSaved = base.has(product.id);
+    const next = new Set(base);
+    if (wasSaved) next.delete(product.id);
+    else next.add(product.id);
+    setIds(next);
+    try {
+      const res = await api<{ saved: boolean }>("/api/wishlist", { json: { productId: product.id } });
+      setIds((prev) => {
+        const synced = new Set(prev ?? []);
+        if (res.saved) synced.add(product.id);
+        else synced.delete(product.id);
+        return synced;
+      });
+      return res.saved;
+    } catch (e) {
+      setIds((prev) => {
+        const reverted = new Set(prev ?? []);
+        if (wasSaved) reverted.add(product.id);
+        else reverted.delete(product.id);
+        return reverted;
+      });
+      toast({ title: "Couldn't update wishlist", description: (e as Error).message, variant: "destructive" });
+      return wasSaved;
+    }
+  }
+
+  return { ids, toggle };
+}
+
+/** Heart that pops whenever its filled state flips. */
+function PopHeart({ filled, className }: { filled: boolean; className?: string }) {
+  return (
+    <motion.span
+      key={filled ? "filled" : "outline"}
+      initial={{ scale: 0.55 }}
+      animate={{ scale: 1 }}
+      transition={{ type: "spring", stiffness: 520, damping: 16 }}
+      className="inline-flex"
+      aria-hidden
+    >
+      <Heart className={cn(className, filled ? "fill-rose-500 text-rose-500" : "fill-none")} />
+    </motion.span>
+  );
+}
+
+/** Glassy heart chip overlaid on a product card cover. Rendered as a sibling
+ *  of the card's navigation button (never nested inside it), so tapping the
+ *  heart can never trigger product navigation. */
+function WishlistHeart({
+  saved,
+  title,
+  onToggle,
+}: {
+  saved: boolean;
+  title: string;
+  onToggle: () => void;
+}) {
+  const label = saved ? `Remove ${title} from wishlist` : `Save ${title} to wishlist`;
+  return (
+    <motion.button
+      type="button"
+      whileTap={{ scale: 0.8 }}
+      onClick={(e) => {
+        e.stopPropagation();
+        e.preventDefault();
+        onToggle();
+      }}
+      aria-label={label}
+      title={label}
+      aria-pressed={saved}
+      className={cn(
+        "absolute right-3 top-3 z-10 flex h-11 w-11 items-center justify-center rounded-full border backdrop-blur-md transition-all duration-200",
+        "opacity-80 group-hover:scale-105 group-hover:opacity-100",
+        "focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary",
+        saved ? "border-rose-500/30 bg-white/95 shadow-sm" : "border-white/25 bg-black/35 text-white hover:bg-black/50"
+      )}
+    >
+      <PopHeart filled={saved} className="h-5 w-5" />
+    </motion.button>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Product card (Whop-style)
 // ---------------------------------------------------------------------------
 
-function ProductCard({ product, featured = false, index = 0 }: { product: ProductCardDTO; featured?: boolean; index?: number }) {
+function ProductCard({
+  product,
+  featured = false,
+  index = 0,
+  saved = false,
+  onToggleWishlist,
+}: {
+  product: ProductCardDTO;
+  featured?: boolean;
+  index?: number;
+  saved?: boolean;
+  onToggleWishlist: (product: ProductCardDTO) => void;
+}) {
   const navigate = useAppStore((s) => s.navigate);
   const price = fromPriceInfo(product);
   return (
@@ -166,68 +297,73 @@ function ProductCard({ product, featured = false, index = 0 }: { product: Produc
       initial={{ opacity: 0, y: 14 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.3, delay: Math.min(index * 0.06, 0.5), ease: "easeOut" }}
-      className="group h-full"
+      className="group relative h-full"
     >
-      <button
-        type="button"
-        onClick={() => navigate("product", { productId: product.id })}
-        aria-label={`View ${product.title} by ${product.creator.name ?? "creator"}`}
-        className="flex h-full w-full flex-col overflow-hidden rounded-2xl border bg-card text-left shadow-sm transition-all duration-200 hover:-translate-y-1 hover:shadow-lg hover:shadow-emerald-500/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-      >
-        <div className="relative overflow-hidden">
-          <ProductCover
-            theme={product.coverTheme}
-            category={product.category}
-            title={product.title}
-            className={cn("w-full transition-transform duration-300 group-hover:scale-[1.03]", featured ? "aspect-[2/1]" : "aspect-[16/9]")}
-            iconClassName={featured ? "h-32 w-32" : "h-24 w-24"}
-          />
-          {featured && (
-            <span className="absolute left-3 top-3 inline-flex items-center gap-1 rounded-full bg-black/35 px-2.5 py-1 text-[11px] font-semibold text-white backdrop-blur-sm">
-              <Sparkles className="h-3 w-3" /> Featured
-            </span>
-          )}
-        </div>
-        <div className={cn("flex flex-1 flex-col gap-2.5", featured ? "p-5" : "p-4")}>
-          <div className="flex items-center gap-2">
-            <UserAvatar name={product.creator.name} color={product.creator.avatarColor} size="sm" />
-            <span className="truncate text-xs font-medium text-muted-foreground">{product.creator.name ?? "Creator"}</span>
-          </div>
-          <div>
-            <h3 className={cn("font-semibold tracking-tight", featured ? "text-base" : "text-[15px]")}>{product.title}</h3>
-            {product.tagline && <p className="mt-0.5 line-clamp-2 text-sm text-muted-foreground">{product.tagline}</p>}
-          </div>
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 text-xs text-muted-foreground">
-            <Stars value={product.rating} count={product.reviewCount} />
-            <span className="inline-flex items-center gap-1">
-              <Users className="h-3.5 w-3.5" />
-              {fmtCompact(product.membersCount)} members
-            </span>
-          </div>
-          <div className="flex flex-wrap gap-1.5">
-            {product.accessType.map((a) => (
-              <ProviderBadge key={a} provider={a} />
-            ))}
-          </div>
-          <div className="mt-auto flex items-end justify-between border-t pt-3">
-            {price ? (
-              <p className="text-sm">
-                <span className="text-xs text-muted-foreground">from </span>
-                <span className="text-base font-bold">{fmtMoney(price.cents)}</span>
-                <span className="text-xs text-muted-foreground">{price.suffix}</span>
-              </p>
-            ) : (
-              <p className="text-sm text-muted-foreground">Free</p>
+      {/* Wrapper lifts on hover so the card and its heart move together; the
+          heart is a sibling of the navigation button (no nested buttons). */}
+      <div className="relative h-full transition-transform duration-200 group-hover:-translate-y-1">
+        <button
+          type="button"
+          onClick={() => navigate("product", { productId: product.id })}
+          aria-label={`View ${product.title} by ${product.creator.name ?? "creator"}`}
+          className="flex h-full w-full flex-col overflow-hidden rounded-2xl border bg-card text-left shadow-sm transition-shadow duration-200 group-hover:shadow-lg group-hover:shadow-emerald-500/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          <div className="relative overflow-hidden">
+            <ProductCover
+              theme={product.coverTheme}
+              category={product.category}
+              title={product.title}
+              className={cn("w-full transition-transform duration-300 group-hover:scale-[1.03]", featured ? "aspect-[2/1]" : "aspect-[16/9]")}
+              iconClassName={featured ? "h-32 w-32" : "h-24 w-24"}
+            />
+            {featured && (
+              <span className="absolute left-3 top-3 inline-flex items-center gap-1 rounded-full bg-black/35 px-2.5 py-1 text-[11px] font-semibold text-white backdrop-blur-sm">
+                <Sparkles className="h-3 w-3" /> Featured
+              </span>
             )}
-            <span
-              aria-hidden
-              className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-muted text-muted-foreground transition-colors group-hover:bg-primary group-hover:text-primary-foreground"
-            >
-              <ArrowUpRight className="h-4 w-4" />
-            </span>
           </div>
-        </div>
-      </button>
+          <div className={cn("flex flex-1 flex-col gap-2.5", featured ? "p-5" : "p-4")}>
+            <div className="flex items-center gap-2">
+              <UserAvatar name={product.creator.name} color={product.creator.avatarColor} size="sm" />
+              <span className="truncate text-xs font-medium text-muted-foreground">{product.creator.name ?? "Creator"}</span>
+            </div>
+            <div>
+              <h3 className={cn("font-semibold tracking-tight", featured ? "text-base" : "text-[15px]")}>{product.title}</h3>
+              {product.tagline && <p className="mt-0.5 line-clamp-2 text-sm text-muted-foreground">{product.tagline}</p>}
+            </div>
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 text-xs text-muted-foreground">
+              <Stars value={product.rating} count={product.reviewCount} />
+              <span className="inline-flex items-center gap-1">
+                <Users className="h-3.5 w-3.5" />
+                {fmtCompact(product.membersCount)} members
+              </span>
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {product.accessType.map((a) => (
+                <ProviderBadge key={a} provider={a} />
+              ))}
+            </div>
+            <div className="mt-auto flex items-end justify-between border-t pt-3">
+              {price ? (
+                <p className="text-sm">
+                  <span className="text-xs text-muted-foreground">from </span>
+                  <span className="text-base font-bold">{fmtMoney(price.cents)}</span>
+                  <span className="text-xs text-muted-foreground">{price.suffix}</span>
+                </p>
+              ) : (
+                <p className="text-sm text-muted-foreground">Free</p>
+              )}
+              <span
+                aria-hidden
+                className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-muted text-muted-foreground transition-colors group-hover:bg-primary group-hover:text-primary-foreground"
+              >
+                <ArrowUpRight className="h-4 w-4" />
+              </span>
+            </div>
+          </div>
+        </button>
+        <WishlistHeart saved={saved} title={product.title} onToggle={() => onToggleWishlist(product)} />
+      </div>
     </motion.article>
   );
 }
@@ -456,6 +592,7 @@ function DiscoverView() {
   const params = useAppStore((s) => s.params);
   const nonce = useAppStore((s) => s.nonce);
   const { toast } = useToast();
+  const { ids: wishlistIds, toggle: toggleWishlist } = useWishlist();
 
   const [searchText, setSearchText] = useState(params.query ?? "");
   const [category, setCategory] = useState(params.category ?? "ALL");
@@ -563,14 +700,15 @@ function DiscoverView() {
               <Button
                 size="lg"
                 variant="outline"
-                className="h-12 rounded-full border-foreground/20 bg-card/70 px-8 text-base font-semibold text-foreground backdrop-blur hover:bg-card"
+                className="h-12 rounded-full border-foreground/25 bg-card/80 px-8 text-base font-semibold text-foreground shadow-sm backdrop-blur transition-all hover:-translate-y-0.5 hover:border-foreground/40 hover:bg-card hover:shadow-md"
                 onClick={() => howRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })}
               >
                 How it works
               </Button>
             </div>
 
-            <dl className="mx-auto mt-10 flex max-w-xl flex-wrap items-center justify-center gap-x-10 gap-y-4">
+            <div className="mx-auto mt-10 max-w-xl border-t border-foreground/10 pt-7" aria-hidden="true" />
+            <dl className="mx-auto flex max-w-xl flex-wrap items-center justify-center gap-x-10 gap-y-4">
               <div className="text-center">
                 <dt className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Products</dt>
                 <dd className="mt-0.5 text-xl font-bold tabular-nums">
@@ -604,7 +742,7 @@ function DiscoverView() {
               onChange={(e) => setSearchText(e.target.value)}
               placeholder="Search products, communities, SaaS…"
               aria-label="Search products"
-              className={cn("h-11 rounded-full border-muted bg-muted/40 pl-10", searchText && "pr-10")}
+              className={cn("h-11 rounded-full border-muted bg-muted/40 pl-10 font-medium placeholder:font-normal placeholder:text-muted-foreground", searchText && "pr-10")}
             />
             {searchText && (
               <button
@@ -649,7 +787,14 @@ function DiscoverView() {
             <SectionHeader title="Featured" description="Hand-picked by the Vendly team" />
             <div className="grid gap-5 sm:grid-cols-2">
               {featured.map((p, i) => (
-                <ProductCard key={p.id} product={p} featured index={i} />
+                <ProductCard
+                  key={p.id}
+                  product={p}
+                  featured
+                  index={i}
+                  saved={wishlistIds?.has(p.id) ?? false}
+                  onToggleWishlist={toggleWishlist}
+                />
               ))}
             </div>
           </div>
@@ -680,7 +825,15 @@ function DiscoverView() {
             </div>
           ) : resultCount > 0 ? (
             <div className={cn("grid gap-5 sm:grid-cols-2 lg:grid-cols-3", loading && "pointer-events-none opacity-50 transition-opacity")}>
-              {products?.map((p, i) => <ProductCard key={p.id} product={p} index={i} />)}
+              {products?.map((p, i) => (
+                <ProductCard
+                  key={p.id}
+                  product={p}
+                  index={i}
+                  saved={wishlistIds?.has(p.id) ?? false}
+                  onToggleWishlist={toggleWishlist}
+                />
+              ))}
             </div>
           ) : (
             <EmptyState
@@ -891,6 +1044,8 @@ function ProductDetailView() {
   const params = useAppStore((s) => s.params);
   const navigate = useAppStore((s) => s.navigate);
   const nonce = useAppStore((s) => s.nonce);
+  const { toast } = useToast();
+  const { ids: wishlistIds, toggle: toggleWishlist } = useWishlist();
 
   const [product, setProduct] = useState<ProductDetailDTO | null>(null);
   const [loading, setLoading] = useState(true);
@@ -929,6 +1084,14 @@ function ProductDetailView() {
     }
     return plans.find((p) => p.badge === "Most Popular") ?? plans[0] ?? null;
   }, [selectedPlanId, plans]);
+
+  const wishlisted = !!product && !!wishlistIds && wishlistIds.has(product.id);
+
+  async function handleWishlistToggle() {
+    if (!product) return;
+    const savedNow = await toggleWishlist(product);
+    if (savedNow) toast({ title: "Saved to your wishlist", description: "Find it in My Hub → Wishlist." });
+  }
 
   if (loading && !product) return <DetailSkeleton />;
   if (notFound || !product) {
@@ -1138,6 +1301,20 @@ function ProductDetailView() {
                 >
                   Continue to checkout{selectedPlan ? ` — ${fmtMoney(selectedPlan.priceCents)}${intervalSuffix(selectedPlan.interval)}` : ""}
                 </Button>
+                <motion.div whileTap={{ scale: 0.97 }} className="mt-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="lg"
+                    className="h-11 w-full"
+                    onClick={handleWishlistToggle}
+                    aria-pressed={wishlisted}
+                    aria-label={wishlisted ? `Remove ${product.title} from wishlist` : `Save ${product.title} to wishlist`}
+                  >
+                    <PopHeart filled={wishlisted} className="h-4.5 w-4.5" />
+                    {wishlisted ? "Saved" : "Save"}
+                  </Button>
+                </motion.div>
                 {selectedPlan && selectedPlan.trialDays > 0 && (
                   <p className="mt-2 flex items-center justify-center gap-1.5 text-center text-xs text-muted-foreground">
                     <Sparkles className="h-3.5 w-3.5 text-emerald-500" />
@@ -1177,19 +1354,160 @@ function CheckoutSkeleton() {
   );
 }
 
+// ------------------------------ Promo code ------------------------------
+
+function PromoSection({
+  plan,
+  trial,
+  promo,
+  onApply,
+  onRemove,
+}: {
+  plan: PlanDTO | null;
+  trial: boolean;
+  promo: AppliedPromo | null;
+  onApply: (code: string) => Promise<AppliedPromo>;
+  onRemove: () => void;
+}) {
+  const [code, setCode] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  async function apply(e: React.FormEvent) {
+    e.preventDefault();
+    const trimmed = code.trim().toUpperCase();
+    if (!trimmed) {
+      setError("Enter a promo code.");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await onApply(trimmed);
+      setCode("");
+    } catch (err) {
+      setError((err as Error).message); // server reason, e.g. "That code doesn't exist."
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function remove() {
+    setCode("");
+    setError(null);
+    onRemove();
+  }
+
+  return (
+    <AnimatePresence mode="wait" initial={false}>
+      {promo ? (
+        <motion.div
+          key="applied"
+          initial={{ opacity: 0, y: -5, scale: 0.98 }}
+          animate={{ opacity: 1, y: 0, scale: 1 }}
+          exit={{ opacity: 0, scale: 0.98 }}
+          transition={{ duration: 0.2, ease: "easeOut" }}
+          className="rounded-xl border border-emerald-500/30 bg-emerald-500/[0.07] p-3 dark:bg-emerald-500/10"
+          aria-live="polite"
+        >
+          <div className="flex items-center gap-2">
+            <Tag className="h-4 w-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
+            <p className="min-w-0 flex-1 truncate text-sm font-semibold text-emerald-700 dark:text-emerald-400">
+              −{promo.description}
+            </p>
+            <button
+              type="button"
+              onClick={remove}
+              aria-label={`Remove promo code ${promo.code}`}
+              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-emerald-700/70 transition-colors hover:bg-emerald-500/15 hover:text-emerald-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring dark:text-emerald-400/70 dark:hover:text-emerald-400"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+          <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 pl-6 text-xs text-emerald-700/85 dark:text-emerald-400/85">
+            <code className="rounded bg-emerald-500/15 px-1.5 py-0.5 font-mono text-[11px] font-bold tracking-wider">
+              {promo.code}
+            </code>
+            <span className="font-semibold tabular-nums">−{fmtMoney(promo.discountCents)} today</span>
+          </div>
+          {(trial || promo.durationMonths > 1) && (
+            <p className="mt-1.5 pl-6 text-[11px] leading-relaxed text-emerald-700/70 dark:text-emerald-400/70">
+              {trial
+                ? `Discount applies from your first charge${promo.durationMonths > 1 ? ` — the next ${promo.durationMonths} invoices.` : "."}`
+                : `Discount applies to the next ${promo.durationMonths} invoices.`}
+            </p>
+          )}
+        </motion.div>
+      ) : (
+        <motion.form
+          key="input"
+          onSubmit={apply}
+          noValidate
+          initial={{ opacity: 0, y: 4 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: -4 }}
+          transition={{ duration: 0.18 }}
+        >
+          <div className="flex gap-2">
+            <div className="relative flex-1">
+              <Tag className="absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                id="promo-code"
+                value={code}
+                onChange={(e) => {
+                  setCode(e.target.value);
+                  if (error) setError(null); // helper text auto-clears on edit
+                }}
+                placeholder="Enter code"
+                autoComplete="off"
+                spellCheck={false}
+                maxLength={32}
+                disabled={busy || !plan}
+                aria-label="Promo code"
+                aria-invalid={!!error || undefined}
+                aria-describedby={error ? "promo-code-error" : undefined}
+                className="h-11 rounded-xl pl-9 font-mono text-sm font-semibold uppercase tracking-wider"
+              />
+            </div>
+            <Button type="submit" variant="outline" className="h-11 shrink-0 rounded-xl px-4 font-semibold" disabled={busy || !plan}>
+              {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : "Apply"}
+            </Button>
+          </div>
+          {error && (
+            <p id="promo-code-error" role="alert" className="mt-1.5 text-xs font-medium text-red-600 dark:text-red-400">
+              {error}
+            </p>
+          )}
+        </motion.form>
+      )}
+    </AnimatePresence>
+  );
+}
+
+// ------------------------------ Order summary ------------------------------
+
 function OrderSummary({
   product,
   plan,
   startTrial,
+  promo,
+  onApplyPromo,
+  onRemovePromo,
   className,
 }: {
   product: ProductDetailDTO;
   plan: PlanDTO | null;
   startTrial: boolean;
+  promo: AppliedPromo | null;
+  onApplyPromo: (code: string) => Promise<AppliedPromo>;
+  onRemovePromo: () => void;
   className?: string;
 }) {
   const trial = !!plan && plan.trialDays > 0 && startTrial;
   const firstCharge = trial && plan ? fmtDate(new Date(Date.now() + plan.trialDays * 86400000).toISOString()) : null;
+  const discountCents = promo && plan ? Math.min(promo.discountCents, plan.priceCents) : 0;
+  const totalCents = plan ? Math.max(0, plan.priceCents - discountCents) : 0;
+
   return (
     <aside className={cn("rounded-3xl border bg-card p-5 shadow-sm md:p-6", className)} aria-label="Order summary">
       <div className="flex items-center gap-3">
@@ -1219,28 +1537,73 @@ function OrderSummary({
             </div>
             <div className="flex items-center justify-between gap-3">
               <dt className="text-muted-foreground">Price</dt>
-              <dd className="font-medium">
+              <dd className="font-medium tabular-nums">
                 {fmtMoney(plan.priceCents)}
                 {intervalSuffix(plan.interval)}
               </dd>
             </div>
+            {promo && (
+              <div className="flex items-center justify-between gap-3">
+                <dt className="flex min-w-0 items-center gap-1.5 text-muted-foreground">
+                  Promo
+                  <code className="shrink-0 rounded bg-emerald-500/12 px-1.5 py-0.5 font-mono text-[10px] font-bold tracking-wider text-emerald-700 dark:text-emerald-400">
+                    {promo.code}
+                  </code>
+                </dt>
+                <dd className="font-semibold tabular-nums text-emerald-700 dark:text-emerald-400">−{fmtMoney(discountCents)}</dd>
+              </div>
+            )}
           </dl>
-          <Separator className="my-4" />
-          <div className="rounded-xl bg-muted/50 p-3.5 text-sm">
+
+          <div className="mt-4">
+            <Label htmlFor="promo-code" className="mb-2 block text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+              Promo code
+            </Label>
+            <PromoSection plan={plan} trial={trial} promo={promo} onApply={onApplyPromo} onRemove={onRemovePromo} />
+          </div>
+
+          <div className="mt-4 rounded-xl bg-muted/50 p-3.5 text-sm">
             {trial ? (
               <>
                 <p className="flex items-center gap-2 font-semibold text-emerald-700 dark:text-emerald-400">
                   <Sparkles className="h-4 w-4" /> Free trial starts today
                 </p>
                 <p className="mt-1 text-xs text-muted-foreground">
-                  No charge now — first charge {firstCharge}, then {fmtMoney(plan.priceCents)}
-                  {intervalSuffix(plan.interval)}.
+                  {`No charge now — first charge ${firstCharge}`}
+                  {promo && (
+                    <>
+                      {" at "}
+                      <span className="font-semibold tabular-nums text-emerald-700 dark:text-emerald-400">{fmtMoney(totalCents)}</span>
+                      {promo.durationMonths > 1 ? ` (first ${promo.durationMonths} cycles discounted)` : ""}
+                    </>
+                  )}
+                  {`, then ${fmtMoney(plan.priceCents)}${intervalSuffix(plan.interval)}.`}
                 </p>
               </>
             ) : (
               <div className="flex items-center justify-between">
                 <span className="font-medium">Today’s charge</span>
-                <span className="text-base font-bold">{fmtMoney(plan.priceCents)}</span>
+                <span className="flex items-baseline justify-end gap-2">
+                  {promo && (
+                    <motion.s
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
+                      transition={{ duration: 0.25 }}
+                      className="text-xs tabular-nums text-muted-foreground"
+                    >
+                      {fmtMoney(plan.priceCents)}
+                    </motion.s>
+                  )}
+                  <motion.span
+                    key={totalCents}
+                    initial={{ opacity: 0, y: 6 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ duration: 0.25, ease: "easeOut" }}
+                    className={cn("text-base font-bold tabular-nums", promo && "text-emerald-700 dark:text-emerald-400")}
+                  >
+                    {fmtMoney(totalCents)}
+                  </motion.span>
+                </span>
               </div>
             )}
           </div>
@@ -1266,12 +1629,16 @@ function OrderSummary({
 function StripeForm({
   plan,
   startTrial,
+  payAmountCents,
+  promoCode,
   onComplete,
   onApiError,
   onFormError,
 }: {
   plan: PlanDTO;
   startTrial: boolean;
+  payAmountCents: number;
+  promoCode: string | null;
   onComplete: (gateway: GatewayKey, res: CheckoutResultDTO) => void;
   onApiError: (e: unknown) => void;
   onFormError: (msg: string) => void;
@@ -1310,6 +1677,7 @@ function StripeForm({
           gateway: "STRIPE",
           startTrial,
           saveMethod,
+          promoCode: promoCode ?? undefined,
           card: { number: digits, expMonth: Number(expMonth), expYear: Number(expYear), cvc },
         },
       });
@@ -1401,9 +1769,9 @@ function StripeForm({
           <code className="rounded bg-muted px-1 font-mono">4000 0000 0000 0002</code> declines
         </span>
       </p>
-      <Button type="submit" size="lg" className="h-12 w-full text-base" disabled={busy}>
+      <Button type="submit" size="lg" className="h-12 w-full text-base tabular-nums" disabled={busy}>
         {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Lock className="h-4 w-4" />}
-        {startTrial ? `Start ${plan.trialDays}-day free trial` : `Pay ${fmtMoney(plan.priceCents)}`}
+        {startTrial ? `Start ${plan.trialDays}-day free trial` : `Pay ${fmtMoney(payAmountCents)}`}
       </Button>
     </form>
   );
@@ -1414,12 +1782,16 @@ function StripeForm({
 function PayPalForm({
   plan,
   startTrial,
+  payAmountCents,
+  promoCode,
   onComplete,
   onApiError,
   onFormError,
 }: {
   plan: PlanDTO;
   startTrial: boolean;
+  payAmountCents: number;
+  promoCode: string | null;
   onComplete: (gateway: GatewayKey, res: CheckoutResultDTO) => void;
   onApiError: (e: unknown) => void;
   onFormError: (msg: string) => void;
@@ -1443,7 +1815,7 @@ function PayPalForm({
     setBusy(true);
     try {
       const res = await api<CheckoutResultDTO>("/api/checkout", {
-        json: { planId: plan.id, gateway: "PAYPAL", paypalEmail: v, saveMethod: true, startTrial },
+        json: { planId: plan.id, gateway: "PAYPAL", paypalEmail: v, saveMethod: true, startTrial, promoCode: promoCode ?? undefined },
       });
       onComplete("PAYPAL", res);
     } catch (err) {
@@ -1463,7 +1835,8 @@ function PayPalForm({
         </div>
         <div className="relative space-y-4 bg-card p-5">
           <p className="text-sm text-muted-foreground">
-            Pay {fmtMoney(startTrial ? 0 : plan.priceCents)} with your PayPal balance or a linked bank account.
+            Pay <span className="font-semibold tabular-nums text-foreground">{fmtMoney(startTrial ? 0 : payAmountCents)}</span> with your
+            PayPal balance or a linked bank account.
           </p>
           <div className="space-y-1.5">
             <Label htmlFor="pp-email">PayPal email</Label>
@@ -1518,12 +1891,14 @@ function PayPalForm({
 function CryptoForm({
   plan,
   startTrial,
+  promoCode,
   onComplete,
   onApiError,
   onFormError,
 }: {
   plan: PlanDTO;
   startTrial: boolean;
+  promoCode: string | null;
   onComplete: (gateway: GatewayKey, res: CheckoutResultDTO) => void;
   onApiError: (e: unknown) => void;
   onFormError: (msg: string) => void;
@@ -1532,6 +1907,7 @@ function CryptoForm({
   const [busy, setBusy] = useState(false);
   const [quote, setQuote] = useState<CryptoQuoteDTO | null>(null);
   const [subscriptionId, setSubscriptionId] = useState<string | null>(null);
+  const [promoMeta, setPromoMeta] = useState<{ discountCents: number; promoCode: string | null }>({ discountCents: 0, promoCode: null });
   const [blocks, setBlocks] = useState(0);
   const [confirming, setConfirming] = useState(false);
 
@@ -1558,10 +1934,12 @@ function CryptoForm({
     setBusy(true);
     try {
       const res = await api<CheckoutResultDTO>("/api/checkout", {
-        json: { planId: plan.id, gateway: "CRYPTO", walletAddress: v, startTrial },
+        json: { planId: plan.id, gateway: "CRYPTO", walletAddress: v, startTrial, promoCode: promoCode ?? undefined },
       });
       setQuote(res.quote ?? null);
       setSubscriptionId(res.subscriptionId);
+      // The confirm endpoint doesn't echo promo fields — carry them from the quote.
+      setPromoMeta({ discountCents: res.discountCents ?? 0, promoCode: res.promoCode ?? null });
     } catch (err) {
       onApiError(err);
     } finally {
@@ -1575,7 +1953,7 @@ function CryptoForm({
     setConfirming(true);
     try {
       const res = await api<CheckoutResultDTO>("/api/checkout/crypto-confirm", { json: { subscriptionId } });
-      onComplete("CRYPTO", res);
+      onComplete("CRYPTO", { ...res, discountCents: promoMeta.discountCents, promoCode: promoMeta.promoCode });
     } catch (err) {
       onApiError(err);
       setBlocks(2);
@@ -1695,12 +2073,16 @@ function PaymentPanel({
   product,
   plan,
   startTrial,
+  promoCode,
+  payAmountCents,
   onComplete,
   onConflict,
 }: {
   product: ProductDetailDTO;
   plan: PlanDTO;
   startTrial: boolean;
+  promoCode: string | null;
+  payAmountCents: number;
   onComplete: (gateway: GatewayKey, res: CheckoutResultDTO) => void;
   onConflict: () => void;
 }) {
@@ -1762,13 +2144,29 @@ function PaymentPanel({
           </TabsTrigger>
         </TabsList>
         <TabsContent value="STRIPE" className="mt-5">
-          <StripeForm plan={plan} startTrial={startTrial} onComplete={onComplete} onApiError={onApiError} onFormError={onFormError} />
+          <StripeForm
+            plan={plan}
+            startTrial={startTrial}
+            payAmountCents={payAmountCents}
+            promoCode={promoCode}
+            onComplete={onComplete}
+            onApiError={onApiError}
+            onFormError={onFormError}
+          />
         </TabsContent>
         <TabsContent value="PAYPAL" className="mt-5">
-          <PayPalForm plan={plan} startTrial={startTrial} onComplete={onComplete} onApiError={onApiError} onFormError={onFormError} />
+          <PayPalForm
+            plan={plan}
+            startTrial={startTrial}
+            payAmountCents={payAmountCents}
+            promoCode={promoCode}
+            onComplete={onComplete}
+            onApiError={onApiError}
+            onFormError={onFormError}
+          />
         </TabsContent>
         <TabsContent value="CRYPTO" className="mt-5">
-          <CryptoForm plan={plan} startTrial={startTrial} onComplete={onComplete} onApiError={onApiError} onFormError={onFormError} />
+          <CryptoForm plan={plan} startTrial={startTrial} promoCode={promoCode} onComplete={onComplete} onApiError={onApiError} onFormError={onFormError} />
         </TabsContent>
       </Tabs>
       <AnimatePresence>
@@ -1810,15 +2208,25 @@ function SuccessPanel({
   onDiscover: () => void;
 }) {
   const trialEnd = receipt.isTrial ? fmtDate(new Date(Date.now() + plan.trialDays * 86400000).toISOString()) : null;
+  const discountCents = receipt.discountCents ?? 0;
+  const chargedCents = Math.max(0, plan.priceCents - discountCents);
 
   const items: { icon: LucideIcon; text: string }[] = [];
   if (receipt.isTrial && trialEnd) {
     items.push({
       icon: Sparkles,
-      text: `Your ${plan.trialDays}-day free trial has started — nothing due today, first charge ${trialEnd}.`,
+      text: `Your ${plan.trialDays}-day free trial has started — nothing due today, first charge ${trialEnd}${receipt.promoCode ? ` at ${fmtMoney(chargedCents)} (promo rate)` : ""}.`,
     });
   } else {
-    items.push({ icon: CreditCard, text: `${fmtMoney(plan.priceCents)} charged via ${GATEWAY_LABELS[receipt.gateway] ?? receipt.gateway}.` });
+    items.push({
+      icon: CreditCard,
+      text: `${fmtMoney(chargedCents)} charged via ${GATEWAY_LABELS[receipt.gateway] ?? receipt.gateway}${
+        receipt.promoCode ? ` — promo ${receipt.promoCode} (−${fmtMoney(discountCents)})` : ""
+      }.`,
+    });
+  }
+  if (receipt.promoCode && receipt.discountCents > 0 && receipt.isTrial) {
+    items.push({ icon: Tag, text: `Promo ${receipt.promoCode} (−${fmtMoney(discountCents)}) applies from your first charge.` });
   }
   if (receipt.licenseKeyId) {
     items.push({ icon: KeyRound, text: "License key provisioned — view it in My Hub → Licenses." });
@@ -1854,7 +2262,7 @@ function SuccessPanel({
         {receipt.isTrial ? "Your trial has started" : "Payment successful"}
       </h2>
       <p className="mx-auto mt-1.5 max-w-md text-sm text-muted-foreground">
-        {product.title} · {plan.name} — {receipt.isTrial ? "no charge today" : `${fmtMoney(plan.priceCents)} paid`}
+        {product.title} · {plan.name} — {receipt.isTrial ? "no charge today" : `${fmtMoney(chargedCents)} paid`}
       </p>
       <ul className="mx-auto mt-6 max-w-md space-y-2 text-left">
         {items.map((item, i) => (
@@ -1903,6 +2311,7 @@ function CheckoutView() {
   const [receipt, setReceipt] = useState<CheckoutReceipt | null>(null);
   const [alreadySub, setAlreadySub] = useState(false);
   const [startTrial, setStartTrial] = useState(true);
+  const [promo, setPromo] = useState<AppliedPromo | null>(null);
 
   const load = useCallback(async () => {
     if (!params.productId) {
@@ -1938,6 +2347,43 @@ function CheckoutView() {
     }
   }, [loading, product, selectedPlanId, plans]);
 
+  // Validate a promo code against the currently selected plan and apply it.
+  const applyPromo = useCallback(
+    async (code: string): Promise<AppliedPromo> => {
+      if (!selectedPlan) throw new Error("Select a plan first.");
+      const res = await api<PromoValidationDTO>("/api/promos/validate", { json: { code, planId: selectedPlan.id } });
+      const applied: AppliedPromo = { ...res, planId: selectedPlan.id };
+      setPromo(applied);
+      return applied;
+    },
+    [selectedPlan]
+  );
+
+  // Keep an applied promo validated against the plan being purchased — discounts
+  // are plan-scoped server-side, so a plan change re-validates the code and a
+  // code that no longer applies is cleared with a subtle toast.
+  useEffect(() => {
+    if (!promo || !selectedPlan) return;
+    if (promo.planId === selectedPlan.id) return; // already validated for this plan
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await api<PromoValidationDTO>("/api/promos/validate", {
+          json: { code: promo.code, planId: selectedPlan.id },
+        });
+        if (!cancelled) setPromo({ ...res, planId: selectedPlan.id });
+      } catch {
+        if (!cancelled) {
+          setPromo(null);
+          toast({ title: "Promo removed", description: `${promo.code} doesn’t apply to the ${selectedPlan.name} plan.` });
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [promo, selectedPlan, toast]);
+
   if (loading && !product) return <CheckoutSkeleton />;
   if (notFound || !product) {
     return (
@@ -1968,6 +2414,8 @@ function CheckoutView() {
 
   const trialEligible = !!selectedPlan && selectedPlan.trialDays > 0;
   const effectiveStartTrial = trialEligible && startTrial;
+  const promoDiscountCents = promo && selectedPlan ? Math.min(promo.discountCents, selectedPlan.priceCents) : 0;
+  const payAmountCents = selectedPlan ? Math.max(0, selectedPlan.priceCents - promoDiscountCents) : 0;
   const stepIndex = step === "plan" ? 0 : step === "payment" ? 1 : 2;
 
   const complete = (gateway: GatewayKey, res: CheckoutResultDTO) => {
@@ -1977,12 +2425,17 @@ function CheckoutView() {
       licenseKeyId: res.licenseKeyId ?? null,
       isTrial: !!res.isTrial,
       gateway,
+      discountCents: res.discountCents ?? 0,
+      promoCode: res.promoCode ?? null,
     });
     setStep("done");
     refresh();
+    const parts: string[] = [product.title];
+    if (selectedPlan) parts.push(selectedPlan.name);
+    if (res.promoCode) parts.push(`promo ${res.promoCode} (−${fmtMoney(res.discountCents ?? 0)})`);
     toast({
       title: res.isTrial ? "Trial started" : "Payment successful",
-      description: `${product.title} · ${selectedPlan?.name ?? ""}`.trim() || product.title,
+      description: parts.join(" · "),
     });
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
@@ -2012,7 +2465,15 @@ function CheckoutView() {
       </div>
 
       <div className="mt-8 grid gap-8 lg:grid-cols-[1fr_380px]">
-        <OrderSummary product={product} plan={selectedPlan} startTrial={effectiveStartTrial} className="h-fit lg:sticky lg:top-20 lg:order-2 lg:self-start" />
+        <OrderSummary
+          product={product}
+          plan={selectedPlan}
+          startTrial={effectiveStartTrial}
+          promo={promo}
+          onApplyPromo={applyPromo}
+          onRemovePromo={() => setPromo(null)}
+          className="h-fit lg:sticky lg:top-20 lg:order-2 lg:self-start"
+        />
 
         <div className="min-w-0 lg:order-1">
           <AnimatePresence mode="wait">
@@ -2050,9 +2511,15 @@ function CheckoutView() {
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div>
                     <h2 className="text-lg font-bold">Payment</h2>
-                    <p className="mt-0.5 text-sm text-muted-foreground">
+                    <p className="mt-0.5 text-sm tabular-nums text-muted-foreground">
                       {selectedPlan.name} · {fmtMoney(selectedPlan.priceCents)}
                       {intervalSuffix(selectedPlan.interval)}
+                      {promo && (
+                        <span className="font-medium text-emerald-600 dark:text-emerald-400">
+                          {" "}
+                          · {promo.code} −{fmtMoney(promoDiscountCents)}
+                        </span>
+                      )}
                     </p>
                   </div>
                   <Button variant="ghost" size="sm" className="text-muted-foreground" onClick={() => setStep("plan")}>
@@ -2073,7 +2540,15 @@ function CheckoutView() {
                 )}
 
                 <div className="mt-5">
-                  <PaymentPanel product={product} plan={selectedPlan} startTrial={effectiveStartTrial} onComplete={complete} onConflict={() => setAlreadySub(true)} />
+                  <PaymentPanel
+                    product={product}
+                    plan={selectedPlan}
+                    startTrial={effectiveStartTrial}
+                    promoCode={promo?.code ?? null}
+                    payAmountCents={payAmountCents}
+                    onComplete={complete}
+                    onConflict={() => setAlreadySub(true)}
+                  />
                 </div>
               </motion.div>
             )}

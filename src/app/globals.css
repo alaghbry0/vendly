@@ -118,5 +118,56 @@
   }
   body {
     @apply bg-background text-foreground;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+  }
+  ::selection {
+    background: oklch(0.596 0.13 163 / 0.25);
+  }
+  .dark ::selection {
+    background: oklch(0.72 0.15 163 / 0.35);
+  }
+  html {
+    scroll-behavior: smooth;
+  }
+  /* Prominent keyboard focus everywhere, mouse clicks stay clean */
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+  }
+}
+
+@layer utilities {
+  /* Emerald-tinted gradient text for hero accents */
+  .text-gradient-emerald {
+    @apply bg-gradient-to-r from-emerald-600 via-teal-600 to-cyan-600 bg-clip-text text-transparent dark:from-emerald-400 dark:via-teal-400 dark:to-cyan-400;
+  }
+  /* Subtle dotted grid used behind hero sections */
+  .bg-grid-dots {
+    background-image: radial-gradient(circle, oklch(0.596 0.13 163 / 0.14) 1px, transparent 1px);
+    background-size: 22px 22px;
+  }
+  .dark .bg-grid-dots {
+    background-image: radial-gradient(circle, oklch(0.72 0.15 163 / 0.12) 1px, transparent 1px);
+  }
+  /* Card shine sweep on hover (pair with group + overflow-hidden) */
+  .card-shine {
+    position: relative;
+    overflow: hidden;
+  }
+  .card-shine::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(105deg, transparent 40%, oklch(1 0 0 / 0.18) 50%, transparent 60%);
+    transform: translateX(-120%);
+    transition: transform 0.7s ease;
+    pointer-events: none;
+  }
+  .card-shine:hover::after {
+    transform: translateX(120%);
+  }
+  .dark .card-shine::after {
+    background: linear-gradient(105deg, transparent 40%, oklch(1 0 0 / 0.07) 50%, transparent 60%);
   }
 }

@@ -25,6 +25,7 @@ interface AppState {
   bootstrap: () => Promise<void>;
   navigate: (view: View, params?: AppParams) => void;
   switchUser: (userId: string) => Promise<void>;
+  loginUser: (user: SessionUser) => Promise<void>;
   setUser: (user: SessionUser) => void;
   setClock: (clock: ClockDTO) => void;
   refresh: () => void;
@@ -64,6 +65,21 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (u) {
       if (typeof window !== "undefined") localStorage.setItem(STORAGE_KEY, u.id);
       set({ user: u, view: "discover", params: {}, nonce: get().nonce + 1 });
+    }
+  },
+
+  // Sign in as an arbitrary (possibly brand-new) account from /api/auth/login.
+  // Persists the id so bootstrap restores it, sets the session immediately and
+  // refreshes the user list so the new account shows up in the switcher.
+  loginUser: async (user) => {
+    if (typeof window !== "undefined") localStorage.setItem(STORAGE_KEY, user.id);
+    set({ user, nonce: get().nonce + 1 });
+    try {
+      const res = await fetch("/api/bootstrap");
+      const data = (await res.json()) as { users: DemoUser[]; clock: ClockDTO };
+      set({ users: data.users, clock: data.clock, hydrated: true });
+    } catch {
+      // keep the already-set session even if the refresh fails
     }
   },
 

@@ -3,6 +3,9 @@ import { addInterval, getNow, getClockState } from "@/lib/clock";
 import { chargeStoredMethod, type Gateway } from "@/lib/gateways";
 import { generateLicenseKey } from "@/lib/licenses";
 import { dispatchEvent, grantAccess, revokeAccess } from "@/lib/webhooks";
+import { renewalDiscount, recordRedemption } from "@/lib/promos";
+import { notify } from "@/lib/notifications";
+import { settlePendingPayouts } from "@/lib/payouts";
 
 // ============ Subscription lifecycle engine ============
 
@@ -27,6 +30,7 @@ export async function provisionSubscription(opts: {
   paymentMethodId: string | null;
   chargedNow: boolean; // false when trialing
   txnId?: string;
+  promoCodeId?: string | null; // validated promo attached at checkout
 }): Promise<ProvisionResult> {
   const plan = await db.plan.findUnique({
     where: { id: opts.planId },
@@ -37,6 +41,18 @@ export async function provisionSubscription(opts: {
   const now = await getNow();
   const isTrial = plan.trialDays > 0 && !opts.chargedNow;
   const trialEndsAt = isTrial ? new Date(now.getTime() + plan.trialDays * 86400000) : null;
+
+  // Resolve promo discount for the first charge (0 when none/trialing)
+  let promo: { promoId: string; code: string; discountCents: number } | null = null;
+  if (opts.promoCodeId && !isTrial) {
+    const applied = await renewalDiscount({
+      promoCodeId: opts.promoCodeId,
+      promoCyclesUsed: 0,
+      priceCents: plan.priceCents,
+    });
+    if (applied) promo = applied;
+  }
+  const chargeCents = plan.priceCents - (promo?.discountCents ?? 0);
 
   const periodStart = now;
   const periodEnd = addInterval(now, plan.interval);
@@ -52,6 +68,8 @@ export async function provisionSubscription(opts: {
       currentPeriodStart: periodStart,
       currentPeriodEnd: isTrial && trialEndsAt ? trialEndsAt : periodEnd,
       trialEndsAt,
+      promoCodeId: opts.promoCodeId ?? null,
+      promoCyclesUsed: promo ? 1 : 0,
     },
   });
 
@@ -64,7 +82,9 @@ export async function provisionSubscription(opts: {
         subscriptionId: sub.id,
         productId: plan.productId,
         description: `${plan.product.title} — ${plan.name} (${plan.interval}ly)`,
-        amountCents: plan.priceCents,
+        amountCents: chargeCents,
+        discountCents: promo?.discountCents ?? 0,
+        promoCode: promo?.code ?? null,
         status: "PAID",
         gateway: opts.gateway,
         periodStart,
@@ -74,12 +94,35 @@ export async function provisionSubscription(opts: {
       },
     });
     invoiceId = inv.id;
+    if (promo) {
+      await recordRedemption({
+        promoId: promo.promoId,
+        userId: opts.userId,
+        subscriptionId: sub.id,
+        invoiceId: inv.id,
+        discountCents: promo.discountCents,
+      });
+      await notify({
+        userId: plan.product.creatorId,
+        type: "promo_redeemed",
+        title: `Promo ${promo.code} redeemed`,
+        body: `${plan.product.title} — ${plan.name} · −$${(promo.discountCents / 100).toFixed(2)} applied`,
+        icon: "tag",
+      });
+    }
     await dispatchEvent(plan.product.creatorId, "invoice.paid", {
       invoice: { id: inv.id, number: inv.number, amountCents: inv.amountCents },
       subscription: { id: sub.id, plan: plan.name },
       product: { id: plan.productId, title: plan.product.title },
       customer: { id: opts.userId },
       txn: opts.txnId,
+    });
+    await notify({
+      userId: opts.userId,
+      type: "invoice_paid",
+      title: `Payment received — ${inv.number} · $${(inv.amountCents / 100).toFixed(2)}`,
+      body: `${plan.product.title} — ${plan.name}${promo ? ` · promo ${promo.code} (−$${(promo.discountCents / 100).toFixed(2)})` : ""}`,
+      icon: "receipt",
     });
   }
 
@@ -103,6 +146,13 @@ export async function provisionSubscription(opts: {
       product: { id: plan.productId, title: plan.product.title },
       customer: { id: opts.userId },
     });
+    await notify({
+      userId: opts.userId,
+      type: "license_created",
+      title: `License key provisioned — ${plan.product.title}`,
+      body: "Your key is ready in My Hub → Licenses. Activate it on up to 3 devices.",
+      icon: "key",
+    });
   }
 
   await grantAccess(opts.userId, plan.productId, {
@@ -121,6 +171,13 @@ export async function provisionSubscription(opts: {
     },
     product: { id: plan.productId, title: plan.product.title },
     customer: { id: opts.userId },
+  });
+  await notify({
+    userId: plan.product.creatorId,
+    type: "subscription_created",
+    title: `New subscriber — ${plan.product.title}`,
+    body: `${plan.name} · $${(chargeCents / 100).toFixed(2)}${promo ? ` (promo ${promo.code})` : ""} · ${opts.gateway.toLowerCase() === "stripe" ? "Stripe" : opts.gateway.toLowerCase() === "paypal" ? "PayPal" : "Crypto"}${isTrial ? ` · trial (${plan.trialDays}d)` : ""}`,
+    icon: "user-plus",
   });
 
   // bump members count
@@ -163,12 +220,25 @@ export async function runBilling(): Promise<BillingRunSummary> {
     include: { plan: { include: { product: true } }, paymentMethod: true },
   });
   for (const sub of endedTrials) {
-    const charge = await chargeStoredMethod(sub.gateway, sub.paymentMethod || {}, sub.plan.priceCents);
+    // Promo attached at checkout applies to the conversion charge too
+    const promo = await renewalDiscount({
+      promoCodeId: sub.promoCodeId,
+      promoCyclesUsed: sub.promoCyclesUsed,
+      priceCents: sub.plan.priceCents,
+    });
+    const chargeAmt = sub.plan.priceCents - (promo?.discountCents ?? 0);
+    const charge = await chargeStoredMethod(sub.gateway, sub.paymentMethod || {}, chargeAmt);
     if (charge.ok) {
       const periodEnd = addInterval(now, sub.plan.interval);
       await db.subscription.update({
         where: { id: sub.id },
-        data: { status: "ACTIVE", currentPeriodStart: now, currentPeriodEnd: periodEnd, trialEndsAt: null },
+        data: {
+          status: "ACTIVE",
+          currentPeriodStart: now,
+          currentPeriodEnd: periodEnd,
+          trialEndsAt: null,
+          promoCyclesUsed: promo ? sub.promoCyclesUsed + 1 : sub.promoCyclesUsed,
+        },
       });
       const inv = await db.invoice.create({
         data: {
@@ -177,7 +247,9 @@ export async function runBilling(): Promise<BillingRunSummary> {
           subscriptionId: sub.id,
           productId: sub.productId,
           description: `${sub.plan.product.title} — ${sub.plan.name} (trial conversion)`,
-          amountCents: sub.plan.priceCents,
+          amountCents: chargeAmt,
+          discountCents: promo?.discountCents ?? 0,
+          promoCode: promo?.code ?? null,
           status: "PAID",
           gateway: sub.gateway,
           periodStart: now,
@@ -185,12 +257,35 @@ export async function runBilling(): Promise<BillingRunSummary> {
           paidAt: now,
         },
       });
+      if (promo) {
+        await recordRedemption({
+          promoId: promo.promoId,
+          userId: sub.userId,
+          subscriptionId: sub.id,
+          invoiceId: inv.id,
+          discountCents: promo.discountCents,
+        });
+        await notify({
+          userId: sub.plan.product.creatorId,
+          type: "promo_redeemed",
+          title: `Promo ${promo.code} redeemed`,
+          body: `${sub.plan.product.title} trial converted with −$${(promo.discountCents / 100).toFixed(2)}`,
+          icon: "tag",
+        });
+      }
       invoicesCreated++;
       trialsConverted++;
       await dispatchEvent(sub.plan.product.creatorId, "invoice.paid", {
         invoice: { id: inv.id, number: inv.number, amountCents: inv.amountCents },
         subscription: { id: sub.id, plan: sub.plan.name },
         product: { id: sub.productId, title: sub.plan.product.title },
+      });
+      await notify({
+        userId: sub.userId,
+        type: "invoice_paid",
+        title: `Trial ended — charged $${(inv.amountCents / 100).toFixed(2)}`,
+        body: `${sub.plan.product.title} — ${sub.plan.name} · your subscription is now active`,
+        icon: "receipt",
       });
       events.push(`Trial converted → ${sub.plan.product.title} (${sub.plan.name})`);
     } else {
@@ -201,6 +296,13 @@ export async function runBilling(): Promise<BillingRunSummary> {
       await dispatchEvent(sub.plan.product.creatorId, "subscription.past_due", {
         subscription: { id: sub.id, plan: sub.plan.name, reason: charge.error },
         product: { id: sub.productId, title: sub.plan.product.title },
+      });
+      await notify({
+        userId: sub.userId,
+        type: "payment_failed",
+        title: `Trial charge failed — ${sub.plan.product.title}`,
+        body: `${charge.error ?? "Payment declined"} · update your payment method to keep access.`,
+        icon: "alert",
       });
       events.push(`Trial charge failed → ${sub.plan.product.title}`);
     }
@@ -233,12 +335,26 @@ export async function runBilling(): Promise<BillingRunSummary> {
         subscription: { id: sub.id, plan: sub.plan.name, reason: "at_period_end" },
         product: { id: sub.productId, title: sub.plan.product.title },
       });
+      await notify({
+        userId: sub.userId,
+        type: "subscription_canceled",
+        title: `Membership ended — ${sub.plan.product.title}`,
+        body: "Your subscription reached its period end and was canceled as requested. Community roles and license keys were revoked.",
+        icon: "x-circle",
+      });
       canceled++;
       events.push(`Subscription canceled at period end → ${sub.plan.product.title}`);
       continue;
     }
 
-    const charge = await chargeStoredMethod(sub.gateway, sub.paymentMethod || {}, sub.plan.priceCents);
+    // Renewal discount (recurring promo still within its cycle window)
+    const promo = await renewalDiscount({
+      promoCodeId: sub.promoCodeId,
+      promoCyclesUsed: sub.promoCyclesUsed,
+      priceCents: sub.plan.priceCents,
+    });
+    const chargeAmt = sub.plan.priceCents - (promo?.discountCents ?? 0);
+    const charge = await chargeStoredMethod(sub.gateway, sub.paymentMethod || {}, chargeAmt);
     if (charge.ok) {
       const periodEnd = addInterval(now, sub.plan.interval);
       await db.subscription.update({
@@ -248,6 +364,7 @@ export async function runBilling(): Promise<BillingRunSummary> {
           currentPeriodStart: now,
           currentPeriodEnd: periodEnd,
           dunningAttempts: 0,
+          promoCyclesUsed: promo ? sub.promoCyclesUsed + 1 : sub.promoCyclesUsed,
         },
       });
       const inv = await db.invoice.create({
@@ -257,7 +374,9 @@ export async function runBilling(): Promise<BillingRunSummary> {
           subscriptionId: sub.id,
           productId: sub.productId,
           description: `${sub.plan.product.title} — ${sub.plan.name} (${sub.plan.interval}ly renewal)`,
-          amountCents: sub.plan.priceCents,
+          amountCents: chargeAmt,
+          discountCents: promo?.discountCents ?? 0,
+          promoCode: promo?.code ?? null,
           status: "PAID",
           gateway: sub.gateway,
           periodStart: now,
@@ -265,6 +384,15 @@ export async function runBilling(): Promise<BillingRunSummary> {
           paidAt: now,
         },
       });
+      if (promo) {
+        await recordRedemption({
+          promoId: promo.promoId,
+          userId: sub.userId,
+          subscriptionId: sub.id,
+          invoiceId: inv.id,
+          discountCents: promo.discountCents,
+        });
+      }
       invoicesCreated++;
       renewals++;
       await dispatchEvent(sub.plan.product.creatorId, "invoice.paid", {
@@ -273,8 +401,15 @@ export async function runBilling(): Promise<BillingRunSummary> {
         product: { id: sub.productId, title: sub.plan.product.title },
       });
       await dispatchEvent(sub.plan.product.creatorId, "subscription.renewed", {
-        subscription: { id: sub.id, plan: sub.plan.name, amountCents: sub.plan.priceCents },
+        subscription: { id: sub.id, plan: sub.plan.name, amountCents: chargeAmt },
         product: { id: sub.productId, title: sub.plan.product.title },
+      });
+      await notify({
+        userId: sub.userId,
+        type: "invoice_paid",
+        title: `Renewal charged — ${inv.number} · $${(inv.amountCents / 100).toFixed(2)}`,
+        body: `${sub.plan.product.title} — ${sub.plan.name}${promo ? ` · promo ${promo.code} (−$${(promo.discountCents / 100).toFixed(2)})` : ""}`,
+        icon: "receipt",
       });
       events.push(`Renewed → ${sub.plan.product.title} (${sub.plan.name})`);
     } else {
@@ -295,7 +430,9 @@ export async function runBilling(): Promise<BillingRunSummary> {
           subscriptionId: sub.id,
           productId: sub.productId,
           description: `${sub.plan.product.title} — ${sub.plan.name} (renewal attempt #${attempts})`,
-          amountCents: sub.plan.priceCents,
+          amountCents: chargeAmt,
+          discountCents: promo?.discountCents ?? 0,
+          promoCode: promo?.code ?? null,
           status: "FAILED",
           gateway: sub.gateway,
           createdAt: now,
@@ -306,6 +443,13 @@ export async function runBilling(): Promise<BillingRunSummary> {
         subscription: { id: sub.id, plan: sub.plan.name, attempt: attempts },
         product: { id: sub.productId, title: sub.plan.product.title },
         error: charge.error,
+      });
+      await notify({
+        userId: sub.userId,
+        type: "payment_failed",
+        title: `Payment failed — ${sub.plan.product.title}`,
+        body: `${charge.error ?? "Payment declined"} · retry #${attempts}${finalCancel ? " — access will be revoked" : " · we'll retry on the next run"}`,
+        icon: "alert",
       });
       if (finalCancel) {
         canceled++;
@@ -319,6 +463,13 @@ export async function runBilling(): Promise<BillingRunSummary> {
           subscription: { id: sub.id, plan: sub.plan.name, reason: "dunning_exhausted" },
           product: { id: sub.productId, title: sub.plan.product.title },
         });
+        await notify({
+          userId: sub.userId,
+          type: "subscription_canceled",
+          title: `Membership ended — ${sub.plan.product.title}`,
+          body: "We couldn't process payment after 3 attempts, so the subscription was canceled and access revoked.",
+          icon: "x-circle",
+        });
         events.push(`Dunning exhausted, canceled → ${sub.plan.product.title}`);
       } else {
         await dispatchEvent(sub.plan.product.creatorId, "subscription.past_due", {
@@ -329,6 +480,11 @@ export async function runBilling(): Promise<BillingRunSummary> {
       }
     }
   }
+
+  // 4) Settle pending creator payouts (the settlement window closes when the
+  // billing engine runs — i.e. each time-machine advance).
+  const payoutsSettled = await settlePendingPayouts(now);
+  if (payoutsSettled > 0) events.push(`${payoutsSettled} payout${payoutsSettled === 1 ? "" : "s"} settled`);
 
   const clock = await getClockState();
   return {

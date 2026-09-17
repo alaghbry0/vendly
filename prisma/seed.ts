@@ -28,6 +28,11 @@ async function main() {
   await db.review.deleteMany();
   await db.digitalAsset.deleteMany();
   await db.plan.deleteMany();
+  await db.promoRedemption.deleteMany();
+  await db.promoCode.deleteMany();
+  await db.wishlistItem.deleteMany();
+  await db.notification.deleteMany();
+  await db.payout.deleteMany();
   await db.product.deleteMany();
   await db.user.deleteMany();
   await db.systemClock.deleteMany();
@@ -577,6 +582,131 @@ async function main() {
 
   await db.systemClock.create({ data: { id: "main", simulatedNow: null, label: "Live" } });
 
+  // ============ Promo codes ============
+  const promoWelcome = await db.promoCode.create({
+    data: {
+      creatorId: bob.id,
+      code: "WELCOME20",
+      kind: "PERCENT",
+      value: 20,
+      durationMonths: 3,
+      maxRedemptions: 0,
+      createdAt: daysAgo(60),
+    },
+  });
+  const promoLaunch = await db.promoCode.create({
+    data: {
+      creatorId: bob.id,
+      productId: tradeSignals.id,
+      code: "LAUNCH10",
+      kind: "FIXED",
+      value: 1000,
+      durationMonths: 1,
+      maxRedemptions: 100,
+      expiresAt: daysAhead(30),
+      createdAt: daysAgo(45),
+    },
+  });
+  const promoSummer = await db.promoCode.create({
+    data: {
+      creatorId: bob.id,
+      code: "SUMMER22",
+      kind: "PERCENT",
+      value: 30,
+      durationMonths: 1,
+      maxRedemptions: 50,
+      expiresAt: daysAgo(10),
+      active: false,
+      createdAt: daysAgo(120),
+    },
+  });
+  const promoFit = await db.promoCode.create({
+    data: {
+      creatorId: carol.id,
+      productId: fitcore.id,
+      code: "FITFAM15",
+      kind: "PERCENT",
+      value: 15,
+      durationMonths: 2,
+      createdAt: daysAgo(30),
+    },
+  });
+
+  // Historical redemptions so creator stats have real numbers to show.
+  const subsForRedemption = await db.subscription.findMany({
+    where: { status: { in: ["ACTIVE", "CANCELED"] } },
+    select: { id: true, userId: true },
+    take: 8,
+  });
+  async function seedRedemptions(
+    promoId: string,
+    count: number,
+    discountCents: number,
+    oldestDaysAgo: number
+  ) {
+    for (let i = 0; i < count; i++) {
+      const sub = subsForRedemption[i % Math.max(1, subsForRedemption.length)];
+      if (!sub) break;
+      await db.promoRedemption.create({
+        data: {
+          promoId,
+          userId: sub.userId,
+          subscriptionId: sub.id,
+          invoiceId: null,
+          discountCents,
+          createdAt: daysAgo(oldestDaysAgo - Math.round((i / Math.max(1, count - 1)) * (oldestDaysAgo - 1))),
+        },
+      });
+    }
+    await db.promoCode.update({ where: { id: promoId }, data: { timesRedeemed: count } });
+  }
+  await seedRedemptions(promoLaunch.id, 41, 1000, 44);
+  await seedRedemptions(promoSummer.id, 27, 1470, 118);
+  await seedRedemptions(promoFit.id, 12, 585, 29);
+  await seedRedemptions(promoWelcome.id, 6, 980, 58);
+
+  // ============ Wishlists ============
+  await db.wishlistItem.create({ data: { userId: alice.id, productId: fitcore.id, createdAt: daysAgo(9) } });
+  await db.wishlistItem.create({ data: { userId: alice.id, productId: streamAcademy.id, createdAt: daysAgo(4) } });
+  await db.wishlistItem.create({ data: { userId: dave.id, productId: saasBlueprint.id, createdAt: daysAgo(6) } });
+  await db.wishlistItem.create({ data: { userId: grace.id, productId: tradeSignals.id, createdAt: daysAgo(12) } });
+  await db.wishlistItem.create({ data: { userId: eve.id, productId: designVault.id, createdAt: daysAgo(2) } });
+
+  // ============ Payouts ============
+  await db.payout.create({
+    data: { creatorId: bob.id, amountCents: 62000, feeCents: 1914, status: "PAID", method: "BANK", createdAt: daysAgo(25), paidAt: daysAgo(22) },
+  });
+  await db.payout.create({
+    data: { creatorId: bob.id, amountCents: 34000, feeCents: 1050, status: "PAID", method: "BANK", createdAt: daysAgo(12), paidAt: daysAgo(9) },
+  });
+  await db.payout.create({
+    data: { creatorId: carol.id, amountCents: 4200, feeCents: 130, status: "PAID", method: "PAYPAL", createdAt: daysAgo(8), paidAt: daysAgo(6) },
+  });
+
+  // ============ Notifications ============
+  const notif = (userId: string, type: string, title: string, body: string | null, icon: string, read: boolean, ago: number) =>
+    db.notification.create({ data: { userId, type, title, body, icon, read, createdAt: daysAgo(ago) } });
+
+  // Alex — the buyer story
+  await notif(alice.id, "invoice_paid", "Payment received — INV-1028 · $49.00", "Trade Signals Pro — Pro · renewal charged", "receipt", true, 2.1);
+  await notif(alice.id, "invoice_paid", "Payment received — INV-1013 · $79.00", "SaaS Growth Blueprint — Founder · renewal charged", "receipt", true, 9);
+  await notif(alice.id, "license_created", "License key provisioned — Crypto Alpha Group", "Your key is ready in My Hub → Licenses. Activate it on up to 3 devices.", "key", true, 34);
+  await notif(alice.id, "subscription_canceled", "Membership ended — Design Vault", "Your subscription reached its period end and was canceled as requested.", "x-circle", true, 20);
+  await notif(alice.id, "invoice_paid", "Payment received — INV-1031 · $49.00", "Trade Signals Pro — Pro · renewal charged", "receipt", false, 0.2);
+
+  // David — the dunning story
+  await notif(dave.id, "payment_failed", "Payment failed — Crypto Alpha Group", "Card declined by issuer. · retry #2 · we'll retry on the next run", "alert", false, 0.4);
+
+  // Marcus — the creator story
+  await notif(bob.id, "subscription_created", "New subscriber — Trade Signals Pro", "Pro · $49.00 · Stripe", "user-plus", false, 0.1);
+  await notif(bob.id, "promo_redeemed", "Promo LAUNCH10 redeemed", "Trade Signals Pro — Pro · −$10.00 applied", "tag", false, 0.3);
+  await notif(bob.id, "review_new", "New ★★★★★ review — Trade Signals Pro", "Signals have been spot-on for 3 months straight... — Gina Park", "star", false, 1.2);
+  await notif(bob.id, "payout_paid", "Payout of $340.00 sent", "Bank transfer completed after the settlement window.", "bank", true, 9);
+
+  // Aisha — the creator story
+  await notif(carol.id, "subscription_created", "New subscriber — FitCore Coaching", "Coached · $39.00 · Stripe", "user-plus", false, 0.7);
+  await notif(carol.id, "review_new", "New ★★★★☆ review — FitCore Coaching", "“The coached plan is worth every penny…” · Emma Sokolov", "star", true, 3.4);
+
   console.log("✅ Seed complete:", {
     users: await db.user.count(),
     products: await db.product.count(),
@@ -587,6 +717,11 @@ async function main() {
     grants: await db.accessGrant.count(),
     endpoints: await db.webhookEndpoint.count(),
     deliveries: await db.webhookDelivery.count(),
+    promos: await db.promoCode.count(),
+    redemptions: await db.promoRedemption.count(),
+    wishlist: await db.wishlistItem.count(),
+    notifications: await db.notification.count(),
+    payouts: await db.payout.count(),
   });
 }
 

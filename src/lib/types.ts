@@ -121,6 +121,8 @@ export interface InvoiceDTO {
   number: string;
   description: string;
   amountCents: number;
+  discountCents?: number;
+  promoCode?: string | null;
   status: string;
   gateway: string | null;
   createdAt: string;
@@ -194,6 +196,70 @@ export interface AnalyticsDTO {
   topProducts: { id: string; title: string; coverTheme: string; members: number; mrrCents: number; revenueCents: number }[];
   gatewayBreakdown: { gateway: string; count: number; revenueCents: number }[];
   recentActivity: { id: string; type: string; message: string; amountCents: number | null; at: string }[];
+}
+
+// ============ Promotions ============
+export interface PromoCodeDTO {
+  id: string;
+  code: string;
+  kind: "PERCENT" | "FIXED";
+  value: number;
+  productId: string | null;
+  productTitle: string | null;
+  maxRedemptions: number;
+  timesRedeemed: number;
+  durationMonths: number;
+  expiresAt: string | null;
+  active: boolean;
+  createdAt: string;
+}
+
+export interface PromoValidationDTO {
+  valid: true;
+  code: string;
+  kind: "PERCENT" | "FIXED";
+  value: number;
+  discountCents: number;
+  durationMonths: number;
+  description: string;
+}
+
+// ============ Engagement ============
+export interface WishlistItemDTO {
+  id: string;
+  createdAt: string;
+  product: ProductCardDTO;
+}
+
+export interface NotificationDTO {
+  id: string;
+  type: string;
+  title: string;
+  body: string | null;
+  icon: string;
+  read: boolean;
+  createdAt: string;
+  target: { view: "portal" | "creator"; tab: string } | null;
+}
+
+// ============ Payouts ============
+export interface PayoutDTO {
+  id: string;
+  amountCents: number;
+  feeCents: number;
+  status: "PENDING" | "PAID";
+  method: string;
+  createdAt: string;
+  paidAt: string | null;
+}
+
+export interface PayoutBalanceDTO {
+  grossRevenueCents: number;
+  platformFeeCents: number;
+  availableCents: number;
+  pendingCents: number;
+  lifetimePaidCents: number;
+  feeBps: number;
 }
 
 export interface ClockDTO {
