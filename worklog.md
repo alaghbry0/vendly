@@ -300,3 +300,109 @@ Stage Summary:
 - App status: fully functional, eslint clean, tsc clean (app code), zero console/server errors, dev server running via the double-fork daemon launcher (survives tool-session teardown)
 - Unresolved / risks: (1) the dev server must be relaunched via `python3 /tmp/launch-dev.py` if the container restarts — plain background starts get reaped; (2) notification polling is 30s client-side only (no websockets) — fine for the demo scale; (3) promo durationMonths is capped at 12 by API validation; (4) examples/ and skills/ folders carry pre-existing tsc errors unrelated to the app (ignored by design); (5) ~4.1GB total RAM — avoid running agent-browser + VLM + dev server simultaneously (OOM risk)
 - Recommended next phase: Discord/Telegram grant-state drill-down in portal, creator product editing (currently create-only + pause), invoice PDF receipts, affiliate/referral tracking, or a giveaway/drop campaign system — all fit the existing schema patterns
+
+---
+Task ID: 7
+Agent: main (Z.ai Code)
+Task: Round-4 backend — affiliate/referral system + plan management endpoints
+
+Work Log:
+- QA sweep first: all views stable (discover/portal/creator charts render, zero console errors) — no bugs to fix, proceeded to new features
+- Prisma schema: added AffiliateProgram (productId unique, creatorId, commissionBps, active), AffiliateLink (code unique, userId, programId, clicks, conversions, active, @@unique userId+programId), AffiliateCommission (linkId, affiliateId, creatorId, productId, subscriptionId, amountCents, status PENDING|PAID, paidAt); Subscription gained refLinkId (referral attribution); db:push applied, dev server restarted via /tmp/launch-dev.py daemon (stale Prisma client otherwise)
+- New lib src/lib/affiliates.ts: resolveReferral (soft-validates ?ref code against product + buyer), recordClick, createReferralCommission (idempotent per subscription; mints PENDING commission = firstInvoice × bps; notifies affiliate with affiliate_earned), settlePendingCommissions (PAID on billing-run cadence + affiliate_paid notification), generateReferralCode
+- billing.ts: provisionSubscription accepts refLinkId and mints the commission after the first paid invoice; trial-conversion path creates the commission when a referred trial converts; runBilling step 5 settles pending commissions ("N affiliate commissions settled" event)
+- checkout route: body.refCode soft-validated (invalid → ignored, never blocks checkout; own link → ignored); success responses include referral {code, affiliateName, commissionCents}; crypto flow carries refLinkId through crypto-confirm
+- notifications.ts: new types affiliate_earned/affiliate_paid → portal/affiliates; affiliate_joined → creator/affiliates; new "share" icon key
+- New API routes: POST /api/affiliates/track {code, productId} (public, click tracking); GET /api/affiliates/links (my links + performance + paid/pending earnings + product/creator info); POST /api/affiliates/links {productId} (join program, idempotent, name-derived code with random fallback, blocks own product, notifies creator affiliate_joined); GET /api/affiliates/programs (creator: programs with per-affiliate rows + totals); POST /api/affiliates/programs {productId, commissionBps 100-9000, active} (upsert, 1 program per product)
+- Plan management: POST /api/products/[id]/plans (create tier: name/priceCents 100-1M/interval/trialDays ≤30/badge/features ≤8, max 6 tiers, 409 dupe name); PATCH /api/plans/[id] (edit any field incl. active soft-delete with "at least one active plan" guard)
+- ProductDetailDTO gained affiliateBps (null when no active program) — serializeProductDetail reads product.affiliateProgram; products/[id] GET + PATCH include it
+- types.ts: AffiliateLinkDTO, AffiliateRowDTO, AffiliateProgramDTO
+- seed.ts: 3 programs (TSP 30% Marcus, SaaS Blueprint 25% Marcus, FitCore 20% Aisha); 4 links: alex (184 clicks/6 conv), gina (42/2), emma (67/1), dave (12/0); 8 commissions (Alex 4 PAID $88.20 + 1 PENDING $14.70, Gina 1+1, Emma 1 PAID); 2 notifications (affiliate_earned for Alex unread, affiliate_joined for Marcus)
+
+NEW API CONTRACTS (round 4, for frontend agents):
+- POST /api/affiliates/track {code, productId} → {ok} (public; 404 if link/program inactive or product mismatch)
+- GET /api/affiliates/links → {links: AffiliateLinkDTO[]} — {id, code, clicks, conversions, active, createdAt, commissionBps, earnedPaidCents, earnedPendingCents, product: {id, title, coverTheme, status, creator: {id, name, avatarColor}}}
+- POST /api/affiliates/links {productId} → {link: {id, code, clicks, conversions}} (201 new / 200 existing; 404 no program; 400 own product)
+- GET /api/affiliates/programs (creator) → {programs: AffiliateProgramDTO[]} — {id, commissionBps, active, createdAt, product: {id,title,coverTheme,status}, affiliateCount, totalClicks, totalConversions, paidCents, pendingCents, affiliates: [{id, code, clicks, conversions, active, joinedAt, earnedPaidCents, earnedPendingCents, affiliate: {id,name,email,avatarColor}}]}
+- POST /api/affiliates/programs {productId, commissionBps, active?} → {program} (upsert; bps 100–9000)
+- POST /api/products/{id}/plans {name, description?, priceCents, interval, trialDays?, badge?, features[], sortOrder?} → 201 {plan: PlanDTO} (409 dupe name, 400 price 100–1,000,000¢ or >6 tiers)
+- PATCH /api/plans/{id} {name?, description?, priceCents?, interval?, trialDays?, badge?, features?, active?} → {plan} (400 if deactivating the last active plan)
+- POST /api/checkout accepts refCode (soft); success responses include referral: {code, affiliateName, commissionCents} | null
+- ProductDetailDTO.affiliateBps: number | null (3000 = 30%)
+- Referral link format for UI: `${window.location.origin}/?ref=CODE&product=PRODUCT_ID` — landing page reads ?ref + ?product from URL once, stores in sessionStorage ("vendly:ref" = code, "vendly:refProduct" = productId), tracks the click, navigates to the product
+- Notification icons: existing keys + "share"; targets: affiliate_* → portal tab "affiliates" / creator tab "affiliates"
+- Seeded demo: Alex = affiliate of Trade Signals Pro (code "alex", $88.20 paid + $14.70 pending); Gina "gina", Emma "emma" (FitCore), David "dave" (SaaS Blueprint); Marcus has 2 programs (TSP 30%: 2 affiliates, $102.90 paid, $29.40 pending)
+
+Stage Summary:
+- Full affiliate lifecycle verified end-to-end with curl: click tracked (184→185) → checkout with refCode "alex" → commission $14.70 PENDING + notification with portal/affiliates target → time machine +1d → "3 affiliate commissions settled" → Alex paid $88.20→$117.60, pending $0; plans create+patch verified (Team $99→$89 "Teams" badge); program join idempotent + self-referral blocked; database re-seeded pristine, clock Live
+- Next: Task 8-a portal Affiliates tab (subagent), Task 8-b creator Affiliates tab + product edit dialog with plans editor (subagent), Task 8-c marketplace referral attribution + product-page affiliate CTA (main)
+
+---
+Task ID: 8-a
+Agent: general-purpose (portal affiliates tab)
+Task: Add an "Affiliates" tab to the customer portal (My Hub) — referral link cards with performance + earnings, stats row, how-it-works dialog and empty state
+
+Work Log:
+- Read worklog.md (esp. Task 7 round-4 NEW API CONTRACTS + Key Files), types.ts/store/api/format/shared, and the full portal-views.tsx; verified the live contract with curl as Alex (GET /api/affiliates/links → 1 link: code "alex" on Trade Signals Pro, 184 clicks, 6 conversions, $88.20 paid + $14.70 pending, commissionBps 3000)
+- Wired the tab: "affiliates" added to the PortalTab union + PORTAL_TABS registry (Share2 icon, between Wishlist and Invoices) — desktop sidebar, mobile role=tab pill nav and the skeleton all render from the one registry; tab stays store-driven (navigate("portal", {portalTab: "affiliates"})), so notification deep-links land for free
+- Data: GET /api/affiliates/links added to usePortalData's single Promise.all (mount/nonce/user-id), stored as PortalData.affiliateLinks — the wishlist pattern
+- AffiliatesTab: SectionHeader "Affiliates / Earn commissions by sharing products you love." + ghost "How it works" button; stats row (only when links exist): Paid earnings, Pending earnings (amber-tinted card border/bg + amber icon via arbitrary child variants on StatCard), Total clicks, Conversions with guarded conversion-rate sub; link-card grid sm:grid-cols-2 xl:grid-cols-3 sorted newest-first
+- AffiliateLinkCard: ProductCover banner (aspect-[16/8], group-hover zoom) with the "Earn 30%" emerald→teal gradient commission chip overlaid (amber "Paused" chip when the link is inactive) — cover gets category="OTHER" (Sparkles watermark) because AffiliateLinkDTO.product carries no category; creator row (UserAvatar + name), clickable product title → product page; referral link `${origin}/?ref=CODE&product=ID` in a mono readonly Input (select-all on focus, title attr carries the full URL) + 44px copy button (Check swap + "Referral link copied" toast) + 44px ghost Open button (window.open _blank noopener — doubles as a demo of the referral landing flow); performance mini-grid clicks / conversions / conv-rate (tabular-nums, guarded divide); earnings row "Paid $X" emerald + "Pending $Y" amber via fmtMoney {cents:true}; "Joined {timeAgo}" caption; hover lift + focus-within emerald ring; framer-motion staggered entrance
+- HowItWorksDialog: 3 numbered steps with emerald icon chips (Share2 / UserPlus / Banknote) — share your link → someone subscribes → "You earn 30% of their first invoice" (personalized from the member's commissionBps; "up to X%" when their programs differ; generic "a share" with no links) settling on the next billing run
+- Empty state (no links): EmptyState (Share2) "You're not promoting anything yet" + "Find a product with an affiliate program on its page and grab your link." + "Browse marketplace" CTA → navigate("discover")
+- Root grid gained grid-cols-1 for mobile — the same latent pill-nav blowout Task 5-c fixed in creator-views; with 9 pills the portal mobile row now scrolls inside its overflow-x-auto wrapper instead of expanding the page
+- Live QA (agent-browser, desktop 1440px + 390×844, light + dark): tab present in both navs; Alex's card renders $88.20/$14.70/184 clicks/6 conversions + "3.3% conversion rate" + "Joined Jul 9, 2026"; copy → toast + check swap; Open → new tab at /?ref=alex&product=… ; clicking the affiliate_earned notification deep-links straight to the tab; Farid (no links) sees the empty state, generic dialog copy, CTA → Discover; mobile buttons measure exactly 44×44 with no page overflow (document scrollWidth 390 = viewport, pill row scrolls internally); VLM review light 8.5/10 + dark flawless (its mobile "cutoff" flags were false positives — disproved with DOM bounding-box measurements); zero console/page errors; demo data left pristine (API still returns 184/6/8820/1470; the QA-read affiliate notification restored to unread via a throwaway Prisma script, then deleted)
+- Verification: bun run lint exit 0 (zero output); bunx tsc --noEmit → zero errors in app code; dev.log clean (GET / 200, no compile errors)
+
+Stage Summary:
+- Portal now has 9 store-driven tabs; Affiliates fully implemented against the Task 7 round-4 contract using the file's established patterns (single Promise.all fetch, SectionHeader/StatCard/EmptyState, motion stagger, emerald/amber-only accents, tabular-nums money, 44px touch targets, aria labels on copy/open)
+- Contract notes for other agents: AffiliateLinkDTO.product has NO category field (ProductCover gets "OTHER" → Sparkles watermark); commissionBps→percent = bps/100 (kept precise for non-whole rates); timeAgo(createdAt) renders "Joined Jul 9, 2026" because the seed is >30d old (falls back to fmtDate — correct); ?ref landing attribution itself is Task 8-c's scope, so the Open button just window.opens the URL today
+- Files modified: src/components/views/portal-views.tsx only (+354/−10)
+- No contract mismatches — GET /api/affiliates/links behaved exactly as documented in the Task 7 round-4 section
+
+---
+Task ID: 8-b
+Agent: general-purpose (creator affiliates + product editing) — entry appended by main agent after subagent hit context deadline post-implementation
+Task: Creator Studio "Affiliates" tab + product edit dialog with plans editor
+
+Work Log:
+- (Agent completed the implementation in src/components/views/creator-views.tsx before timing out; main agent verified everything below live)
+- AffiliatesTab (wired as tab "affiliates", Megaphone icon, between Promos and Webhooks): stats row (Active programs, Total affiliates, Commissions paid w/ pending sub, Clicks driven w/ conversions sub); program cards (cover, commission badge "30% of first invoice", active Switch, per-program mini-grid, affiliate roster rows w/ avatar + mono code + CopyButton + clicks/conversions/paid/pending/joined); Launch-program flow for un-programmed products (commission quick-set + POST upsert); explainer banner + "Open time machine" link; EmptyState with CTA
+- EditProductDialog on the Products tab ("Edit product and tiers" PenLine action): Details tab (title/tagline/description/category/status/featured/accessType checkboxes/discord+telegram inputs → PATCH /api/products/{id}) + Plans tab (per-tier edit: name/price/interval/trial/badge/features/active → PATCH /api/plans/{id}; "+ Add tier" → POST /api/products/{id}/plans; "deactivated tiers stay live for existing subscribers" note; "Price changes apply to new subscribers only" note; 409/400 inline)
+- Live-verified by main agent as Marcus: Affiliates tab renders "2 programs · 3 affiliates", TSP 30% w/ Alex+Gina roster, $102.90 paid / $29.40 pending; edit dialog → Plans tab lists Starter/Pro/Elite/Elite Annual with badges + Add tier; tagline edit → Save → PATCH round-trip confirmed via API (then restored); zero console errors; lint + tsc clean
+
+Stage Summary:
+- Creator Studio now has 9 tabs; affiliates program management + full product/plan editing shipped. File: src/components/views/creator-views.tsx only (5,579 lines)
+
+---
+Task ID: 8-c
+Agent: main (Z.ai Code)
+Task: Marketplace referral attribution + product-page affiliate CTA (round-4 frontend, marketplace side)
+
+Work Log:
+- Referral helpers in marketplace-views.tsx: getStoredRef/clearStoredRef (sessionStorage vendly:ref + vendly:refProduct), useReferralLanding hook — on Discover mount reads ?ref=CODE&product=ID once, stores attribution, strips URL params via history.replaceState, fire-and-forget POST /api/affiliates/track, toast "Welcome via a referral link", navigates to the product page
+- AffiliateCard on the product page (below the pricing column, lg:ml-auto lg:w-[420px]): emerald gradient card with Megaphone icon, "Earn 30% as an affiliate" + join CTA → POST /api/affiliates/links; once joined shows the full share URL (?ref=CODE&product=ID) in a mono box + CopyButton + ExternalLink open button + clicks/conversions stats + "My earnings →" deep-link to portal affiliates tab; hidden for the product's own creator and when no active program; card-shine hover sweep
+- Checkout referral: CheckoutView computes activeRefCode (stored attribution matching the product), threads refCode through PaymentPanel → StripeForm/PayPalForm/CryptoForm → POST /api/checkout body (crypto carries referral meta through crypto-confirm); order-summary header shows "· referred via alex" chip; success screen gains "Referred by Alex Rivera (alex) — they earn a commission on your first invoice." row; complete() clears the stored attribution so it doesn't chain to the next purchase
+- Live end-to-end verification: opened /?ref=alex&product=<TSP> → redirected to product + URL cleaned + attribution stored; signed in as qa-r4@vendly.dev → checkout shows "Pro · $49/mo · referred via alex" → paid $49 (4242) → success screen "Referred by Alex Rivera (alex)…" + sessionStorage cleared + zero console errors; server-side: Alex's link clicks 184→185, conversions 6→7, pending $14.70→$29.40, "Referral commission — $14.70 pending" notification
+- UX note: default trial toggle ON means the pay button reads "Start 3-day free trial" — referred trials mint the commission at conversion (billing engine path), immediate commission requires toggling trial off
+
+Stage Summary:
+- The referral loop is complete end-to-end: share link → landing (click tracked + toast + redirect) → checkout attribution chip → commission + notifications → portal Affiliates tab earnings; database re-seeded pristine
+
+---
+Task ID: 9 (final)
+Agent: main (Z.ai Code)
+Task: Round-4 completion — styling polish, end-to-end verification, handover
+
+Work Log:
+- Styling polish: How-it-works section gained a 4th step "Earn as an affiliate" (Megaphone icon, "up to 30% of every member you bring" copy; grid now md:grid-cols-2 xl:grid-cols-4) surfacing the new feature on the landing page; footer Members column gained an "Affiliate earnings" deep-link to portal affiliates
+- Final end-to-end agent-browser verification on pristine data: discover (9 wishlist hearts, bell "2 unread", footer link, How-it-works 4 steps incl. affiliate); product page as Alex renders the AffiliateCard in joined state (link box + stats); portal Affiliates tab (stats $88.20/$14.70, "How it works" dialog, referral link box); creator Affiliates tab (2 programs · 3 affiliates, roster); product edit dialog → Plans tab (4 tiers + Add tier) + Details save round-trip (tagline edit verified via API then restored); mobile 390px (no page overflow, footer visible); dark mode; zero console errors throughout
+- VLM design review of the affiliates tab: 7.5/10 (strengths: hierarchy, state color; suggestions were subjective — the flagged "black N circle" is the Next.js dev-tools widget, not app UI)
+- QA screenshots cleaned; database re-seeded pristine (9 users, 6 products, 15 subs, 4 promos, 86 redemptions, 5 wishlist, 14 notifications, 3 payouts, 3 affiliate programs, 4 links, 8 commissions); clock Live; eslint clean; tsc clean (app code)
+
+Stage Summary — round 4 delivered:
+- NEW FEATURE SYSTEM: Affiliates & referrals (Whop's signature growth loop) — creator programs with per-product commission (upsert, 1-90%), member referral links (?ref=CODE landing with click tracking + toast + redirect + URL cleanup), checkout attribution (order-summary chip + success-screen "Referred by" row + post-purchase attribution clear), PENDING commissions minted on first paid invoice (incl. referred-trial conversions), settlement on billing-run cadence (time machine), notifications for earned/settled/joined with deep-links, portal Affiliates tab (stats, link cards with copy/open/share, How-it-works dialog), creator Affiliates tab (program cards, commission editor, affiliate roster, launch-program flow)
+- NEW FEATURE: Creator product editing — full Edit dialog (details PATCH) + plans editor (create/edit/deactivate tiers with guards and inline 409/400 handling), addressing the previous create-only gap
+- Referral loop verified end-to-end live: /?ref=alex&product=<TSP> → product page → checkout "referred via alex" → Pay $49 → "Referred by Alex Rivera (alex)…" → Alex pending $14.70→$29.40 + notification → settle on +1d advance
+- Unresolved / risks: (1) dev server must be relaunched via `python3 /tmp/launch-dev.py` if the container restarts; (2) affiliate commissions are first-invoice-only by design (documented in UI copy); (3) referred-trial commissions mint at conversion — correct but subtle; (4) examples/ + skills/ folders carry pre-existing tsc errors (ignored by design); (5) ~4.1GB RAM — avoid agent-browser + VLM + dev server simultaneously
+- Recommended next phase: Discord/Telegram grant-state drill-down in portal (per-grant sync history), invoice PDF receipts, giveaway/drop campaigns with waitlists, creator revenue forecast chart, or an activity feed aggregating webhook events

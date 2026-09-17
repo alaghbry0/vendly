@@ -13,6 +13,7 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
         plans: { where: { active: true }, orderBy: { sortOrder: "asc" } },
         assets: { orderBy: { createdAt: "asc" } },
         reviews: { orderBy: { createdAt: "desc" }, take: 20 },
+        affiliateProgram: { select: { commissionBps: true, active: true } },
       },
     });
     if (!product) throw new HttpError(404, "Product not found");
@@ -65,6 +66,7 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
             plans: { where: { active: true }, orderBy: { sortOrder: "asc" } },
             assets: { orderBy: { createdAt: "asc" } },
             reviews: { orderBy: { createdAt: "desc" }, take: 20 },
+            affiliateProgram: { select: { commissionBps: true, active: true } },
           },
         })
       : null;

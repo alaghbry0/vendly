@@ -33,6 +33,9 @@ model User {
   wishlistItems    WishlistItem[]
   notifications    Notification[]
   payouts          Payout[]
+  affiliatePrograms AffiliateProgram[]
+  affiliateLinks   AffiliateLink[]
+  affiliateCommissions AffiliateCommission[]
 }
 
 // ============ Catalog ============
@@ -65,6 +68,7 @@ model Product {
   reviews       Review[]
   promoCodes    PromoCode[]
   wishlistItems WishlistItem[]
+  affiliateProgram AffiliateProgram?
 }
 
 model Plan {
@@ -104,11 +108,12 @@ model Subscription {
   cancelAtPeriodEnd Boolean   @default(false)
   canceledAt        DateTime?
   trialEndsAt       DateTime?
-  dunningAttempts   Int       @default(0)
-  promoCodeId       String?
-  promoCyclesUsed   Int       @default(0) // how many invoices the promo discount has been applied to
-  createdAt         DateTime  @default(now())
-  updatedAt         DateTime  @updatedAt
+  dunningAttempts    Int       @default(0)
+  promoCodeId        String?
+  promoCyclesUsed    Int       @default(0) // how many invoices the promo discount has been applied to
+  refLinkId          String?   // affiliate link that referred this subscription (attribution)
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
 
   invoices Invoice[]
   licenses LicenseKey[]
@@ -334,4 +339,51 @@ model Payout {
   method      String    @default("BANK") // BANK | PAYPAL | CRYPTO
   createdAt   DateTime  @default(now())
   paidAt      DateTime?
+}
+
+// ============ Affiliates & referrals ============
+model AffiliateProgram {
+  id            String    @id @default(cuid())
+  productId     String    @unique
+  product       Product   @relation(fields: [productId], references: [id])
+  creatorId     String
+  creator       User      @relation(fields: [creatorId], references: [id])
+  commissionBps Int       @default(3000) // 30% = 3000 basis points of the first invoice
+  active        Boolean   @default(true)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  links        AffiliateLink[]
+}
+
+model AffiliateLink {
+  id          String    @id @default(cuid())
+  code        String    @unique // shareable slug, e.g. "alex" or "k7m2xq"
+  userId      String    // the affiliate promoting the product
+  user        User      @relation(fields: [userId], references: [id])
+  programId   String
+  program     AffiliateProgram @relation(fields: [programId], references: [id])
+  clicks      Int       @default(0)
+  conversions Int       @default(0)
+  active      Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+
+  commissions AffiliateCommission[]
+
+  @@unique([userId, programId])
+}
+
+model AffiliateCommission {
+  id             String    @id @default(cuid())
+  linkId         String
+  link           AffiliateLink @relation(fields: [linkId], references: [id])
+  affiliateId    String
+  affiliate      User      @relation(fields: [affiliateId], references: [id])
+  creatorId      String
+  productId      String
+  subscriptionId String
+  amountCents    Int       // commission earned from the referred first invoice
+  status         String    @default("PENDING") // PENDING | PAID
+  createdAt      DateTime  @default(now())
+  paidAt         DateTime?
 }

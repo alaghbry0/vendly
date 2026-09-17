@@ -8,13 +8,14 @@ import { AnimatePresence, motion } from "framer-motion";
 import type { LucideIcon } from "lucide-react";
 import {
   ArrowLeft, ArrowRight, ArrowUpRight, BadgeCheck, Bitcoin, CalendarDays, Check, CircleAlert,
-  CreditCard, FileDown, Heart, Info, KeyRound, Loader2, Lock, Mail, MessageSquare, PackageOpen, PenLine,
-  RefreshCw, Search, SearchX, Send, ShieldCheck, ShoppingBag, Sparkles, Star, Tag, Users, Wallet, X,
+  CreditCard, ExternalLink, FileDown, Heart, Info, KeyRound, Loader2, Lock, Mail, Megaphone, MessageSquare,
+  MousePointerClick, PackageOpen, PenLine, RefreshCw, Search, SearchX, Send, ShieldCheck, ShoppingBag,
+  Sparkles, Star, Tag, Users, Wallet, X,
 } from "lucide-react";
 
 import { useAppStore } from "@/lib/store";
 import { api, ApiError } from "@/lib/api";
-import { CATEGORIES, type AssetDTO, type PlanDTO, type ProductCardDTO, type ProductDetailDTO, type PromoValidationDTO } from "@/lib/types";
+import { CATEGORIES, type AffiliateLinkDTO, type AssetDTO, type PlanDTO, type ProductCardDTO, type ProductDetailDTO, type PromoValidationDTO } from "@/lib/types";
 import { fmtBytes, fmtCompact, fmtDate, fmtMoney, timeAgo } from "@/lib/format";
 import {
   CategoryIcon, CopyButton, EmptyState, GatewayBadge, ProductCover, ProviderBadge, SectionHeader,
@@ -62,6 +63,7 @@ interface CheckoutResultDTO {
   isTrial?: boolean;
   discountCents?: number;
   promoCode?: string | null;
+  referral?: { code: string; affiliateName: string | null; commissionCents: number } | null;
   quote?: CryptoQuoteDTO;
 }
 
@@ -73,6 +75,7 @@ interface CheckoutReceipt {
   gateway: string;
   discountCents: number;
   promoCode: string | null;
+  referral: { code: string; affiliateName: string | null; commissionCents: number } | null;
 }
 
 // A validated promo applied to the checkout — `planId` is the plan it was last
@@ -218,6 +221,197 @@ function useWishlist() {
   }
 
   return { ids, toggle };
+}
+
+// ---------------------------------------------------------------------------
+// Referrals (?ref=CODE landing attribution + product-page affiliate CTA)
+// ---------------------------------------------------------------------------
+
+const REF_STORAGE_KEY = "vendly:ref";
+const REF_PRODUCT_KEY = "vendly:refProduct";
+
+/** The referral captured from a ?ref= landing, if any (session-scoped). */
+export function getStoredRef(): { code: string; productId: string } | null {
+  try {
+    const code = sessionStorage.getItem(REF_STORAGE_KEY);
+    const productId = sessionStorage.getItem(REF_PRODUCT_KEY);
+    return code && productId ? { code, productId } : null;
+  } catch {
+    return null;
+  }
+}
+
+function clearStoredRef(): void {
+  try {
+    sessionStorage.removeItem(REF_STORAGE_KEY);
+    sessionStorage.removeItem(REF_PRODUCT_KEY);
+  } catch {
+    // private mode etc.
+  }
+}
+
+/**
+ * Handles an inbound affiliate link (?ref=CODE&product=ID): stores the
+ * attribution for checkout, records the click, and lands the visitor on the
+ * product page. Runs once per session load from the Discover view.
+ */
+function useReferralLanding() {
+  const navigate = useAppStore((s) => s.navigate);
+  const { toast } = useToast();
+  const fired = useRef(false);
+
+  useEffect(() => {
+    if (fired.current) return;
+    fired.current = true;
+    try {
+      const url = new URL(window.location.href);
+      const ref = url.searchParams.get("ref");
+      const productId = url.searchParams.get("product");
+      if (!ref || !productId) return;
+
+      sessionStorage.setItem(REF_STORAGE_KEY, ref);
+      sessionStorage.setItem(REF_PRODUCT_KEY, productId);
+
+      // Strip the params so a refresh doesn't re-track the click.
+      url.searchParams.delete("ref");
+      url.searchParams.delete("product");
+      const clean = url.pathname + (url.searchParams.toString() ? `?${url.searchParams.toString()}` : "");
+      window.history.replaceState(null, "", clean);
+
+      // Fire-and-forget click tracking (public endpoint).
+      api("/api/affiliates/track", { json: { code: ref, productId } }).catch(() => {});
+
+      toast({
+        title: "Welcome via a referral link",
+        description: "Taking you to the recommended product…",
+      });
+      navigate("product", { productId });
+    } catch {
+      // malformed URL — ignore
+    }
+  }, [navigate, toast]);
+}
+
+/** "Earn 30% as an affiliate" card on the product page. */
+function AffiliateCard({ product }: { product: ProductDetailDTO }) {
+  const user = useAppStore((s) => s.user);
+  const nonce = useAppStore((s) => s.nonce);
+  const { toast } = useToast();
+  const [link, setLink] = useState<{ code: string; clicks: number; conversions: number } | null>(null);
+  const [joining, setJoining] = useState(false);
+
+  const pct = product.affiliateBps ? Math.round(product.affiliateBps / 100) : 0;
+
+  // Look up an existing link for this product (silent — card shows join state otherwise).
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await api<{ links: AffiliateLinkDTO[] }>("/api/affiliates/links");
+        if (cancelled) return;
+        const found = res.links.find((l) => l.product.id === product.id);
+        if (found) setLink({ code: found.code, clicks: found.clicks, conversions: found.conversions });
+      } catch {
+        // not signed in / no links — join CTA is fine
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [product.id, nonce]);
+
+  if (!product.affiliateBps) return null;
+  if (user && product.creator.id === user.id) return null; // creators don't see their own program
+
+  async function join() {
+    setJoining(true);
+    try {
+      const res = await api<{ link: { code: string; clicks: number; conversions: number } }>(
+        "/api/affiliates/links",
+        { json: { productId: product.id } }
+      );
+      setLink(res.link);
+      toast({
+        title: "You're an affiliate!",
+        description: `Share your link — you earn ${pct}% of each referred member's first invoice.`,
+      });
+    } catch (e) {
+      toast({ title: "Couldn't join the program", description: (e as Error).message, variant: "destructive" });
+    } finally {
+      setJoining(false);
+    }
+  }
+
+  const shareUrl = link ? `${window.location.origin}/?ref=${link.code}&product=${product.id}` : null;
+
+  return (
+    <motion.section
+      initial={{ opacity: 0, y: 12 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ delay: 0.1 }}
+      className="card-shine rounded-2xl border border-emerald-500/25 bg-gradient-to-br from-emerald-500/[0.07] via-transparent to-teal-500/[0.05] p-5"
+      aria-label="Affiliate program"
+    >
+      <div className="flex items-start gap-3">
+        <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-emerald-500 to-teal-600 text-white shadow-sm">
+          <Megaphone className="h-5 w-5" />
+        </span>
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-semibold">
+            Earn {pct}% as an affiliate
+          </p>
+          <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">
+            Share {product.title} with your audience — you earn {pct}% of every referred member's first
+            invoice. Commissions settle on the next billing run.
+          </p>
+        </div>
+      </div>
+
+      {link && shareUrl ? (
+        <div className="mt-4 space-y-2.5">
+          <div className="flex items-center gap-2">
+            <code className="min-w-0 flex-1 truncate rounded-lg border bg-background/80 px-3 py-2 font-mono text-xs text-foreground/90" title={shareUrl}>
+              {shareUrl}
+            </code>
+            <CopyButton value={shareUrl} className="h-9 w-9 shrink-0 rounded-lg p-0" label="Copy referral link" />
+            <Button
+              variant="outline"
+              size="icon"
+              className="h-9 w-9 shrink-0 rounded-lg"
+              onClick={() => window.open(shareUrl, "_blank", "noopener")}
+              aria-label="Open your referral link"
+              title="Open your referral link"
+            >
+              <ExternalLink className="h-4 w-4" />
+            </Button>
+          </div>
+          <div className="flex items-center gap-4 text-[11px] text-muted-foreground">
+            <span className="inline-flex items-center gap-1 tabular-nums">
+              <MousePointerClick className="h-3.5 w-3.5" /> {link.clicks} clicks
+            </span>
+            <span className="inline-flex items-center gap-1 tabular-nums">
+              <Users className="h-3.5 w-3.5" /> {link.conversions} conversions
+            </span>
+            <a
+              href="#"
+              onClick={(e) => {
+                e.preventDefault();
+                useAppStore.getState().navigate("portal", { portalTab: "affiliates" });
+              }}
+              className="ml-auto font-medium text-primary hover:underline"
+            >
+              My earnings →
+            </a>
+          </div>
+        </div>
+      ) : (
+        <Button className="mt-4 w-full" onClick={join} disabled={joining}>
+          {joining ? <Loader2 className="h-4 w-4 animate-spin" /> : <Megaphone className="h-4 w-4" />}
+          {joining ? "Joining…" : "Get your referral link"}
+        </Button>
+      )}
+    </motion.section>
+  );
 }
 
 /** Heart that pops whenever its filled state flips. */
@@ -586,6 +780,11 @@ const HOW_IT_WORKS = [
     title: "Get instant access",
     text: "Discord roles, Telegram channels, license keys and secure downloads are provisioned the second your payment lands.",
   },
+  {
+    icon: Megaphone,
+    title: "Earn as an affiliate",
+    text: "Love a product? Grab a referral link from its page and earn up to 30% of every member you bring — tracked, settled and paid automatically.",
+  },
 ];
 
 function DiscoverView() {
@@ -593,6 +792,9 @@ function DiscoverView() {
   const nonce = useAppStore((s) => s.nonce);
   const { toast } = useToast();
   const { ids: wishlistIds, toggle: toggleWishlist } = useWishlist();
+
+  // Inbound affiliate links (?ref=CODE&product=ID) land here first.
+  useReferralLanding();
 
   const [searchText, setSearchText] = useState(params.query ?? "");
   const [category, setCategory] = useState(params.category ?? "ALL");
@@ -863,9 +1065,9 @@ function DiscoverView() {
           >
             <div className="mx-auto max-w-2xl text-center">
               <h2 className="text-2xl font-extrabold tracking-tight md:text-3xl">How Vendly works</h2>
-              <p className="mt-2 text-muted-foreground">From browsing to instant access in three steps.</p>
+              <p className="mt-2 text-muted-foreground">From browsing to instant access — and earning.</p>
             </div>
-            <ol className="mt-10 grid gap-5 md:grid-cols-3">
+            <ol className="mt-10 grid gap-5 md:grid-cols-2 xl:grid-cols-4">
               {HOW_IT_WORKS.map((step, i) => (
                 <motion.li
                   key={step.title}
@@ -1331,6 +1533,12 @@ function ProductDetailView() {
             )}
           </div>
         </aside>
+
+      </div>
+
+      {/* Affiliate program card — full width on mobile, aligned to the pricing column on desktop */}
+      <div className="mt-6 lg:ml-auto lg:w-[420px]">
+        <AffiliateCard product={product} />
       </div>
 
       <ReviewDialog product={product} open={reviewOpen} onOpenChange={setReviewOpen} onSubmitted={load} />
@@ -1631,6 +1839,7 @@ function StripeForm({
   startTrial,
   payAmountCents,
   promoCode,
+  refCode,
   onComplete,
   onApiError,
   onFormError,
@@ -1639,6 +1848,7 @@ function StripeForm({
   startTrial: boolean;
   payAmountCents: number;
   promoCode: string | null;
+  refCode: string | null;
   onComplete: (gateway: GatewayKey, res: CheckoutResultDTO) => void;
   onApiError: (e: unknown) => void;
   onFormError: (msg: string) => void;
@@ -1678,6 +1888,7 @@ function StripeForm({
           startTrial,
           saveMethod,
           promoCode: promoCode ?? undefined,
+          refCode: refCode ?? undefined,
           card: { number: digits, expMonth: Number(expMonth), expYear: Number(expYear), cvc },
         },
       });
@@ -1784,6 +1995,7 @@ function PayPalForm({
   startTrial,
   payAmountCents,
   promoCode,
+  refCode,
   onComplete,
   onApiError,
   onFormError,
@@ -1792,6 +2004,7 @@ function PayPalForm({
   startTrial: boolean;
   payAmountCents: number;
   promoCode: string | null;
+  refCode: string | null;
   onComplete: (gateway: GatewayKey, res: CheckoutResultDTO) => void;
   onApiError: (e: unknown) => void;
   onFormError: (msg: string) => void;
@@ -1815,7 +2028,7 @@ function PayPalForm({
     setBusy(true);
     try {
       const res = await api<CheckoutResultDTO>("/api/checkout", {
-        json: { planId: plan.id, gateway: "PAYPAL", paypalEmail: v, saveMethod: true, startTrial, promoCode: promoCode ?? undefined },
+        json: { planId: plan.id, gateway: "PAYPAL", paypalEmail: v, saveMethod: true, startTrial, promoCode: promoCode ?? undefined, refCode: refCode ?? undefined },
       });
       onComplete("PAYPAL", res);
     } catch (err) {
@@ -1892,6 +2105,7 @@ function CryptoForm({
   plan,
   startTrial,
   promoCode,
+  refCode,
   onComplete,
   onApiError,
   onFormError,
@@ -1899,6 +2113,7 @@ function CryptoForm({
   plan: PlanDTO;
   startTrial: boolean;
   promoCode: string | null;
+  refCode: string | null;
   onComplete: (gateway: GatewayKey, res: CheckoutResultDTO) => void;
   onApiError: (e: unknown) => void;
   onFormError: (msg: string) => void;
@@ -1907,7 +2122,7 @@ function CryptoForm({
   const [busy, setBusy] = useState(false);
   const [quote, setQuote] = useState<CryptoQuoteDTO | null>(null);
   const [subscriptionId, setSubscriptionId] = useState<string | null>(null);
-  const [promoMeta, setPromoMeta] = useState<{ discountCents: number; promoCode: string | null }>({ discountCents: 0, promoCode: null });
+  const [promoMeta, setPromoMeta] = useState<{ discountCents: number; promoCode: string | null; referral: CheckoutResultDTO["referral"] }>({ discountCents: 0, promoCode: null, referral: null });
   const [blocks, setBlocks] = useState(0);
   const [confirming, setConfirming] = useState(false);
 
@@ -1934,12 +2149,12 @@ function CryptoForm({
     setBusy(true);
     try {
       const res = await api<CheckoutResultDTO>("/api/checkout", {
-        json: { planId: plan.id, gateway: "CRYPTO", walletAddress: v, startTrial, promoCode: promoCode ?? undefined },
+        json: { planId: plan.id, gateway: "CRYPTO", walletAddress: v, startTrial, promoCode: promoCode ?? undefined, refCode: refCode ?? undefined },
       });
       setQuote(res.quote ?? null);
       setSubscriptionId(res.subscriptionId);
       // The confirm endpoint doesn't echo promo fields — carry them from the quote.
-      setPromoMeta({ discountCents: res.discountCents ?? 0, promoCode: res.promoCode ?? null });
+      setPromoMeta({ discountCents: res.discountCents ?? 0, promoCode: res.promoCode ?? null, referral: res.referral ?? null });
     } catch (err) {
       onApiError(err);
     } finally {
@@ -1953,7 +2168,7 @@ function CryptoForm({
     setConfirming(true);
     try {
       const res = await api<CheckoutResultDTO>("/api/checkout/crypto-confirm", { json: { subscriptionId } });
-      onComplete("CRYPTO", { ...res, discountCents: promoMeta.discountCents, promoCode: promoMeta.promoCode });
+      onComplete("CRYPTO", { ...res, discountCents: promoMeta.discountCents, promoCode: promoMeta.promoCode, referral: promoMeta.referral });
     } catch (err) {
       onApiError(err);
       setBlocks(2);
@@ -2074,6 +2289,7 @@ function PaymentPanel({
   plan,
   startTrial,
   promoCode,
+  refCode,
   payAmountCents,
   onComplete,
   onConflict,
@@ -2082,6 +2298,7 @@ function PaymentPanel({
   plan: PlanDTO;
   startTrial: boolean;
   promoCode: string | null;
+  refCode: string | null;
   payAmountCents: number;
   onComplete: (gateway: GatewayKey, res: CheckoutResultDTO) => void;
   onConflict: () => void;
@@ -2149,6 +2366,7 @@ function PaymentPanel({
             startTrial={startTrial}
             payAmountCents={payAmountCents}
             promoCode={promoCode}
+            refCode={refCode}
             onComplete={onComplete}
             onApiError={onApiError}
             onFormError={onFormError}
@@ -2160,13 +2378,14 @@ function PaymentPanel({
             startTrial={startTrial}
             payAmountCents={payAmountCents}
             promoCode={promoCode}
+            refCode={refCode}
             onComplete={onComplete}
             onApiError={onApiError}
             onFormError={onFormError}
           />
         </TabsContent>
         <TabsContent value="CRYPTO" className="mt-5">
-          <CryptoForm plan={plan} startTrial={startTrial} promoCode={promoCode} onComplete={onComplete} onApiError={onApiError} onFormError={onFormError} />
+          <CryptoForm plan={plan} startTrial={startTrial} promoCode={promoCode} refCode={refCode} onComplete={onComplete} onApiError={onApiError} onFormError={onFormError} />
         </TabsContent>
       </Tabs>
       <AnimatePresence>
@@ -2230,6 +2449,12 @@ function SuccessPanel({
   }
   if (receipt.licenseKeyId) {
     items.push({ icon: KeyRound, text: "License key provisioned — view it in My Hub → Licenses." });
+  }
+  if (receipt.referral) {
+    items.push({
+      icon: Users,
+      text: `Referred by ${receipt.referral.affiliateName ?? "an affiliate"} (${receipt.referral.code}) — they earn a commission on your first invoice.`,
+    });
   }
   for (const provider of product.accessType) {
     if (provider === "DISCORD") {
@@ -2418,6 +2643,10 @@ function CheckoutView() {
   const payAmountCents = selectedPlan ? Math.max(0, selectedPlan.priceCents - promoDiscountCents) : 0;
   const stepIndex = step === "plan" ? 0 : step === "payment" ? 1 : 2;
 
+  // Referral attribution only applies to the product the link pointed at.
+  const storedRef = getStoredRef();
+  const activeRefCode = storedRef && storedRef.productId === product.id ? storedRef.code : null;
+
   const complete = (gateway: GatewayKey, res: CheckoutResultDTO) => {
     setReceipt({
       subscriptionId: res.subscriptionId,
@@ -2427,9 +2656,11 @@ function CheckoutView() {
       gateway,
       discountCents: res.discountCents ?? 0,
       promoCode: res.promoCode ?? null,
+      referral: res.referral ?? null,
     });
     setStep("done");
     refresh();
+    clearStoredRef(); // attribution consumed — don't chain it to the next purchase
     const parts: string[] = [product.title];
     if (selectedPlan) parts.push(selectedPlan.name);
     if (res.promoCode) parts.push(`promo ${res.promoCode} (−${fmtMoney(res.discountCents ?? 0)})`);
@@ -2520,6 +2751,9 @@ function CheckoutView() {
                           · {promo.code} −{fmtMoney(promoDiscountCents)}
                         </span>
                       )}
+                      {activeRefCode && (
+                        <span className="font-medium text-primary"> · referred via {activeRefCode}</span>
+                      )}
                     </p>
                   </div>
                   <Button variant="ghost" size="sm" className="text-muted-foreground" onClick={() => setStep("plan")}>
@@ -2545,6 +2779,7 @@ function CheckoutView() {
                     plan={selectedPlan}
                     startTrial={effectiveStartTrial}
                     promoCode={promo?.code ?? null}
+                    refCode={activeRefCode}
                     payAmountCents={payAmountCents}
                     onComplete={complete}
                     onConflict={() => setAlreadySub(true)}

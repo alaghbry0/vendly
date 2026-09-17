@@ -33,6 +33,9 @@ async function main() {
   await db.wishlistItem.deleteMany();
   await db.notification.deleteMany();
   await db.payout.deleteMany();
+  await db.affiliateCommission.deleteMany();
+  await db.affiliateLink.deleteMany();
+  await db.affiliateProgram.deleteMany();
   await db.product.deleteMany();
   await db.user.deleteMany();
   await db.systemClock.deleteMany();
@@ -707,6 +710,60 @@ async function main() {
   await notif(carol.id, "subscription_created", "New subscriber — FitCore Coaching", "Coached · $39.00 · Stripe", "user-plus", false, 0.7);
   await notif(carol.id, "review_new", "New ★★★★☆ review — FitCore Coaching", "“The coached plan is worth every penny…” · Emma Sokolov", "star", true, 3.4);
 
+  // ============ Affiliate programs ============
+  const progTsp = await db.affiliateProgram.create({
+    data: { productId: tradeSignals.id, creatorId: bob.id, commissionBps: 3000, createdAt: daysAgo(80) },
+  });
+  const progSbp = await db.affiliateProgram.create({
+    data: { productId: saasBlueprint.id, creatorId: bob.id, commissionBps: 2500, createdAt: daysAgo(50) },
+  });
+  const progFc = await db.affiliateProgram.create({
+    data: { productId: fitcore.id, creatorId: carol.id, commissionBps: 2000, createdAt: daysAgo(35) },
+  });
+
+  // ============ Affiliate links ============
+  const linkAlex = await db.affiliateLink.create({
+    data: { code: "alex", userId: alice.id, programId: progTsp.id, clicks: 184, conversions: 6, createdAt: daysAgo(70) },
+  });
+  const linkGina = await db.affiliateLink.create({
+    data: { code: "gina", userId: grace.id, programId: progTsp.id, clicks: 42, conversions: 2, createdAt: daysAgo(38) },
+  });
+  const linkEmma = await db.affiliateLink.create({
+    data: { code: "emma", userId: eve.id, programId: progFc.id, clicks: 67, conversions: 1, createdAt: daysAgo(30) },
+  });
+  const linkDave = await db.affiliateLink.create({
+    data: { code: "dave", userId: dave.id, programId: progSbp.id, clicks: 12, conversions: 0, createdAt: daysAgo(14) },
+  });
+
+  // ============ Affiliate commissions ============
+  // Alex referred 6 conversions on Trade Signals Pro Pro ($49 → 30% = $14.70)
+  const mkCommission = (linkId: string, affiliateId: string, creatorId: string, productId: string, subscriptionId: string, cents: number, status: string, ago: number) =>
+    db.affiliateCommission.create({
+      data: {
+        linkId, affiliateId, creatorId, productId, subscriptionId,
+        amountCents: cents,
+        status,
+        createdAt: daysAgo(ago),
+        paidAt: status === "PAID" ? daysAgo(Math.max(0, ago - 2)) : null,
+      },
+    });
+
+  const subsAll = await db.subscription.findMany({ select: { id: true, userId: true, productId: true } });
+  const aliceSubIds = subsAll.filter((x) => x.userId === alice.id).map((x) => x.id);
+  // 5 of Alex's 6 referrals came from other seeded subscribers (Hugo, Iris, Farid…)
+  const referredSubs = subsAll.filter((x) => x.productId === tradeSignals.id && x.userId !== alice.id).slice(0, 5);
+  await mkCommission(linkAlex.id, alice.id, bob.id, tradeSignals.id, referredSubs[0]?.id ?? aliceSubIds[0]!, 1470, "PAID", 55);
+  await mkCommission(linkAlex.id, alice.id, bob.id, tradeSignals.id, referredSubs[1]?.id ?? aliceSubIds[0]!, 4410, "PAID", 41); // Elite annual referral ($147 × 30%)
+  await mkCommission(linkAlex.id, alice.id, bob.id, tradeSignals.id, referredSubs[2]?.id ?? aliceSubIds[0]!, 1470, "PAID", 26);
+  await mkCommission(linkAlex.id, alice.id, bob.id, tradeSignals.id, referredSubs[3]?.id ?? aliceSubIds[0]!, 1470, "PAID", 12);
+  await mkCommission(linkAlex.id, alice.id, bob.id, tradeSignals.id, referredSubs[4]?.id ?? aliceSubIds[0]!, 1470, "PENDING", 3);
+  await mkCommission(linkGina.id, grace.id, bob.id, tradeSignals.id, referredSubs[0]?.id ?? aliceSubIds[0]!, 1470, "PAID", 31);
+  await mkCommission(linkGina.id, grace.id, bob.id, tradeSignals.id, referredSubs[1]?.id ?? aliceSubIds[0]!, 1470, "PENDING", 5);
+  await mkCommission(linkEmma.id, eve.id, carol.id, fitcore.id, subsAll.find((x) => x.productId === fitcore.id)?.id ?? aliceSubIds[0]!, 780, "PAID", 21); // Coached $39 × 20%
+
+  await notif(alice.id, "affiliate_earned", "Referral commission — $14.70 pending", "Someone joined Trade Signals Pro through your link alex. It settles on the next billing run.", "tag", false, 3);
+  await notif(bob.id, "affiliate_joined", "New affiliate — Gina Park", "They're now promoting Trade Signals Pro for 30% per referred first invoice.", "user-plus", true, 38);
+
   console.log("✅ Seed complete:", {
     users: await db.user.count(),
     products: await db.product.count(),
@@ -722,6 +779,9 @@ async function main() {
     wishlist: await db.wishlistItem.count(),
     notifications: await db.notification.count(),
     payouts: await db.payout.count(),
+    affiliatePrograms: await db.affiliateProgram.count(),
+    affiliateLinks: await db.affiliateLink.count(),
+    affiliateCommissions: await db.affiliateCommission.count(),
   });
 }
 

@@ -21,6 +21,7 @@ export async function POST(req: Request) {
     const wasTrial = sub.trialEndsAt != null;
     const paymentMethodId = sub.paymentMethodId;
     const promoCodeId = sub.promoCodeId;
+    const refLinkId = sub.refLinkId;
 
     // Recreate the subscription through the standard provisioning pipeline
     await db.subscription.delete({ where: { id: sub.id } });
@@ -32,6 +33,7 @@ export async function POST(req: Request) {
       chargedNow: !wasTrial,
       txnId: `0x${Math.random().toString(16).slice(2, 12)}`,
       promoCodeId,
+      refLinkId,
     });
     return Response.json({ status: "COMPLETED", ...result });
   } catch (e) {

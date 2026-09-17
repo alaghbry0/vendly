@@ -3,8 +3,9 @@
 // CREATOR ANALYTICS DASHBOARD — "Creator Studio".
 // Owned by Task 2-c. Rendered when store.view === "creator".
 // Internal tab system (synced from params.creatorTab): overview | products |
-// subscribers | orders | promos | webhooks | payouts | time (billing time
-// machine). Promos + payouts tabs added by Task 5-c.
+// subscribers | orders | promos | affiliates | webhooks | payouts | time
+// (billing time machine). Promos + payouts tabs added by Task 5-c; the
+// affiliates tab + the product edit dialog with plans editor by Task 8-b.
 
 import { useEffect, useMemo, useRef, useState, type ComponentProps, type FormEvent } from "react";
 import { AnimatePresence, motion, type Variants } from "framer-motion";
@@ -28,6 +29,7 @@ import {
 import { useAppStore } from "@/lib/store";
 import { api } from "@/lib/api";
 import type {
+  AffiliateProgramDTO,
   AnalyticsDTO,
   BillingRunResult,
   PayoutBalanceDTO,
@@ -95,6 +97,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import { TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
@@ -111,6 +114,7 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
+  CircleDollarSign,
   CreditCard,
   Dices,
   DollarSign,
@@ -118,21 +122,29 @@ import {
   EyeOff,
   FastForward,
   FlaskConical,
+  Handshake,
+  Info,
   KeyRound,
   Landmark,
+  Layers,
   LayoutDashboard,
   Loader2,
+  Megaphone,
   MoreHorizontal,
+  MousePointerClick,
   Package,
   PackagePlus,
+  PenLine,
   Pencil,
   Pause,
+  Percent,
   Play,
   Plus,
   Receipt,
   ReceiptText,
   RefreshCw,
   Repeat,
+  Rocket,
   RotateCcw,
   Search,
   Send,
@@ -166,6 +178,7 @@ type CreatorTab =
   | "subscribers"
   | "orders"
   | "promos"
+  | "affiliates"
   | "webhooks"
   | "payouts"
   | "time";
@@ -176,6 +189,7 @@ const CREATOR_TABS: { key: CreatorTab; label: string; icon: LucideIcon }[] = [
   { key: "subscribers", label: "Subscribers", icon: Users },
   { key: "orders", label: "Orders", icon: ReceiptText },
   { key: "promos", label: "Promos", icon: Tag },
+  { key: "affiliates", label: "Affiliates", icon: Megaphone },
   { key: "webhooks", label: "Webhooks", icon: Webhook },
   { key: "payouts", label: "Payouts", icon: Banknote },
   { key: "time", label: "Time machine", icon: Timer },
@@ -592,6 +606,7 @@ export function CreatorViews() {
               {tab === "subscribers" && <SubscribersTab />}
               {tab === "orders" && <OrdersTab />}
               {tab === "promos" && <PromosTab user={user} />}
+              {tab === "affiliates" && <AffiliatesTab user={user} />}
               {tab === "webhooks" && <WebhooksTab />}
               {tab === "payouts" && <PayoutsTab />}
               {tab === "time" && <TimeTab />}
@@ -1221,31 +1236,43 @@ function ProductsTab({ user }: { user: SessionUser }) {
                           {p.tagline || categoryLabel(p.category)}
                         </p>
                       </div>
-                      <DropdownMenu>
-                        <DropdownMenuTrigger asChild>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-8 w-8 shrink-0"
-                            aria-label={`Actions for ${p.title}`}
-                            disabled={busyId === p.id}
-                          >
-                            {busyId === p.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <MoreHorizontal className="h-4 w-4" />}
-                          </Button>
-                        </DropdownMenuTrigger>
-                        <DropdownMenuContent align="end" className="w-48">
-                          <DropdownMenuItem onClick={() => navigate("product", { productId: p.id })}>
-                            <Store className="h-4 w-4" /> View storefront
-                          </DropdownMenuItem>
-                          <DropdownMenuItem onClick={() => void toggleStatus(p)}>
-                            {paused ? <Play className="h-4 w-4" /> : <Pause className="h-4 w-4" />}
-                            {paused ? "Resume listing" : "Pause listing"}
-                          </DropdownMenuItem>
-                          <DropdownMenuItem onClick={() => setEditing(p)}>
-                            <Pencil className="h-4 w-4" /> Edit details
-                          </DropdownMenuItem>
-                        </DropdownMenuContent>
-                      </DropdownMenu>
+                      <div className="flex shrink-0 items-center gap-1">
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-8 w-8"
+                          onClick={() => setEditing(p)}
+                          aria-label={`Edit ${p.title}`}
+                          title="Edit product and tiers"
+                        >
+                          <PenLine className="h-4 w-4" />
+                        </Button>
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-8 w-8"
+                              aria-label={`Actions for ${p.title}`}
+                              disabled={busyId === p.id}
+                            >
+                              {busyId === p.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <MoreHorizontal className="h-4 w-4" />}
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end" className="w-48">
+                            <DropdownMenuItem onClick={() => navigate("product", { productId: p.id })}>
+                              <Store className="h-4 w-4" /> View storefront
+                            </DropdownMenuItem>
+                            <DropdownMenuItem onClick={() => void toggleStatus(p)}>
+                              {paused ? <Play className="h-4 w-4" /> : <Pause className="h-4 w-4" />}
+                              {paused ? "Resume listing" : "Pause listing"}
+                            </DropdownMenuItem>
+                            <DropdownMenuItem onClick={() => setEditing(p)}>
+                              <Pencil className="h-4 w-4" /> Edit details & tiers
+                            </DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      </div>
                     </div>
 
                     <div className="mt-2.5 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-xs text-muted-foreground">
@@ -1653,8 +1680,54 @@ function CreateProductDialog({
 }
 
 // ============================================================================
-// Edit product dialog (basics)
+// Edit product dialog (details + plans editor) — Task 8-b
 // ============================================================================
+
+/** Editable draft of a plan tier (price in dollars, features one per line). */
+interface PlanDraft {
+  name: string;
+  price: string;
+  interval: "month" | "year";
+  trialDays: string;
+  badge: string;
+  features: string;
+}
+
+const EMPTY_PLAN_DRAFT: PlanDraft = { name: "", price: "", interval: "month", trialDays: "", badge: "", features: "" };
+
+function draftFromPlan(plan: PlanDTO): PlanDraft {
+  return {
+    name: plan.name,
+    price: (plan.priceCents / 100).toFixed(2),
+    interval: plan.interval,
+    trialDays: plan.trialDays ? String(plan.trialDays) : "",
+    badge: plan.badge || "",
+    features: plan.features.join("\n"),
+  };
+}
+
+/** Client-side mirror of the plan validation (PATCH ignores bad fields silently). */
+function parsePlanDraft(draft: PlanDraft): { ok: true; body: Record<string, unknown> } | { ok: false; error: string } {
+  const name = draft.name.trim();
+  if (name.length < 2) return { ok: false, error: "Tier names need at least 2 characters." };
+  const cents = Math.round(parseFloat(draft.price) * 100);
+  if (!Number.isFinite(cents) || cents < 100 || cents > 1000000) {
+    return { ok: false, error: "Price must be between $1 and $10,000." };
+  }
+  const features = draft.features.split("\n").map((s) => s.trim()).filter(Boolean);
+  if (features.length > 8) return { ok: false, error: "Tiers can list at most 8 features." };
+  return {
+    ok: true,
+    body: {
+      name,
+      priceCents: cents,
+      interval: draft.interval,
+      trialDays: Math.min(30, Math.max(0, Math.round(Number(draft.trialDays) || 0))),
+      badge: draft.badge.trim(),
+      features,
+    },
+  };
+}
 
 function EditProductDialog({
   product,
@@ -1666,38 +1739,103 @@ function EditProductDialog({
   onSaved: (product: ProductDetailDTO) => void;
 }) {
   const { toast } = useToast();
+  const refresh = useAppStore((s) => s.refresh);
+
+  // Fresh detail + plans are fetched every time the dialog opens (the public
+  // GET includes the creator-only fields and active plans).
+  const [detail, setDetail] = useState<ProductDetailDTO | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loadNonce, setLoadNonce] = useState(0);
+  const [plans, setPlans] = useState<PlanDTO[]>([]);
+  const [planError, setPlanError] = useState<string | null>(null);
+  const [confirmPlan, setConfirmPlan] = useState<PlanDTO | null>(null);
+  const [addOpen, setAddOpen] = useState(false);
+  const [tab, setTab] = useState<"details" | "plans">("details");
+
   const [title, setTitle] = useState("");
   const [tagline, setTagline] = useState("");
-  const [category, setCategory] = useState("OTHER");
   const [description, setDescription] = useState("");
+  const [category, setCategory] = useState("OTHER");
+  const [status, setStatus] = useState<"ACTIVE" | "PAUSED">("ACTIVE");
+  const [featured, setFeatured] = useState(false);
+  const [accessType, setAccessType] = useState<string[]>([]);
+  const [discordRoleName, setDiscordRoleName] = useState("");
+  const [telegramChannel, setTelegramChannel] = useState("");
   const [formError, setFormError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    if (product) {
-      setTitle(product.title);
-      setTagline(product.tagline || "");
-      setCategory(product.category);
-      setDescription("");
-      setFormError(null);
-      setBusy(false);
-    }
-  }, [product]);
-
-  async function save() {
     if (!product) return;
-    if (title.trim().length < 3 || description.trim().length < 10) {
-      setFormError("Title needs 3+ characters and description 10+.");
-      return;
-    }
+    let alive = true;
+    setDetail(null);
+    setLoadError(null);
+    setPlans([]);
+    setPlanError(null);
+    setConfirmPlan(null);
+    setAddOpen(false);
+    setTab("details");
+    setFormError(null);
+    setBusy(false);
+    api<{ product: ProductDetailDTO }>(`/api/products/${product.id}`)
+      .then((res) => {
+        if (!alive) return;
+        const d = res.product;
+        setDetail(d);
+        setPlans([...d.plans].sort((a, b) => a.sortOrder - b.sortOrder));
+        setTitle(d.title);
+        setTagline(d.tagline || "");
+        setDescription(d.description);
+        setCategory(d.category);
+        setStatus(d.status === "PAUSED" ? "PAUSED" : "ACTIVE");
+        setFeatured(d.featured);
+        setAccessType(d.accessType);
+        setDiscordRoleName(d.discordRoleName || "");
+        setTelegramChannel(d.telegramChannel || "");
+      })
+      .catch((e) => {
+        if (alive) setLoadError(e instanceof Error ? e.message : "Couldn't load the product.");
+      });
+    return () => {
+      alive = false;
+    };
+  }, [product, loadNonce]);
+
+  function toggleAccess(key: string) {
+    setAccessType((prev) => (prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]));
+  }
+
+  async function save(e: FormEvent) {
+    e.preventDefault();
+    if (!product || !detail) return;
+    if (title.trim().length < 3) return setFormError("Title needs at least 3 characters.");
+    if (description.trim().length < 10) return setFormError("Description needs at least 10 characters.");
+    if (accessType.length === 0) return setFormError("Pick at least one way members get access.");
+    if (accessType.includes("DISCORD") && !discordRoleName.trim())
+      return setFormError("Enter the Discord role to grant on purchase.");
+    if (accessType.includes("TELEGRAM") && !telegramChannel.trim())
+      return setFormError("Enter the Telegram channel to invite buyers to.");
     setFormError(null);
     setBusy(true);
     try {
       const res = await api<{ product: ProductDetailDTO }>(`/api/products/${product.id}`, {
         method: "PATCH",
-        json: { title: title.trim(), tagline: tagline.trim(), category, description: description.trim() },
+        json: {
+          title: title.trim(),
+          tagline: tagline.trim(),
+          description: description.trim(),
+          category,
+          status,
+          featured,
+          accessType,
+          // Sending an empty string clears the field server-side.
+          discordRoleName: accessType.includes("DISCORD") ? discordRoleName.trim() : "",
+          telegramChannel: accessType.includes("TELEGRAM") ? telegramChannel.trim() : "",
+        },
       });
-      if (res.product) onSaved(res.product);
+      if (res.product) {
+        setDetail(res.product);
+        onSaved(res.product);
+      }
       toast({ title: "Product updated", description: `${title.trim()} has been saved.` });
       onOpenChange(false);
     } catch (e) {
@@ -1707,63 +1845,639 @@ function EditProductDialog({
     }
   }
 
+  async function togglePlanActive(plan: PlanDTO, next: boolean) {
+    // Optimistic flip; revert + inline error on failure.
+    setPlans((prev) => prev.map((p) => (p.id === plan.id ? { ...p, active: next } : p)));
+    setPlanError(null);
+    try {
+      const res = await api<{ plan: PlanDTO }>(`/api/plans/${plan.id}`, { method: "PATCH", json: { active: next } });
+      setPlans((prev) => prev.map((p) => (p.id === res.plan.id ? res.plan : p)));
+      toast({
+        title: next ? "Tier activated" : "Tier deactivated",
+        description: next
+          ? `${res.plan.name} is available to new subscribers again.`
+          : `${res.plan.name} is hidden from checkout — existing subscribers keep their terms.`,
+      });
+      refresh();
+    } catch (e) {
+      setPlans((prev) => prev.map((p) => (p.id === plan.id ? { ...p, active: !next } : p)));
+      // 400 = the server refused (e.g. last active plan) — surface inline.
+      setPlanError((e as Error).message);
+    }
+  }
+
+  async function savePlan(plan: PlanDTO, draft: PlanDraft): Promise<string | null> {
+    const parsed = parsePlanDraft(draft);
+    if (!parsed.ok) return parsed.error;
+    try {
+      const res = await api<{ plan: PlanDTO }>(`/api/plans/${plan.id}`, { method: "PATCH", json: parsed.body });
+      setPlans((prev) => prev.map((p) => (p.id === res.plan.id ? res.plan : p)));
+      toast({
+        title: "Tier updated",
+        description: `${res.plan.name} saved — price changes apply to new subscribers only.`,
+      });
+      setPlanError(null);
+      refresh();
+      return null;
+    } catch (e) {
+      // 409 duplicate names + 400 validation surface inline in the editor.
+      return (e as Error).message;
+    }
+  }
+
+  async function addPlan(draft: PlanDraft): Promise<string | null> {
+    if (!product) return "No product selected.";
+    const parsed = parsePlanDraft(draft);
+    if (!parsed.ok) return parsed.error;
+    try {
+      const res = await api<{ plan: PlanDTO }>(`/api/products/${product.id}/plans`, { json: parsed.body });
+      setPlans((prev) => [...prev, res.plan]);
+      toast({ title: "Tier added", description: `${res.plan.name} is live on ${product.title}.` });
+      setPlanError(null);
+      setAddOpen(false);
+      refresh();
+      return null;
+    } catch (e) {
+      return (e as Error).message;
+    }
+  }
+
   return (
     <Dialog open={!!product} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-lg">
+      <DialogContent className="max-h-[88vh] overflow-y-auto sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle>Edit {product?.title}</DialogTitle>
-          <DialogDescription>Update the storefront basics. Pricing tiers are managed at creation.</DialogDescription>
+          <DialogDescription>Update the storefront listing and manage pricing tiers.</DialogDescription>
         </DialogHeader>
-        <div className="space-y-4">
-          <div className="space-y-1.5">
-            <Label htmlFor="ep-title">Title</Label>
-            <Input id="ep-title" value={title} onChange={(e) => setTitle(e.target.value)} maxLength={80} />
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="ep-tagline">Tagline</Label>
-            <Input id="ep-tagline" value={tagline} onChange={(e) => setTagline(e.target.value)} maxLength={120} />
-          </div>
-          <div className="space-y-1.5">
-            <Label>Category</Label>
-            <Select value={category} onValueChange={setCategory}>
-              <SelectTrigger aria-label="Category" className="w-full">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {CATEGORIES.map((c) => (
-                  <SelectItem key={c.key} value={c.key}>
-                    {c.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="ep-desc">Description</Label>
-            <Textarea
-              id="ep-desc"
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              placeholder="Replace the current description (required, 10+ characters)"
-              rows={4}
-            />
-          </div>
-          {formError && (
-            <p className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs font-medium text-red-600 dark:text-red-400">
-              {formError}
-            </p>
-          )}
-        </div>
-        <DialogFooter>
-          <Button variant="ghost" onClick={() => onOpenChange(false)}>
-            Cancel
-          </Button>
-          <Button onClick={() => void save()} disabled={busy}>
-            {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />} Save changes
-          </Button>
-        </DialogFooter>
+
+        {!detail ? (
+          loadError ? (
+            <div className="space-y-4">
+              <p className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs font-medium text-red-600 dark:text-red-400">
+                {loadError}
+              </p>
+              <Button variant="outline" className="w-full" onClick={() => setLoadNonce((n) => n + 1)}>
+                <RotateCcw className="h-4 w-4" /> Try again
+              </Button>
+            </div>
+          ) : (
+            <div className="space-y-3" aria-busy="true" aria-label="Loading product">
+              <div className="flex gap-2">
+                <Skeleton className="h-9 flex-1" />
+                <Skeleton className="h-9 flex-1" />
+              </div>
+              <Skeleton className="h-9 w-full" />
+              <Skeleton className="h-24 w-full" />
+              <Skeleton className="h-9 w-2/3" />
+            </div>
+          )
+        ) : (
+          <>
+            <Tabs value={tab} onValueChange={(v) => setTab(v === "plans" ? "plans" : "details")}>
+              <TabsList className="w-full">
+                <TabsTrigger value="details" className="flex-1">
+                  <PenLine className="h-4 w-4" /> Details
+                </TabsTrigger>
+                <TabsTrigger value="plans" className="flex-1">
+                  <Layers className="h-4 w-4" /> Plans · {plans.length}
+                </TabsTrigger>
+              </TabsList>
+
+              {/* ---------- Details tab ---------- */}
+              <TabsContent value="details" className="mt-4">
+                <form id="edit-product-form" onSubmit={(e) => void save(e)} className="space-y-4">
+                  <div className="grid gap-2.5 sm:grid-cols-2">
+                    <div className="space-y-1.5">
+                      <Label htmlFor="ep-title">Title</Label>
+                      <Input id="ep-title" value={title} onChange={(e) => setTitle(e.target.value)} maxLength={80} />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label htmlFor="ep-tagline">Tagline</Label>
+                      <Input id="ep-tagline" value={tagline} onChange={(e) => setTagline(e.target.value)} maxLength={120} />
+                    </div>
+                  </div>
+                  <div className="grid gap-2.5 sm:grid-cols-2">
+                    <div className="space-y-1.5">
+                      <Label>Category</Label>
+                      <Select value={category} onValueChange={setCategory}>
+                        <SelectTrigger aria-label="Category" className="w-full">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {CATEGORIES.map((c) => (
+                            <SelectItem key={c.key} value={c.key}>
+                              {c.label}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label>Status</Label>
+                      <Select value={status} onValueChange={(v) => setStatus(v === "PAUSED" ? "PAUSED" : "ACTIVE")}>
+                        <SelectTrigger aria-label="Listing status" className="w-full">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="ACTIVE">Active · listed</SelectItem>
+                          <SelectItem value="PAUSED">Paused · hidden</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </div>
+                  <label className="flex cursor-pointer items-center justify-between gap-3 rounded-xl border p-3.5">
+                    <span className="min-w-0">
+                      <span className="block text-sm font-medium">Featured listing</span>
+                      <span className="block text-xs text-muted-foreground">
+                        Pin {detail.title} on the marketplace homepage.
+                      </span>
+                    </span>
+                    <Switch checked={featured} onCheckedChange={setFeatured} aria-label="Feature this product on the homepage" />
+                  </label>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="ep-desc">Description</Label>
+                    <Textarea id="ep-desc" value={description} onChange={(e) => setDescription(e.target.value)} rows={4} />
+                  </div>
+                  <fieldset className="space-y-2">
+                    <legend className="text-sm font-medium">How members get access</legend>
+                    <div className="grid grid-cols-2 gap-2">
+                      {ACCESS_OPTIONS.map((a) => {
+                        const on = accessType.includes(a.key);
+                        return (
+                          <button
+                            key={a.key}
+                            type="button"
+                            onClick={() => toggleAccess(a.key)}
+                            aria-pressed={on}
+                            className={cn(
+                              "flex items-center gap-2 rounded-xl border px-3 py-2.5 text-xs font-medium transition-colors",
+                              on
+                                ? "border-primary bg-primary/10 text-primary"
+                                : "text-muted-foreground hover:bg-muted hover:text-foreground"
+                            )}
+                          >
+                            {on ? <Check className="h-3.5 w-3.5" /> : <Plus className="h-3.5 w-3.5" />}
+                            {a.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </fieldset>
+                  <AnimatePresence initial={false}>
+                    {accessType.includes("DISCORD") && (
+                      <motion.div
+                        initial={{ opacity: 0, height: 0 }}
+                        animate={{ opacity: 1, height: "auto" }}
+                        exit={{ opacity: 0, height: 0 }}
+                        className="overflow-hidden"
+                      >
+                        <div className="space-y-1.5 pt-1">
+                          <Label htmlFor="ep-discord">Discord role to grant</Label>
+                          <Input
+                            id="ep-discord"
+                            value={discordRoleName}
+                            onChange={(e) => setDiscordRoleName(e.target.value)}
+                            placeholder="e.g. @Whale Room"
+                          />
+                        </div>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+                  <AnimatePresence initial={false}>
+                    {accessType.includes("TELEGRAM") && (
+                      <motion.div
+                        initial={{ opacity: 0, height: 0 }}
+                        animate={{ opacity: 1, height: "auto" }}
+                        exit={{ opacity: 0, height: 0 }}
+                        className="overflow-hidden"
+                      >
+                        <div className="space-y-1.5 pt-1">
+                          <Label htmlFor="ep-telegram">Telegram channel</Label>
+                          <Input
+                            id="ep-telegram"
+                            value={telegramChannel}
+                            onChange={(e) => setTelegramChannel(e.target.value)}
+                            placeholder="e.g. @alphagroup"
+                          />
+                        </div>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+                  {formError && (
+                    <p className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs font-medium text-red-600 dark:text-red-400">
+                      {formError}
+                    </p>
+                  )}
+                </form>
+              </TabsContent>
+
+              {/* ---------- Plans tab ---------- */}
+              <TabsContent value="plans" className="mt-4 space-y-3.5">
+                <div className="flex items-start gap-2.5 rounded-xl border border-amber-500/30 bg-amber-500/10 p-3">
+                  <Info className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
+                  <p className="text-xs leading-relaxed">
+                    Price changes apply to new subscribers only — existing members keep their rate until they switch
+                    tiers.
+                  </p>
+                </div>
+
+                {planError && (
+                  <p className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs font-medium text-red-600 dark:text-red-400">
+                    {planError}
+                  </p>
+                )}
+
+                <div className="space-y-2.5">
+                  {plans.map((plan) => (
+                    <PlanTierRow
+                      key={plan.id}
+                      plan={plan}
+                      onToggleActive={(p, next) => {
+                        // Deactivation is destructive-ish → confirm first.
+                        if (next) void togglePlanActive(p, true);
+                        else setConfirmPlan(p);
+                      }}
+                      onSave={savePlan}
+                    />
+                  ))}
+                  {plans.length === 0 && (
+                    <p className="rounded-xl border border-dashed p-4 text-center text-xs text-muted-foreground">
+                      No active tiers — add one below so buyers can subscribe.
+                    </p>
+                  )}
+                </div>
+
+                {addOpen ? (
+                  <AddTierForm onAdd={addPlan} onCancel={() => setAddOpen(false)} />
+                ) : (
+                  <Button
+                    variant="outline"
+                    className="w-full border-dashed"
+                    onClick={() => setAddOpen(true)}
+                    disabled={plans.length >= 6}
+                  >
+                    <Plus className="h-4 w-4" /> Add tier{plans.length >= 6 ? " (max 6)" : ""}
+                  </Button>
+                )}
+                <p className="text-[11px] leading-relaxed text-muted-foreground">
+                  Deactivated tiers stay live for existing subscribers but are hidden from checkout — and from this list
+                  once you close the dialog.
+                </p>
+              </TabsContent>
+            </Tabs>
+
+            {tab === "details" && (
+              <DialogFooter className="gap-2 sm:gap-0">
+                <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>
+                  Cancel
+                </Button>
+                <Button type="submit" form="edit-product-form" disabled={busy}>
+                  {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />} Save changes
+                </Button>
+              </DialogFooter>
+            )}
+          </>
+        )}
+
+        {/* Deactivation confirm — the server also guards the last active plan. */}
+        <AlertDialog open={!!confirmPlan} onOpenChange={(o) => !o && setConfirmPlan(null)}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Deactivate this tier?</AlertDialogTitle>
+              <AlertDialogDescription>
+                {confirmPlan?.name} will disappear from checkout on {detail?.title}. Existing subscribers keep their
+                terms and renewals. You can reactivate it anytime.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Keep tier</AlertDialogCancel>
+              <AlertDialogAction
+                className="bg-amber-600 text-white hover:bg-amber-700"
+                onClick={() => {
+                  const p = confirmPlan;
+                  setConfirmPlan(null);
+                  if (p) void togglePlanActive(p, false);
+                }}
+              >
+                Deactivate tier
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
       </DialogContent>
     </Dialog>
+  );
+}
+
+/** One plan tier row: summary + active switch + inline pencil editor. */
+function PlanTierRow({
+  plan,
+  onToggleActive,
+  onSave,
+}: {
+  plan: PlanDTO;
+  onToggleActive: (plan: PlanDTO, next: boolean) => void;
+  onSave: (plan: PlanDTO, draft: PlanDraft) => Promise<string | null>;
+}) {
+  const [editing, setEditing] = useState(false);
+
+  return (
+    <div className={cn("rounded-xl border bg-background/40", !plan.active && "opacity-75")}>
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2 p-3.5">
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <p className="text-sm font-semibold leading-tight">{plan.name}</p>
+            {plan.badge && (
+              <Badge
+                variant="outline"
+                className="border-primary/25 bg-primary/10 px-2 py-0 text-[10px] font-semibold text-primary"
+              >
+                {plan.badge}
+              </Badge>
+            )}
+            {!plan.active && (
+              <Badge
+                variant="outline"
+                className="border-amber-500/25 bg-amber-500/10 px-2 py-0 text-[10px] font-medium text-amber-700 dark:text-amber-400"
+              >
+                Inactive
+              </Badge>
+            )}
+          </div>
+          <p className="mt-1 text-xs tabular-nums text-muted-foreground">
+            {fmtMoney(plan.priceCents, { cents: true })}/{plan.interval === "year" ? "yr" : "mo"}
+            {plan.trialDays > 0 && ` · ${plan.trialDays}-day trial`}
+            {` · ${plan.features.length} feature${plan.features.length === 1 ? "" : "s"}`}
+          </p>
+        </div>
+        <div className="flex shrink-0 items-center gap-1.5">
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-9 w-9"
+            onClick={() => setEditing((v) => !v)}
+            aria-expanded={editing}
+            aria-label={`Edit the ${plan.name} tier`}
+          >
+            <PenLine className="h-4 w-4" />
+          </Button>
+          <label className="flex cursor-pointer items-center gap-2 text-xs font-medium">
+            <Switch
+              checked={plan.active}
+              onCheckedChange={(v) => onToggleActive(plan, v)}
+              aria-label={`${plan.active ? "Deactivate" : "Activate"} the ${plan.name} tier`}
+            />
+            {plan.active ? "Active" : "Inactive"}
+          </label>
+        </div>
+      </div>
+      <AnimatePresence initial={false}>
+        {editing && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: "auto" }}
+            exit={{ opacity: 0, height: 0 }}
+            className="overflow-hidden"
+          >
+            <div className="border-t px-3.5 py-3.5">
+              <PlanTierEditor plan={plan} onSave={onSave} onDone={() => setEditing(false)} />
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
+
+/** Inline editor for one plan tier (name, price, interval, trial, badge, features). */
+function PlanTierEditor({
+  plan,
+  onSave,
+  onDone,
+}: {
+  plan: PlanDTO;
+  onSave: (plan: PlanDTO, draft: PlanDraft) => Promise<string | null>;
+  onDone: () => void;
+}) {
+  const [draft, setDraft] = useState<PlanDraft>(() => draftFromPlan(plan));
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  function patch(p: Partial<PlanDraft>) {
+    setDraft((prev) => ({ ...prev, ...p }));
+  }
+
+  async function submit(e: FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    const err = await onSave(plan, draft);
+    setBusy(false);
+    if (err) setError(err);
+    else onDone();
+  }
+
+  return (
+    <form onSubmit={(e) => void submit(e)} className="space-y-2.5">
+      <div className="grid gap-2.5 sm:grid-cols-2">
+        <div className="space-y-1.5">
+          <Label htmlFor={`plan-name-${plan.id}`}>Name</Label>
+          <Input
+            id={`plan-name-${plan.id}`}
+            value={draft.name}
+            onChange={(e) => patch({ name: e.target.value })}
+            maxLength={40}
+          />
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor={`plan-price-${plan.id}`}>Price (USD)</Label>
+          <Input
+            id={`plan-price-${plan.id}`}
+            type="number"
+            min="1"
+            step="0.01"
+            inputMode="decimal"
+            value={draft.price}
+            onChange={(e) => patch({ price: e.target.value })}
+            placeholder="49.00"
+            className="tabular-nums"
+          />
+        </div>
+        <div className="space-y-1.5">
+          <Label>Interval</Label>
+          <Select value={draft.interval} onValueChange={(v) => patch({ interval: v === "year" ? "year" : "month" })}>
+            <SelectTrigger aria-label={`Interval for ${plan.name}`} className="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="month">Monthly</SelectItem>
+              <SelectItem value="year">Yearly</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor={`plan-trial-${plan.id}`}>Trial days</Label>
+          <Input
+            id={`plan-trial-${plan.id}`}
+            type="number"
+            min="0"
+            max="30"
+            value={draft.trialDays}
+            onChange={(e) => patch({ trialDays: e.target.value })}
+            placeholder="0"
+            className="tabular-nums"
+          />
+        </div>
+        <div className="space-y-1.5 sm:col-span-2">
+          <Label htmlFor={`plan-badge-${plan.id}`}>Badge (optional)</Label>
+          <Input
+            id={`plan-badge-${plan.id}`}
+            value={draft.badge}
+            onChange={(e) => patch({ badge: e.target.value })}
+            placeholder="Most popular"
+            maxLength={20}
+          />
+        </div>
+      </div>
+      <div className="space-y-1.5">
+        <Label htmlFor={`plan-features-${plan.id}`}>Features — one per line, max 8</Label>
+        <Textarea
+          id={`plan-features-${plan.id}`}
+          value={draft.features}
+          onChange={(e) => patch({ features: e.target.value })}
+          rows={3}
+          placeholder={"Daily trade signals\nPrivate community access"}
+        />
+      </div>
+      {error && (
+        <p className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs font-medium text-red-600 dark:text-red-400">
+          {error}
+        </p>
+      )}
+      <div className="flex justify-end gap-2">
+        <Button type="button" variant="ghost" onClick={onDone}>
+          Cancel
+        </Button>
+        <Button type="submit" disabled={busy}>
+          {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />} Save tier
+        </Button>
+      </div>
+    </form>
+  );
+}
+
+/** "+ Add tier" expansion — POSTs a new plan to the product. */
+function AddTierForm({
+  onAdd,
+  onCancel,
+}: {
+  onAdd: (draft: PlanDraft) => Promise<string | null>;
+  onCancel: () => void;
+}) {
+  const [draft, setDraft] = useState<PlanDraft>({ ...EMPTY_PLAN_DRAFT });
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  function patch(p: Partial<PlanDraft>) {
+    setDraft((prev) => ({ ...prev, ...p }));
+  }
+
+  async function submit(e: FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    const err = await onAdd(draft);
+    setBusy(false);
+    // On success the parent collapses (and remounts fresh next time).
+    if (err) setError(err);
+  }
+
+  return (
+    <form onSubmit={(e) => void submit(e)} className="space-y-2.5 rounded-xl border border-dashed p-3.5">
+      <p className="text-xs font-semibold text-muted-foreground">New tier</p>
+      <div className="grid gap-2.5 sm:grid-cols-2">
+        <div className="space-y-1.5">
+          <Label htmlFor="new-plan-name">Name</Label>
+          <Input
+            id="new-plan-name"
+            value={draft.name}
+            onChange={(e) => patch({ name: e.target.value })}
+            placeholder="Monthly"
+            maxLength={40}
+          />
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="new-plan-price">Price (USD)</Label>
+          <Input
+            id="new-plan-price"
+            type="number"
+            min="1"
+            step="0.01"
+            inputMode="decimal"
+            value={draft.price}
+            onChange={(e) => patch({ price: e.target.value })}
+            placeholder="49.00"
+            className="tabular-nums"
+          />
+        </div>
+        <div className="space-y-1.5">
+          <Label>Interval</Label>
+          <Select value={draft.interval} onValueChange={(v) => patch({ interval: v === "year" ? "year" : "month" })}>
+            <SelectTrigger aria-label="Interval for the new tier" className="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="month">Monthly</SelectItem>
+              <SelectItem value="year">Yearly</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="new-plan-trial">Trial days</Label>
+          <Input
+            id="new-plan-trial"
+            type="number"
+            min="0"
+            max="30"
+            value={draft.trialDays}
+            onChange={(e) => patch({ trialDays: e.target.value })}
+            placeholder="0"
+            className="tabular-nums"
+          />
+        </div>
+        <div className="space-y-1.5 sm:col-span-2">
+          <Label htmlFor="new-plan-badge">Badge (optional)</Label>
+          <Input
+            id="new-plan-badge"
+            value={draft.badge}
+            onChange={(e) => patch({ badge: e.target.value })}
+            placeholder="Most popular"
+            maxLength={20}
+          />
+        </div>
+      </div>
+      <div className="space-y-1.5">
+        <Label htmlFor="new-plan-features">Features — one per line, max 8</Label>
+        <Textarea
+          id="new-plan-features"
+          value={draft.features}
+          onChange={(e) => patch({ features: e.target.value })}
+          rows={3}
+          placeholder={"Daily trade signals\nPrivate community access"}
+        />
+      </div>
+      {error && (
+        <p className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs font-medium text-red-600 dark:text-red-400">
+          {error}
+        </p>
+      )}
+      <div className="flex justify-end gap-2">
+        <Button type="button" variant="ghost" onClick={onCancel}>
+          Cancel
+        </Button>
+        <Button type="submit" disabled={busy}>
+          {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />} Add tier
+        </Button>
+      </div>
+    </form>
   );
 }
 
@@ -2811,6 +3525,711 @@ function CreatePromoDialog({
           </Button>
           <Button type="submit" form="create-promo-form" disabled={busy}>
             {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Tag className="h-4 w-4" />} Create code
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ============================================================================
+// TAB: AFFILIATES (creator-run referral programs) — Task 8-b
+// ============================================================================
+
+/** 3000 bps → "30%" (used for badges, toasts and dialogs). */
+function commissionLabel(bps: number): string {
+  return `${parseFloat((bps / 100).toFixed(2))}%`;
+}
+
+/** Percent input → commissionBps (1–90%, up to 2 decimals); null when invalid. */
+function percentToBps(raw: string): number | null {
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 1 || n > 90) return null;
+  const bps = Math.round(n * 100);
+  if (Math.abs(n * 100 - bps) > 1e-9) return null;
+  return bps;
+}
+
+/** Referral link format shared with the marketplace (see worklog Task 7). */
+function referralLink(code: string, productId: string): string {
+  const origin = typeof window === "undefined" ? "" : window.location.origin;
+  return `${origin}/?ref=${code}&product=${productId}`;
+}
+
+function AffiliatesTab({ user }: { user: SessionUser }) {
+  const { toast } = useToast();
+  const refresh = useAppStore((s) => s.refresh);
+  const navigate = useAppStore((s) => s.navigate);
+
+  const { data, error, loading, setData } = useCreatorFetch(async () => {
+    const [programsRes, productsRes] = await Promise.all([
+      api<{ programs: AffiliateProgramDTO[] }>("/api/affiliates/programs"),
+      api<{ products: ProductCardDTO[] }>(`/api/products?creatorId=${user.id}`),
+    ]);
+    return { programs: programsRes.programs, products: productsRes.products };
+  });
+
+  const [manage, setManage] = useState<AffiliateProgramDTO | null>(null);
+  const [launchOpen, setLaunchOpen] = useState(false);
+  const [confirmPause, setConfirmPause] = useState<AffiliateProgramDTO | null>(null);
+  const [launchingId, setLaunchingId] = useState<string | null>(null);
+  const [launchDrafts, setLaunchDrafts] = useState<Record<string, string>>({});
+
+  // Memoized so the launch dialog's open-effect doesn't reset on every render.
+  const programProductIds = useMemo(
+    () => new Set((data?.programs ?? []).map((p) => p.product.id)),
+    [data]
+  );
+  const notRunning = useMemo(
+    () => (data?.products ?? []).filter((p) => !programProductIds.has(p.id)),
+    [data, programProductIds]
+  );
+
+  async function toggleProgram(program: AffiliateProgramDTO, next: boolean) {
+    // Optimistic flip; revert + destructive toast on failure.
+    setData((prev) =>
+      prev
+        ? { ...prev, programs: prev.programs.map((p) => (p.id === program.id ? { ...p, active: next } : p)) }
+        : prev
+    );
+    try {
+      await api("/api/affiliates/programs", {
+        json: { productId: program.product.id, commissionBps: program.commissionBps, active: next },
+      });
+      toast({
+        title: next ? "Program resumed" : "Program paused",
+        description: next
+          ? `Affiliates can join and share ${program.product.title} again.`
+          : `${program.product.title}'s referral links stop tracking until you resume the program.`,
+      });
+    } catch (e) {
+      setData((prev) =>
+        prev
+          ? { ...prev, programs: prev.programs.map((p) => (p.id === program.id ? { ...p, active: !next } : p)) }
+          : prev
+      );
+      toast({ title: "Couldn't update the program", description: (e as Error).message, variant: "destructive" });
+    }
+  }
+
+  async function launchProgram(p: ProductCardDTO, rawPercent: string) {
+    const bps = percentToBps(rawPercent || "25");
+    if (bps === null) {
+      toast({
+        title: "Couldn't launch the program",
+        description: "Commission must be a percent between 1 and 90.",
+        variant: "destructive",
+      });
+      return;
+    }
+    setLaunchingId(p.id);
+    try {
+      await api("/api/affiliates/programs", { json: { productId: p.id, commissionBps: bps, active: true } });
+      toast({
+        title: "Affiliate program launched",
+        description: `Affiliates now earn ${commissionLabel(bps)} of the first invoice for ${p.title}.`,
+      });
+      setLaunchDrafts((prev) => {
+        const next = { ...prev };
+        delete next[p.id];
+        return next;
+      });
+      refresh();
+    } catch (e) {
+      toast({ title: "Couldn't launch the program", description: (e as Error).message, variant: "destructive" });
+    } finally {
+      setLaunchingId(null);
+    }
+  }
+
+  if (loading) {
+    return (
+      <div className="space-y-5" aria-busy="true" aria-label="Loading affiliate programs">
+        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          {[0, 1, 2, 3].map((i) => (
+            <Skeleton key={i} className="h-28 rounded-2xl" />
+          ))}
+        </div>
+        <div className="grid gap-5 md:grid-cols-2">
+          {[0, 1].map((i) => (
+            <Skeleton key={i} className="h-80 rounded-2xl" />
+          ))}
+        </div>
+      </div>
+    );
+  }
+  if (error || !data) return <LoadError message={error || "Affiliate programs unavailable."} />;
+
+  const { programs, products } = data;
+  const activePrograms = programs.filter((p) => p.active).length;
+  const totalAffiliates = programs.reduce((s, p) => s + p.affiliateCount, 0);
+  const totalPaid = programs.reduce((s, p) => s + p.paidCents, 0);
+  const totalPending = programs.reduce((s, p) => s + p.pendingCents, 0);
+  const totalClicks = programs.reduce((s, p) => s + p.totalClicks, 0);
+  const totalConversions = programs.reduce((s, p) => s + p.totalConversions, 0);
+
+  return (
+    <div className="space-y-5">
+      <SectionHeader
+        title="Affiliates"
+        description={`${programs.length} program${programs.length === 1 ? "" : "s"} · ${totalAffiliates} affiliate${
+          totalAffiliates === 1 ? "" : "s"
+        } promoting your products`}
+        action={
+          notRunning.length > 0 ? (
+            <Button onClick={() => setLaunchOpen(true)}>
+              <Rocket className="h-4 w-4" /> Launch program
+            </Button>
+          ) : undefined
+        }
+      />
+
+      {/* Explainer banner (only meaningful once at least one program exists) */}
+      {programs.length > 0 && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-emerald-500/25 bg-emerald-500/10 p-4">
+          <p className="flex items-start gap-3 text-sm leading-relaxed">
+            <Megaphone className="mt-0.5 h-5 w-5 shrink-0 text-emerald-600 dark:text-emerald-400" />
+            <span>
+              Affiliates share a referral link and earn their commission on each buyer&apos;s{" "}
+              <strong>first invoice</strong>. Commissions start pending and settle to paid when the billing engine
+              runs.
+            </span>
+          </p>
+          <Button variant="outline" size="sm" className="shrink-0" onClick={() => navigate("creator", { creatorTab: "time" })}>
+            <FastForward className="h-4 w-4" /> Open time machine
+          </Button>
+        </div>
+      )}
+
+      {/* Stats */}
+      {programs.length > 0 && (
+        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          <StatCard label="Active programs" value={String(activePrograms)} sub={`${programs.length} total`} icon={Megaphone} />
+          <StatCard label="Total affiliates" value={String(totalAffiliates)} sub="across all programs" icon={Handshake} />
+          <StatCard
+            label="Commissions paid"
+            value={fmtMoney(totalPaid, { cents: true })}
+            sub={`${fmtMoney(totalPending, { cents: true })} pending settlement`}
+            icon={CircleDollarSign}
+          />
+          <StatCard
+            label="Clicks driven"
+            value={fmtCompact(totalClicks)}
+            sub={`${totalConversions} conversion${totalConversions === 1 ? "" : "s"}`}
+            icon={MousePointerClick}
+          />
+        </div>
+      )}
+
+      {/* Program cards */}
+      {programs.length === 0 ? (
+        <EmptyState
+          icon={Megaphone}
+          title={products.length === 0 ? "No products to promote yet" : "No affiliate programs yet"}
+          description={
+            products.length === 0
+              ? "Create a product first — then launch an affiliate program and let your fans sell it for a cut of the first invoice."
+              : "Let your biggest fans sell for you — affiliates share a referral link and earn a commission on every buyer they bring in."
+          }
+          action={
+            products.length === 0 ? (
+              <Button onClick={() => navigate("creator", { creatorTab: "products" })}>
+                <Package className="h-4 w-4" /> Create a product
+              </Button>
+            ) : (
+              <Button onClick={() => setLaunchOpen(true)}>
+                <Rocket className="h-4 w-4" /> Launch your first affiliate program
+              </Button>
+            )
+          }
+        />
+      ) : (
+        <motion.div className="grid gap-5 md:grid-cols-2" variants={stagger} initial="hidden" animate="show">
+          {programs.map((program) => {
+            const programTiles: { label: string; value: string; emerald?: boolean }[] = [
+              { label: "Affiliates", value: String(program.affiliateCount) },
+              { label: "Clicks", value: fmtCompact(program.totalClicks) },
+              { label: "Conv.", value: String(program.totalConversions) },
+              { label: "Paid", value: fmtMoney(program.paidCents, { cents: true }), emerald: true },
+              { label: "Pending", value: fmtMoney(program.pendingCents, { cents: true }) },
+            ];
+            return (
+              <motion.div key={program.id} variants={fadeUp}>
+                <Panel className={cn("flex h-full flex-col overflow-hidden", !program.active && "opacity-75")}>
+                  <div className="p-5">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex min-w-0 items-center gap-3">
+                        <ProductCover
+                          theme={program.product.coverTheme}
+                          category="OTHER"
+                          title={program.product.title}
+                          className="h-12 w-16 shrink-0 rounded-lg"
+                          iconClassName="h-10 w-10"
+                        />
+                        <div className="min-w-0">
+                          <h3 className="truncate font-semibold leading-tight">{program.product.title}</h3>
+                          <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                            <StatusBadge status={program.product.status} />
+                            {!program.active && (
+                              <Badge
+                                variant="outline"
+                                className="border-amber-500/25 bg-amber-500/10 text-amber-700 dark:text-amber-400"
+                              >
+                                Inactive
+                              </Badge>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                      <label className="flex shrink-0 cursor-pointer items-center gap-2 text-xs font-medium">
+                        <Switch
+                          checked={program.active}
+                          onCheckedChange={(v) => {
+                            // Pausing is disruptive → confirm first.
+                            if (v) void toggleProgram(program, true);
+                            else setConfirmPause(program);
+                          }}
+                          aria-label={`${program.active ? "Pause" : "Resume"} the ${program.product.title} program`}
+                        />
+                        {program.active ? "Active" : "Paused"}
+                      </label>
+                    </div>
+
+                    <div className="mt-3.5 flex flex-wrap items-center gap-x-3 gap-y-1.5">
+                      <span className="inline-flex items-center gap-1 rounded-full border border-emerald-500/25 bg-emerald-500/12 px-2.5 py-0.5 text-[11px] font-semibold text-emerald-700 dark:text-emerald-400">
+                        <BadgePercent className="h-3 w-3" />
+                        {commissionLabel(program.commissionBps)} of first invoice
+                      </span>
+                      <span className="text-[11px] text-muted-foreground">Running since {fmtDate(program.createdAt)}</span>
+                    </div>
+
+                    <dl className="mt-4 grid grid-cols-3 gap-2 sm:grid-cols-5">
+                      {programTiles.map((s) => (
+                        <div key={s.label} className="rounded-lg bg-muted/50 px-2 py-2 text-center">
+                          <dt className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                            {s.label}
+                          </dt>
+                          <dd
+                            className={cn(
+                              "mt-0.5 text-sm font-bold tabular-nums",
+                              s.emerald && "text-emerald-600 dark:text-emerald-400"
+                            )}
+                          >
+                            {s.value}
+                          </dd>
+                        </div>
+                      ))}
+                    </dl>
+
+                    <div className="mt-4 flex items-center justify-between gap-3">
+                      <span className="text-xs text-muted-foreground">Commission</span>
+                      <Button variant="outline" size="sm" className="h-9" onClick={() => setManage(program)}>
+                        <Percent className="h-4 w-4" /> Manage commission
+                      </Button>
+                    </div>
+                  </div>
+
+                  {/* Affiliate roster */}
+                  <div className="mt-auto border-t bg-muted/30 p-4">
+                    <div className="mb-2 flex items-center justify-between gap-2">
+                      <p className="flex items-center gap-1.5 text-xs font-semibold">
+                        <Handshake className="h-3.5 w-3.5 text-primary" />
+                        Affiliates{" "}
+                        <span className="font-normal text-muted-foreground">({program.affiliateCount})</span>
+                      </p>
+                      <span className="text-[11px] text-muted-foreground">Sorted by earnings</span>
+                    </div>
+                    {program.affiliates.length === 0 ? (
+                      <p className="rounded-xl border border-dashed bg-card p-3 text-center text-xs text-muted-foreground">
+                        No affiliates yet — they&apos;ll appear here as soon as someone joins with a referral link.
+                      </p>
+                    ) : (
+                      <div className={cn("max-h-56 overflow-auto rounded-xl border bg-card", SCROLL_THIN)}>
+                        <table className="w-full min-w-[540px] text-xs">
+                          <TableHeader className="sticky top-0 z-10 bg-card shadow-[0_1px_0_0_var(--border)]">
+                            <TableRow className="hover:bg-transparent">
+                              <TableHead className="pl-3">Affiliate</TableHead>
+                              <TableHead>Code</TableHead>
+                              <TableHead className="text-right">Clicks</TableHead>
+                              <TableHead className="text-right">Conv.</TableHead>
+                              <TableHead className="text-right">Earned</TableHead>
+                              <TableHead className="pr-3 text-right">Joined</TableHead>
+                            </TableRow>
+                          </TableHeader>
+                          <TableBody>
+                            {[...program.affiliates]
+                              .sort((a, b) => b.earnedPaidCents - a.earnedPaidCents)
+                              .map((a) => (
+                                <TableRow key={a.id} className={cn(!a.active && "opacity-60")}>
+                                  <TableCell className="py-2 pl-3">
+                                    <div className="flex items-center gap-2">
+                                      <UserAvatar
+                                        name={a.affiliate.name || a.affiliate.email}
+                                        color={a.affiliate.avatarColor}
+                                        size="sm"
+                                      />
+                                      <div className="min-w-0">
+                                        <p className="flex items-center gap-1.5 truncate text-[13px] font-medium leading-tight">
+                                          <span className="truncate">{a.affiliate.name || a.affiliate.email}</span>
+                                          {!a.active && (
+                                            <span className="shrink-0 rounded-full border border-amber-500/25 bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:text-amber-400">
+                                              Inactive
+                                            </span>
+                                          )}
+                                        </p>
+                                        <p className="truncate text-[11px] text-muted-foreground">{a.affiliate.email}</p>
+                                      </div>
+                                    </div>
+                                  </TableCell>
+                                  <TableCell>
+                                    <span className="inline-flex items-center gap-0.5">
+                                      <span className="font-mono text-[11px] font-semibold tracking-wide">{a.code}</span>
+                                      <CopyButton value={referralLink(a.code, program.product.id)} />
+                                    </span>
+                                  </TableCell>
+                                  <TableCell className="text-right tabular-nums">{a.clicks}</TableCell>
+                                  <TableCell className="text-right tabular-nums">{a.conversions}</TableCell>
+                                  <TableCell className="text-right">
+                                    <span className="font-semibold tabular-nums text-emerald-600 dark:text-emerald-400">
+                                      {fmtMoney(a.earnedPaidCents, { cents: true })}
+                                    </span>
+                                    {a.earnedPendingCents > 0 && (
+                                      <span className="block text-[10px] tabular-nums text-amber-600 dark:text-amber-400">
+                                        +{fmtMoney(a.earnedPendingCents, { cents: true })} pending
+                                      </span>
+                                    )}
+                                  </TableCell>
+                                  <TableCell className="pr-3 text-right text-[11px] tabular-nums text-muted-foreground">
+                                    {fmtDate(a.joinedAt)}
+                                  </TableCell>
+                                </TableRow>
+                              ))}
+                          </TableBody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+                </Panel>
+              </motion.div>
+            );
+          })}
+        </motion.div>
+      )}
+
+      {/* Products without a program */}
+      {notRunning.length > 0 && (
+        <section aria-label="Products without an affiliate program">
+          <div className="mb-3">
+            <h2 className="text-sm font-bold">Not running</h2>
+            <p className="mt-0.5 text-xs text-muted-foreground">
+              {notRunning.length} product{notRunning.length === 1 ? "" : "s"} without a program — set a commission and
+              launch one.
+            </p>
+          </div>
+          <div className="grid gap-4 md:grid-cols-2">
+            {notRunning.map((p) => (
+              <Panel key={p.id} className="flex flex-wrap items-center gap-3 p-4">
+                <ProductCover
+                  theme={p.coverTheme}
+                  category={p.category}
+                  title={p.title}
+                  className="h-10 w-14 shrink-0 rounded-lg"
+                  iconClassName="h-9 w-9"
+                />
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-sm font-semibold leading-tight">{p.title}</p>
+                  <p className="mt-0.5 text-xs text-muted-foreground">
+                    {categoryLabel(p.category)} · {fmtCompact(p.membersCount)} members
+                  </p>
+                </div>
+                <div className="flex shrink-0 items-center gap-2">
+                  <div className="relative w-[72px]">
+                    <Input
+                      value={launchDrafts[p.id] ?? "25"}
+                      onChange={(e) => setLaunchDrafts((prev) => ({ ...prev, [p.id]: e.target.value }))}
+                      inputMode="decimal"
+                      aria-label={`Commission percent for ${p.title}`}
+                      className="h-9 pr-6 text-right tabular-nums"
+                    />
+                    <span className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-xs text-muted-foreground">
+                      %
+                    </span>
+                  </div>
+                  <Button
+                    className="h-9"
+                    onClick={() => void launchProgram(p, launchDrafts[p.id] ?? "25")}
+                    disabled={launchingId === p.id}
+                  >
+                    {launchingId === p.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Rocket className="h-4 w-4" />}
+                    Launch program
+                  </Button>
+                </div>
+              </Panel>
+            ))}
+          </div>
+        </section>
+      )}
+
+      <ManageCommissionDialog program={manage} onOpenChange={(o) => !o && setManage(null)} />
+      <LaunchProgramDialog
+        open={launchOpen}
+        onOpenChange={setLaunchOpen}
+        products={notRunning}
+        onLaunched={() => refresh()}
+      />
+
+      {/* Pause confirm */}
+      <AlertDialog open={!!confirmPause} onOpenChange={(o) => !o && setConfirmPause(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Pause this affiliate program?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {confirmPause?.product.title}&apos;s referral links will stop tracking clicks and new affiliates
+              won&apos;t be able to join. Earned commissions are kept and still settle as normal.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Keep running</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-amber-600 text-white hover:bg-amber-700"
+              onClick={() => {
+                const program = confirmPause;
+                setConfirmPause(null);
+                if (program) void toggleProgram(program, false);
+              }}
+            >
+              Pause program
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </div>
+  );
+}
+
+// ============================================================================
+// Manage commission dialog (existing program)
+// ============================================================================
+
+function ManageCommissionDialog({
+  program,
+  onOpenChange,
+}: {
+  program: AffiliateProgramDTO | null;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const { toast } = useToast();
+  const refresh = useAppStore((s) => s.refresh);
+  const [percent, setPercent] = useState("30");
+  const [active, setActive] = useState(true);
+  const [formError, setFormError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (program) {
+      setPercent(String(parseFloat((program.commissionBps / 100).toFixed(2))));
+      setActive(program.active);
+      setFormError(null);
+      setBusy(false);
+    }
+  }, [program]);
+
+  async function submit(e: FormEvent) {
+    e.preventDefault();
+    if (!program) return;
+    const bps = percentToBps(percent);
+    if (bps === null) return setFormError("Commission must be a percent between 1 and 90.");
+    setFormError(null);
+    setBusy(true);
+    try {
+      await api("/api/affiliates/programs", {
+        json: { productId: program.product.id, commissionBps: bps, active },
+      });
+      toast({
+        title: "Commission updated",
+        description: active
+          ? `Affiliates on ${program.product.title} now earn ${commissionLabel(bps)} of each first invoice.`
+          : `Saved ${commissionLabel(bps)} — the program stays paused until you resume it.`,
+      });
+      refresh();
+      onOpenChange(false);
+    } catch (err) {
+      setFormError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Dialog open={!!program} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Manage commission</DialogTitle>
+          <DialogDescription>What affiliates earn for each buyer they bring to {program?.product.title}.</DialogDescription>
+        </DialogHeader>
+        <form id="manage-commission-form" onSubmit={(e) => void submit(e)} className="space-y-4">
+          <div className="space-y-1.5">
+            <Label htmlFor="af-percent">Commission</Label>
+            <div className="relative">
+              <Input
+                id="af-percent"
+                type="number"
+                min="1"
+                max="90"
+                step="0.5"
+                inputMode="decimal"
+                value={percent}
+                onChange={(e) => setPercent(e.target.value)}
+                className="pr-8 text-base tabular-nums"
+              />
+              <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground">
+                %
+              </span>
+            </div>
+            <p className="text-[11px] text-muted-foreground">
+              Affiliates earn this share of a referred buyer&apos;s first invoice — between 1% and 90%.
+            </p>
+          </div>
+          <label className="flex cursor-pointer items-center justify-between gap-3 rounded-xl border p-3.5">
+            <span className="min-w-0">
+              <span className="block text-sm font-medium">Program active</span>
+              <span className="block text-xs text-muted-foreground">
+                Paused programs stop tracking referral clicks.
+              </span>
+            </span>
+            <Switch checked={active} onCheckedChange={setActive} aria-label="Program active" />
+          </label>
+          {formError && (
+            <p className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs font-medium text-red-600 dark:text-red-400">
+              {formError}
+            </p>
+          )}
+        </form>
+        <DialogFooter className="gap-2 sm:gap-0">
+          <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>
+            Cancel
+          </Button>
+          <Button type="submit" form="manage-commission-form" disabled={busy}>
+            {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />} Save commission
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ============================================================================
+// Launch program dialog (pick a product + commission)
+// ============================================================================
+
+function LaunchProgramDialog({
+  open,
+  onOpenChange,
+  products,
+  onLaunched,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  products: ProductCardDTO[];
+  onLaunched: () => void;
+}) {
+  const { toast } = useToast();
+  const [productId, setProductId] = useState("");
+  const [percent, setPercent] = useState("25");
+  const [formError, setFormError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (open) {
+      setProductId(products[0]?.id ?? "");
+      setPercent("25");
+      setFormError(null);
+      setBusy(false);
+    }
+  }, [open, products]);
+
+  async function submit(e: FormEvent) {
+    e.preventDefault();
+    if (!productId) return setFormError("Pick a product to launch the program on.");
+    const bps = percentToBps(percent);
+    if (bps === null) return setFormError("Commission must be a percent between 1 and 90.");
+    setFormError(null);
+    setBusy(true);
+    try {
+      await api("/api/affiliates/programs", { json: { productId, commissionBps: bps, active: true } });
+      const title = products.find((p) => p.id === productId)?.title;
+      toast({
+        title: "Affiliate program launched",
+        description: `Affiliates now earn ${commissionLabel(bps)} of the first invoice for ${title}.`,
+      });
+      onLaunched();
+      onOpenChange(false);
+    } catch (err) {
+      setFormError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Launch an affiliate program</DialogTitle>
+          <DialogDescription>
+            One program per product — affiliates who join get a referral link and earn a cut of the first invoice.
+          </DialogDescription>
+        </DialogHeader>
+        <form id="launch-program-form" onSubmit={(e) => void submit(e)} className="space-y-4">
+          <div className="space-y-1.5">
+            <Label>Product</Label>
+            <Select value={productId} onValueChange={setProductId}>
+              <SelectTrigger aria-label="Product to launch the program on" className="w-full">
+                <SelectValue placeholder="Pick a product" />
+              </SelectTrigger>
+              <SelectContent>
+                {products.map((p) => (
+                  <SelectItem key={p.id} value={p.id}>
+                    {p.title}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="launch-percent">Commission</Label>
+            <div className="relative">
+              <Input
+                id="launch-percent"
+                type="number"
+                min="1"
+                max="90"
+                step="0.5"
+                inputMode="decimal"
+                value={percent}
+                onChange={(e) => setPercent(e.target.value)}
+                className="pr-8 text-base tabular-nums"
+              />
+              <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground">
+                %
+              </span>
+            </div>
+            <p className="text-[11px] text-muted-foreground">
+              25% is a strong default — between 1% and 90%. You can change it anytime.
+            </p>
+          </div>
+          {formError && (
+            <p className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs font-medium text-red-600 dark:text-red-400">
+              {formError}
+            </p>
+          )}
+        </form>
+        <DialogFooter className="gap-2 sm:gap-0">
+          <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>
+            Cancel
+          </Button>
+          <Button type="submit" form="launch-program-form" disabled={busy}>
+            {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Rocket className="h-4 w-4" />} Launch program
           </Button>
         </DialogFooter>
       </DialogContent>

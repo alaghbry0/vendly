@@ -3,10 +3,11 @@ import { errorResponse, HttpError, requireUser } from "@/lib/session";
 import { chargeStripeCard, chargePaypal, quoteCrypto, detectCardBrand, type Gateway } from "@/lib/gateways";
 import { provisionSubscription } from "@/lib/billing";
 import { validatePromoForPlan } from "@/lib/promos";
+import { resolveReferral } from "@/lib/affiliates";
 
 // POST /api/checkout — multi-gateway subscription checkout
 // body: { planId, gateway: STRIPE|PAYPAL|CRYPTO, card?: {number,expMonth,expYear,cvc},
-//         paypalEmail?, walletAddress?, saveMethod?, startTrial?, promoCode? }
+//         paypalEmail?, walletAddress?, saveMethod?, startTrial?, promoCode?, refCode? }
 export async function POST(req: Request) {
   try {
     const user = await requireUser(req);
@@ -39,6 +40,22 @@ export async function POST(req: Request) {
       discountCents = check.discountCents!;
     }
     const chargeCents = startTrial ? 0 : Math.max(0, plan.priceCents - discountCents);
+
+    // Referral attribution (?ref=CODE landing) — soft-validated: an invalid
+    // code is ignored (checkout never blocks on it), a valid one attaches.
+    let refLinkId: string | null = null;
+    let refMeta: { code: string; affiliateName: string | null; commissionCents: number } | null = null;
+    if (body.refCode) {
+      const ref = await resolveReferral(String(body.refCode), plan.productId, user.id);
+      if (!("error" in ref)) {
+        refLinkId = ref.linkId;
+        refMeta = {
+          code: ref.code,
+          affiliateName: ref.affiliateName,
+          commissionCents: startTrial ? 0 : Math.round((chargeCents * ref.commissionBps) / 10000),
+        };
+      }
+    }
 
     // ---------- STRIPE ----------
     if (gateway === "STRIPE") {
@@ -73,8 +90,12 @@ export async function POST(req: Request) {
         chargedNow: !startTrial,
         txnId: charge.txnId,
         promoCodeId,
+        refLinkId,
       });
-      return Response.json({ status: "COMPLETED", ...result, discountCents, promoCode: promoCodeLabel }, { status: 201 });
+      return Response.json(
+        { status: "COMPLETED", ...result, discountCents, promoCode: promoCodeLabel, referral: refMeta },
+        { status: 201 }
+      );
     }
 
     // ---------- PAYPAL ----------
@@ -98,8 +119,12 @@ export async function POST(req: Request) {
         chargedNow: !startTrial,
         txnId: charge.txnId,
         promoCodeId,
+        refLinkId,
       });
-      return Response.json({ status: "COMPLETED", ...result, discountCents, promoCode: promoCodeLabel }, { status: 201 });
+      return Response.json(
+        { status: "COMPLETED", ...result, discountCents, promoCode: promoCodeLabel, referral: refMeta },
+        { status: 201 }
+      );
     }
 
     // ---------- CRYPTO ----------
@@ -125,6 +150,7 @@ export async function POST(req: Request) {
         currentPeriodEnd: new Date(now.getTime() + 30 * 86400000),
         trialEndsAt,
         promoCodeId,
+        refLinkId,
         dunningAttempts: -1, // marker: awaiting 1st crypto payment
       },
     });
@@ -136,6 +162,7 @@ export async function POST(req: Request) {
         quote,
         discountCents,
         promoCode: promoCodeLabel,
+        referral: refMeta,
         plan: { id: plan.id, name: plan.name, priceCents: plan.priceCents, interval: plan.interval },
       },
       { status: 202 }

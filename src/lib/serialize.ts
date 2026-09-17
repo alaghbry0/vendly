@@ -62,6 +62,7 @@ export function serializeProductDetail(
   p: ProductWithRelations & {
     assets: (typeof p extends never ? never : any)[];
     reviews: { id: string; authorName: string; rating: number; comment: string; createdAt: Date }[];
+    affiliateProgram?: { commissionBps: number; active: boolean } | null;
   },
   hasAccess: boolean
 ): ProductDetailDTO {
@@ -95,6 +96,7 @@ export function serializeProductDetail(
       bio: p.creator.bio,
     },
     hasAccess,
+    affiliateBps: p.affiliateProgram?.active ? p.affiliateProgram.commissionBps : null,
   };
 }
 

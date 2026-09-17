@@ -497,6 +497,7 @@ function Footer() {
               <button className="w-fit text-left transition-colors hover:text-primary" onClick={() => navigate("portal", { portalTab: "subscriptions" })}>Billing portal</button>
               <button className="w-fit text-left transition-colors hover:text-primary" onClick={() => navigate("portal", { portalTab: "licenses" })}>License keys</button>
               <button className="w-fit text-left transition-colors hover:text-primary" onClick={() => navigate("portal", { portalTab: "downloads" })}>Secure downloads</button>
+              <button className="w-fit text-left transition-colors hover:text-primary" onClick={() => navigate("portal", { portalTab: "affiliates" })}>Affiliate earnings</button>
               <span>Notifications</span>
             </div>
             <div className="flex flex-col gap-1.5">

@@ -14,6 +14,7 @@ export type NotificationIcon =
   | "star"
   | "tag"
   | "bank"
+  | "share"
   | "bell";
 
 export async function notify(opts: {
@@ -59,6 +60,11 @@ export function notificationTarget(type: string): { view: "portal" | "creator"; 
     case "payout_paid":
     case "payout_pending":
       return { view: "creator", tab: "payouts" };
+    case "affiliate_earned":
+    case "affiliate_paid":
+      return { view: "portal", tab: "affiliates" };
+    case "affiliate_joined":
+      return { view: "creator", tab: "affiliates" };
     default:
       return null;
   }

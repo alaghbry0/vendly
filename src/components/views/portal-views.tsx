@@ -3,13 +3,15 @@
 // CUSTOMER SELF-SERVICE BILLING PORTAL — "My Hub".
 // Owned by Task 2-b. Rendered when store.view === "portal".
 // Internal tab system (synced from params.portalTab): overview | subscriptions |
-// licenses | downloads | wishlist | invoices | payment-methods | settings.
+// licenses | downloads | wishlist | affiliates | invoices | payment-methods |
+// settings.
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ComponentProps, type FormEvent } from "react";
 import { AnimatePresence, motion, type Variants } from "framer-motion";
 import { useAppStore } from "@/lib/store";
 import { api, ApiError } from "@/lib/api";
 import type {
+  AffiliateLinkDTO,
   GrantDTO,
   InvoiceDTO,
   LicenseDTO,
@@ -84,18 +86,22 @@ import {
   AtSign,
   BadgeCheck,
   Ban,
+  Banknote,
   Bitcoin,
   CalendarClock,
   CalendarRange,
   CalendarX,
+  Check,
   ChevronDown,
   ChevronRight,
   CircleCheck,
   CircleX,
+  Copy,
   CreditCard,
   Download,
   Eye,
   EyeOff,
+  ExternalLink,
   FileArchive,
   FileAudio,
   FileCode,
@@ -111,18 +117,22 @@ import {
   Loader2,
   Lock,
   MonitorSmartphone,
+  MousePointerClick,
   Plus,
   ReceiptText,
   Repeat,
   RotateCcw,
   Settings,
+  Share2,
   ShieldAlert,
   ShieldCheck,
   Star,
   Store,
+  Target,
   Timer,
   Trash2,
   TriangleAlert,
+  UserPlus,
   Users,
   Wallet,
   type LucideIcon,
@@ -138,6 +148,7 @@ type PortalTab =
   | "licenses"
   | "downloads"
   | "wishlist"
+  | "affiliates"
   | "invoices"
   | "payment-methods"
   | "settings";
@@ -148,6 +159,7 @@ const PORTAL_TABS: { key: PortalTab; label: string; icon: LucideIcon }[] = [
   { key: "licenses", label: "Licenses", icon: KeyRound },
   { key: "downloads", label: "Downloads", icon: Download },
   { key: "wishlist", label: "Wishlist", icon: Heart },
+  { key: "affiliates", label: "Affiliates", icon: Share2 },
   { key: "invoices", label: "Invoices", icon: ReceiptText },
   { key: "payment-methods", label: "Payment methods", icon: Wallet },
   { key: "settings", label: "Settings", icon: Settings },
@@ -163,6 +175,7 @@ interface PortalData {
   licenses: LicenseDTO[];
   grants: GrantDTO[];
   wishlist: WishlistItemDTO[];
+  affiliateLinks: AffiliateLinkDTO[];
 }
 
 const stagger: Variants = { hidden: {}, show: { transition: { staggerChildren: 0.06 } } };
@@ -240,14 +253,16 @@ function usePortalData() {
     let alive = true;
     const load = async () => {
       try {
-        const [subsRes, invoicesRes, methodsRes, licensesRes, grantsRes, wishlistRes] = await Promise.all([
-          api<{ subscriptions: SubscriptionDTO[] }>("/api/subscriptions"),
-          api<{ invoices: InvoiceDTO[] }>("/api/invoices"),
-          api<{ paymentMethods: PaymentMethodDTO[] }>("/api/payment-methods"),
-          api<{ licenses: LicenseDTO[] }>("/api/licenses"),
-          api<{ grants: GrantDTO[] }>("/api/grants"),
-          api<{ items: WishlistItemDTO[] }>("/api/wishlist"),
-        ]);
+        const [subsRes, invoicesRes, methodsRes, licensesRes, grantsRes, wishlistRes, affiliatesRes] =
+          await Promise.all([
+            api<{ subscriptions: SubscriptionDTO[] }>("/api/subscriptions"),
+            api<{ invoices: InvoiceDTO[] }>("/api/invoices"),
+            api<{ paymentMethods: PaymentMethodDTO[] }>("/api/payment-methods"),
+            api<{ licenses: LicenseDTO[] }>("/api/licenses"),
+            api<{ grants: GrantDTO[] }>("/api/grants"),
+            api<{ items: WishlistItemDTO[] }>("/api/wishlist"),
+            api<{ links: AffiliateLinkDTO[] }>("/api/affiliates/links"),
+          ]);
         if (!alive) return;
         setData({
           subs: subsRes.subscriptions,
@@ -256,6 +271,7 @@ function usePortalData() {
           licenses: licensesRes.licenses,
           grants: grantsRes.grants,
           wishlist: wishlistRes.items,
+          affiliateLinks: affiliatesRes.links,
         });
         setError(null);
       } catch (e) {
@@ -353,7 +369,7 @@ export function PortalViews() {
       animate={{ opacity: 1 }}
       transition={{ duration: 0.3 }}
     >
-      <div className="grid gap-8 lg:grid-cols-[14rem_1fr]">
+      <div className="grid grid-cols-1 gap-8 lg:grid-cols-[14rem_1fr]">
         {/* ---------- Sidebar (desktop) ---------- */}
         <aside className="hidden lg:block">
           <nav className="sticky top-20 w-56" aria-label="Portal sections">
@@ -446,6 +462,7 @@ export function PortalViews() {
               {tab === "wishlist" && (
                 <WishlistTab items={data.wishlist} subs={data.subs} onRemove={removeWishlistItem} />
               )}
+              {tab === "affiliates" && <AffiliatesTab links={data.affiliateLinks} />}
               {tab === "invoices" && (
                 <InvoicesTab
                   invoices={data.invoices}
@@ -2047,6 +2064,333 @@ function WishlistTab({
           </motion.div>
         )}
       </AnimatePresence>
+    </motion.section>
+  );
+}
+
+// ============================================================================
+// Tab: Affiliates
+// ============================================================================
+
+/** Referral landing URL — the format the marketplace landing flow reads
+ *  (?ref + ?product are picked up once, stored in sessionStorage, click-tracked,
+ *  then the visitor is taken to the product page). */
+function referralUrl(link: AffiliateLinkDTO): string {
+  const origin = typeof window === "undefined" ? "" : window.location.origin;
+  return `${origin}/?ref=${link.code}&product=${link.product.id}`;
+}
+
+/** 3000 bps → "30" (kept precise for non-whole rates, e.g. 2550 → "25.5"). */
+function bpsPercent(bps: number): string {
+  const pct = bps / 100;
+  return Number.isInteger(pct) ? String(pct) : pct.toFixed(1);
+}
+
+function AffiliateLinkCard({ link, index }: { link: AffiliateLinkDTO; index: number }) {
+  const { toast } = useToast();
+  const navigate = useAppStore((s) => s.navigate);
+  const [copied, setCopied] = useState(false);
+  const url = referralUrl(link);
+  const rate = link.clicks > 0 ? (link.conversions / link.clicks) * 100 : null;
+  const viewProduct = () => navigate("product", { productId: link.product.id });
+
+  function copyLink() {
+    navigator.clipboard?.writeText(url).catch(() => {});
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1600);
+    toast({
+      title: "Referral link copied",
+      description: `Share “${link.product.title}” — subscriptions through your link earn you ${bpsPercent(
+        link.commissionBps
+      )}%.`,
+    });
+  }
+
+  return (
+    <motion.article
+      initial={{ opacity: 0, y: 14 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{
+        opacity: { duration: 0.25, delay: Math.min(index * 0.06, 0.36) },
+        y: { duration: 0.3, ease: "easeOut", delay: Math.min(index * 0.06, 0.36) },
+      }}
+      className="h-full"
+    >
+      <div className="group flex h-full flex-col overflow-hidden rounded-2xl border bg-card text-left shadow-sm transition-all duration-200 hover:-translate-y-1 hover:shadow-lg focus-within:ring-2 focus-within:ring-emerald-500/40">
+        {/* Cover with the commission badge */}
+        <div className="relative overflow-hidden">
+          <ProductCover
+            theme={link.product.coverTheme}
+            category="OTHER"
+            title={link.product.title}
+            className="aspect-[16/8] w-full transition-transform duration-300 group-hover:scale-105"
+            iconClassName="h-24 w-24"
+          />
+          <span className="absolute left-3 top-3 inline-flex items-center gap-1.5 rounded-full bg-gradient-to-r from-emerald-500 to-teal-500 px-2.5 py-1 text-[11px] font-bold text-white shadow-sm backdrop-blur-sm">
+            <Banknote className="h-3 w-3" aria-hidden /> Earn {bpsPercent(link.commissionBps)}%
+          </span>
+          {!link.active && (
+            <span className="absolute right-3 top-3 inline-flex items-center rounded-full bg-amber-500/95 px-2.5 py-1 text-[11px] font-semibold text-white shadow-sm backdrop-blur-sm">
+              Paused
+            </span>
+          )}
+        </div>
+
+        {/* Body */}
+        <div className="flex flex-1 flex-col gap-3 p-4">
+          {/* Creator + product */}
+          <div className="flex items-center gap-2">
+            <UserAvatar name={link.product.creator.name} color={link.product.creator.avatarColor} size="sm" />
+            <span className="truncate text-xs font-medium text-muted-foreground">
+              {link.product.creator.name ?? "Creator"}
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={viewProduct}
+            className="w-fit rounded-sm text-left text-[15px] font-semibold tracking-tight hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/40"
+          >
+            {link.product.title}
+          </button>
+
+          {/* Referral link + copy/open */}
+          <div>
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+              Your referral link
+            </p>
+            <div className="mt-1.5 flex items-center gap-1.5">
+              <Input
+                readOnly
+                value={url}
+                onFocus={(e) => e.target.select()}
+                title={url}
+                aria-label={`Referral link for ${link.product.title}`}
+                className="h-11 min-w-0 flex-1 rounded-xl bg-muted/40 font-mono text-xs text-muted-foreground focus-visible:border-emerald-500/50 focus-visible:ring-emerald-500/30"
+              />
+              <Button
+                variant="outline"
+                className="h-11 w-11 shrink-0 rounded-xl px-0"
+                onClick={copyLink}
+                aria-label={`Copy referral link for ${link.product.title}`}
+                title="Copy referral link"
+              >
+                {copied ? (
+                  <Check className="h-4 w-4 text-emerald-500" aria-hidden />
+                ) : (
+                  <Copy className="h-4 w-4" aria-hidden />
+                )}
+              </Button>
+              <Button
+                variant="ghost"
+                className="h-11 w-11 shrink-0 rounded-xl px-0 text-muted-foreground"
+                onClick={() => window.open(url, "_blank", "noopener,noreferrer")}
+                aria-label={`Open the referral landing page for ${link.product.title} in a new tab`}
+                title="Open referral landing page"
+              >
+                <ExternalLink className="h-4 w-4" aria-hidden />
+              </Button>
+            </div>
+          </div>
+
+          {/* Performance mini-grid */}
+          <div className="grid grid-cols-3 rounded-xl border bg-muted/30 py-2.5 text-center">
+            <div className="px-2">
+              <p className="text-sm font-bold tabular-nums">{fmtCompact(link.clicks)}</p>
+              <p className="mt-0.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Clicks</p>
+            </div>
+            <div className="border-x px-2">
+              <p className="text-sm font-bold tabular-nums">{link.conversions}</p>
+              <p className="mt-0.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                Conversions
+              </p>
+            </div>
+            <div className="px-2">
+              <p className="text-sm font-bold tabular-nums">{rate != null ? `${rate.toFixed(1)}%` : "—"}</p>
+              <p className="mt-0.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                Conv. rate
+              </p>
+            </div>
+          </div>
+
+          {/* Earnings + joined */}
+          <div className="mt-auto space-y-1.5 border-t pt-3">
+            <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+              <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+                <Banknote className="h-3.5 w-3.5 text-emerald-500" aria-hidden /> Paid
+                <span className="text-sm font-bold tabular-nums text-emerald-600 dark:text-emerald-400">
+                  {fmtMoney(link.earnedPaidCents, { cents: true })}
+                </span>
+              </span>
+              <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+                <Timer className="h-3.5 w-3.5 text-amber-500" aria-hidden /> Pending
+                <span className="text-sm font-bold tabular-nums text-amber-600 dark:text-amber-400">
+                  {fmtMoney(link.earnedPendingCents, { cents: true })}
+                </span>
+              </span>
+            </div>
+            <p className="text-[11px] text-muted-foreground">Joined {timeAgo(link.createdAt)}</p>
+          </div>
+        </div>
+      </div>
+    </motion.article>
+  );
+}
+
+function HowItWorksDialog({
+  open,
+  onOpenChange,
+  commissionLabel,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  commissionLabel: string | null;
+}) {
+  const steps = [
+    {
+      icon: Share2,
+      title: "Share your link",
+      body: "Grab your referral link from any product with an affiliate program and post it anywhere — socials, DMs, your community.",
+    },
+    {
+      icon: UserPlus,
+      title: "Someone subscribes",
+      body: "When a new member checks out through your link, the sale is automatically attributed to you.",
+    },
+    {
+      icon: Banknote,
+      title: commissionLabel
+        ? `You earn ${commissionLabel} of their first invoice`
+        : "You earn a share of their first invoice",
+      body: "The commission starts as pending and settles to paid on the next billing run.",
+    },
+  ];
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>How affiliate links work</DialogTitle>
+          <DialogDescription>
+            Earn commissions by sharing products you love — three steps, zero setup.
+          </DialogDescription>
+        </DialogHeader>
+        <ol className="space-y-5">
+          {steps.map((step, i) => (
+            <li key={step.title} className="flex items-start gap-3.5">
+              <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-emerald-500/10 text-emerald-600 dark:text-emerald-400">
+                <step.icon className="h-5 w-5" aria-hidden />
+              </span>
+              <div className="min-w-0">
+                <p className="text-[11px] font-semibold uppercase tracking-wide text-emerald-600 dark:text-emerald-400">
+                  Step {i + 1}
+                </p>
+                <p className="mt-0.5 text-sm font-semibold leading-snug">{step.title}</p>
+                <p className="mt-1 text-sm leading-relaxed text-muted-foreground">{step.body}</p>
+              </div>
+            </li>
+          ))}
+        </ol>
+        <DialogFooter>
+          <Button className="rounded-xl" onClick={() => onOpenChange(false)}>
+            Got it
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function AffiliatesTab({ links }: { links: AffiliateLinkDTO[] }) {
+  const navigate = useAppStore((s) => s.navigate);
+  const [howOpen, setHowOpen] = useState(false);
+
+  // Newest programs first.
+  const sorted = useMemo(
+    () => [...links].sort((a, b) => +new Date(b.createdAt) - +new Date(a.createdAt)),
+    [links]
+  );
+
+  const paid = links.reduce((sum, l) => sum + l.earnedPaidCents, 0);
+  const pending = links.reduce((sum, l) => sum + l.earnedPendingCents, 0);
+  const clicks = links.reduce((sum, l) => sum + l.clicks, 0);
+  const conversions = links.reduce((sum, l) => sum + l.conversions, 0);
+  const rate = clicks > 0 ? (conversions / clicks) * 100 : null;
+
+  // Commission copy for the "How it works" dialog: exact when uniform,
+  // "up to" the best rate when the member's programs differ.
+  const rates = new Set(links.map((l) => l.commissionBps));
+  const topBps = links.length ? Math.max(...links.map((l) => l.commissionBps)) : null;
+  const commissionLabel =
+    topBps == null ? null : rates.size > 1 ? `up to ${bpsPercent(topBps)}%` : `${bpsPercent(topBps)}%`;
+
+  return (
+    <motion.section variants={stagger} initial="hidden" animate="show" className="space-y-5">
+      <motion.div variants={fadeUp}>
+        <SectionHeader
+          title="Affiliates"
+          description="Earn commissions by sharing products you love."
+          action={
+            <Button variant="ghost" className="rounded-xl" onClick={() => setHowOpen(true)}>
+              <Info className="h-4 w-4" aria-hidden /> How it works
+            </Button>
+          }
+        />
+      </motion.div>
+
+      {links.length === 0 ? (
+        <motion.div variants={fadeUp}>
+          <EmptyState
+            icon={Share2}
+            title="You're not promoting anything yet"
+            description="Find a product with an affiliate program on its page and grab your link."
+            action={
+              <Button className="rounded-xl" onClick={() => navigate("discover")}>
+                <Store className="h-4 w-4" aria-hidden /> Browse marketplace
+              </Button>
+            }
+          />
+        </motion.div>
+      ) : (
+        <>
+          {/* Performance summary */}
+          <motion.div variants={fadeUp} className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+            <StatCard
+              label="Paid earnings"
+              value={fmtMoney(paid, { cents: true })}
+              sub={`across ${links.length} program${links.length === 1 ? "" : "s"}`}
+              icon={Banknote}
+            />
+            <StatCard
+              label="Pending earnings"
+              value={fmtMoney(pending, { cents: true })}
+              sub="settles on the next billing run"
+              icon={Timer}
+              className="border-amber-500/30 bg-amber-500/[0.05] [&>div>div]:bg-amber-500/10 [&>div>div>svg]:text-amber-600 dark:[&>div>div>svg]:text-amber-400"
+            />
+            <StatCard
+              label="Total clicks"
+              value={fmtCompact(clicks)}
+              sub="tracked visits to your links"
+              icon={MousePointerClick}
+            />
+            <StatCard
+              label="Conversions"
+              value={String(conversions)}
+              sub={rate != null ? `${rate.toFixed(1)}% conversion rate` : "no clicks yet"}
+              icon={Target}
+            />
+          </motion.div>
+
+          {/* Link cards */}
+          <motion.div variants={fadeUp} className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+            {sorted.map((link, index) => (
+              <AffiliateLinkCard key={link.id} link={link} index={index} />
+            ))}
+          </motion.div>
+        </>
+      )}
+
+      <HowItWorksDialog open={howOpen} onOpenChange={setHowOpen} commissionLabel={commissionLabel} />
     </motion.section>
   );
 }

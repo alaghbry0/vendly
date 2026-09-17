@@ -83,6 +83,7 @@ export interface ProductDetailDTO extends ProductCardDTO {
   reviews: ReviewDTO[];
   creator: { id: string; name: string | null; avatarColor: string; bio: string | null };
   hasAccess: boolean;
+  affiliateBps: number | null; // active affiliate program commission (null = no program)
 }
 
 export interface SubscriptionDTO {
@@ -260,6 +261,52 @@ export interface PayoutBalanceDTO {
   pendingCents: number;
   lifetimePaidCents: number;
   feeBps: number;
+}
+
+// ============ Affiliates ============
+export interface AffiliateLinkDTO {
+  id: string;
+  code: string;
+  clicks: number;
+  conversions: number;
+  active: boolean;
+  createdAt: string;
+  commissionBps: number;
+  earnedPaidCents: number;
+  earnedPendingCents: number;
+  product: {
+    id: string;
+    title: string;
+    coverTheme: string;
+    status: string;
+    creator: { id: string; name: string | null; avatarColor: string };
+  };
+}
+
+export interface AffiliateRowDTO {
+  id: string;
+  code: string;
+  clicks: number;
+  conversions: number;
+  active: boolean;
+  joinedAt: string;
+  earnedPaidCents: number;
+  earnedPendingCents: number;
+  affiliate: { id: string; name: string | null; email: string; avatarColor: string };
+}
+
+export interface AffiliateProgramDTO {
+  id: string;
+  commissionBps: number;
+  active: boolean;
+  createdAt: string;
+  product: { id: string; title: string; coverTheme: string; status: string };
+  affiliateCount: number;
+  totalClicks: number;
+  totalConversions: number;
+  paidCents: number;
+  pendingCents: number;
+  affiliates: AffiliateRowDTO[];
 }
 
 export interface ClockDTO {

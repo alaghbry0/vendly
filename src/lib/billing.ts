@@ -6,6 +6,7 @@ import { dispatchEvent, grantAccess, revokeAccess } from "@/lib/webhooks";
 import { renewalDiscount, recordRedemption } from "@/lib/promos";
 import { notify } from "@/lib/notifications";
 import { settlePendingPayouts } from "@/lib/payouts";
+import { createReferralCommission, settlePendingCommissions } from "@/lib/affiliates";
 
 // ============ Subscription lifecycle engine ============
 
@@ -31,6 +32,7 @@ export async function provisionSubscription(opts: {
   chargedNow: boolean; // false when trialing
   txnId?: string;
   promoCodeId?: string | null; // validated promo attached at checkout
+  refLinkId?: string | null; // affiliate attribution from a ?ref= link
 }): Promise<ProvisionResult> {
   const plan = await db.plan.findUnique({
     where: { id: opts.planId },
@@ -70,6 +72,7 @@ export async function provisionSubscription(opts: {
       trialEndsAt,
       promoCodeId: opts.promoCodeId ?? null,
       promoCyclesUsed: promo ? 1 : 0,
+      refLinkId: opts.refLinkId ?? null,
     },
   });
 
@@ -124,6 +127,15 @@ export async function provisionSubscription(opts: {
       body: `${plan.product.title} — ${plan.name}${promo ? ` · promo ${promo.code} (−$${(promo.discountCents / 100).toFixed(2)})` : ""}`,
       icon: "receipt",
     });
+
+    // Affiliate attribution: mint a PENDING commission for the referrer
+    if (opts.refLinkId) {
+      await createReferralCommission({
+        refLinkId: opts.refLinkId,
+        subscriptionId: sub.id,
+        invoiceAmountCents: inv.amountCents,
+      });
+    }
   }
 
   // License key provisioning
@@ -287,6 +299,14 @@ export async function runBilling(): Promise<BillingRunSummary> {
         body: `${sub.plan.product.title} — ${sub.plan.name} · your subscription is now active`,
         icon: "receipt",
       });
+      // Referred trial converting to paid: the referrer earns their commission now
+      if (sub.refLinkId) {
+        await createReferralCommission({
+          refLinkId: sub.refLinkId,
+          subscriptionId: sub.id,
+          invoiceAmountCents: inv.amountCents,
+        });
+      }
       events.push(`Trial converted → ${sub.plan.product.title} (${sub.plan.name})`);
     } else {
       await db.subscription.update({
@@ -485,6 +505,11 @@ export async function runBilling(): Promise<BillingRunSummary> {
   // billing engine runs — i.e. each time-machine advance).
   const payoutsSettled = await settlePendingPayouts(now);
   if (payoutsSettled > 0) events.push(`${payoutsSettled} payout${payoutsSettled === 1 ? "" : "s"} settled`);
+
+  // 5) Settle pending affiliate commissions on the same cadence.
+  const commissionsSettled = await settlePendingCommissions(now);
+  if (commissionsSettled > 0)
+    events.push(`${commissionsSettled} affiliate commission${commissionsSettled === 1 ? "" : "s"} settled`);
 
   const clock = await getClockState();
   return {
