@@ -22,7 +22,7 @@ export async function GET(req: Request) {
       icon: n.icon,
       read: n.read,
       createdAt: n.createdAt.toISOString(),
-      target: notificationTarget(n.type),
+      target: notificationTarget(n.type, { productId: n.productId }),
     }));
     return Response.json({ notifications: data, unread });
   } catch (e) {

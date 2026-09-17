@@ -512,3 +512,121 @@ Stage Summary — round 5 delivered:
 - Verification: eslint exit 0; tsc zero errors in app code; dev.log clean; full agent-browser E2E pass (entry flows, member bonus, deep-links, receipts, mobile, dark mode) with zero console/page errors
 - Known minor notes: (1) marketplace entry guard toasts "Sign in to enter" for signed-out users — unreachable in practice because bootstrap() always falls back to a demo user; (2) creator GiveawayCreatorDTO lacks totalEntriesWeighted in types.ts (11-b worked around it locally); (3) the dev server must be relaunched via `python3 /tmp/launch-dev.py` if the container restarts; (4) examples/ + skills/ carry pre-existing tsc errors (ignored by design); (5) RAM ~4.1GB — avoid agent-browser + VLM + dev server simultaneously
 - Recommended next phase: Discord/Telegram grant drill-down (per-grant sync history), creator revenue forecast chart (MRR projection), activity feed aggregating webhook events into a timeline, or bundle offers / product Q&A discussions
+
+---
+Task ID: 12-a
+Agent: full-stack-developer (Q&A backend)
+Task: Product Q&A backend — schema, DTOs, 6 API routes, notification wiring, seed
+
+Work Log:
+- Schema: added Question/Answer/QuestionVote models (cuid ids, OPEN|ANSWERED status), back-relations on Product/User, Notification.productId String? (plain column, no FK); bun run db:push OK
+- types.ts: AnswerDTO/QuestionDTO/CreatorQuestionDTO/QuestionsStatsDTO added; NotificationDTO.target union now includes {view:"product",productId}; STATUS_META gained ANSWERED (success tone)
+- notifications.ts: "message" icon added; notify() takes optional productId (written to the row); notificationTarget(type, n?) → question_asked = creator/questions tab, question_answered = product deep-link via n.productId (null without context); notifications route passes {productId: n.productId}
+- serialize.ts: serializeAnswer/serializeQuestion(+QUESTION_INCLUDE) — author name falls back to email, answers oldest-first, hasVoted from viewerId
+- Routes (all HttpError/errorResponse, .catch(()=>({})) json): GET+POST /api/products/[id]/questions (public GET max 30, OPEN→upvotes desc→newest; POST validates 5-500 chars, blocks own-product asks, notifies creator question_asked/message); POST /api/questions/[id]/answers (2-1000 chars, isCreator flips status ANSWERED, notifies asker question_answered w/ productId, no self-notify); POST /api/questions/[id]/upvote (toggle, recounts); DELETE /api/questions/[id] (author or product creator, $transaction cascades answers+votes, else 403); GET /api/creator/questions (?status=&productId= filters; stats over ALL questions ignoring filters; avgResponseHours from first creator answer, 1 decimal)
+- app-shell.tsx (only frontend edit): MessageSquare import + NOTIF_ICONS.message (teal) + openNotification routes product targets via navigate("product",{productId}) before portal/creator branch
+- seed.ts: child→parent wipes added; 9 questions (TSP 3, SBP 2, FitCore 3, CAG 1; 5 ANSWERED / 4 OPEN), 7 answers (5 creator + 2 member), 55 votes (3-8 per q, Alex on 2), questions spread over 16d→3d, answers 6h-2d after; +3 Q&A notifications (deviation, see below); summary log now counts questions/answers/votes
+- Verification: seed ran twice clean (idempotent); curl E2E — public GET ordering + hasVoted(as Alex)=true on stop-loss q; POST question 201 → Marcus question_asked notif w/ creator/questions target; upvote toggle on/off + 404 + 401; creator answer 201 → status ANSWERED + David question_answered w/ {view:"product",productId}; self-answer → no notif; validation 400s (short body, own-product ask); Marcus inbox 6q stats {open:3,answered:3,totalUpvotes:34,avgResponseHours:34}, filters keep stats global, no-products user → empty+zeroed stats; DELETE 403 (other) / ok (creator) / ok (author w/ cascade); bun run lint exit 0; bunx tsc --noEmit zero errors; dev server HAD to be relaunched via python3 /tmp/launch-dev.py (old in-memory Prisma client had no db.question — first attempt hit an EADDRINUSE race with the dying process, killed stale PIDs and relaunched clean); final re-seed restored pristine data (9q/7a/55v, verified via API)
+
+Stage Summary:
+- Contract implemented: GET/POST /api/products/{id}/questions, POST /api/questions/{id}/answers → {answer, question:{id,status}}, POST /api/questions/{id}/upvote → {ok,upvotes,hasVoted}, DELETE /api/questions/{id} → {ok}, GET /api/creator/questions?status=&productId= → {questions: CreatorQuestionDTO[], stats: QuestionsStatsDTO}; DTOs exactly per spec in types.ts
+- Notification wiring: question_asked (icon "message") → creator tab "questions"; question_answered (icon "message") → {view:"product", productId} via new Notification.productId column; app-shell handles the product target; existing types/targets untouched
+- Seed demo: Marcus inbox 6 questions (3 open incl. student-discount + Google Sheets w/ member answer, 3 answered, avg response 34h), Aisha 3 (1 open, avg 15h); Alex voted on 2 seeded questions (hasVoted shows) and has a seeded question_answered notification deep-linking to the SaaS Blueprint page; TSP board shows OPEN-first ordering
+- Deviations: (1) seeded 3 extra Q&A notification rows so the bell/deep-links demo out-of-the-box (spec didn't list them); (2) STATUS_META gained ANSWERED for reuse by frontend; (3) dev server restart was unavoidable (Prisma client regen) — relaunch script used, documented above; (4) seeded upvote counts top out at 8 (9 users, one vote each — spec's "3-14" range is impossible under the unique constraint)
+
+---
+Task ID: 12-b
+Agent: frontend (marketplace Q&A section)
+Task: Add a public "Questions & answers" section to the product detail page (ask card, upvotable questions, threaded answers)
+
+Work Log:
+- Read worklog (12-a Q&A contract + 11-a/11-b/11-c conventions), types.ts (QuestionDTO/AnswerDTO from @/lib/types — not redefined), and marketplace-views.tsx patterns (ProductDetailView, Reviews stagger, ReviewDialog, GiveawayBanner, toasts, aria)
+- Added to marketplace-views.tsx (ONLY file touched): ProductQaSection + QuestionCard + AnswerRow, rendered in the LEFT column right after the Reviews section; imports extended (ChevronUp, MessageCircleQuestion, MessageSquarePlus, AnswerDTO/QuestionDTO — all verified present in installed lucide-react)
+- ProductQaSection: fetches GET /api/products/{id}/questions on mount + productId/nonce change (load callback pattern like the product load); always renders — fetch error falls back to the empty state; loadedId guard shows 2 skeleton cards only on product switch (silent background refresh otherwise, so user switches don't flash); SectionHeader "Questions & answers" with count-derived description; Ask card (rounded-2xl border bg-card): creator (user.id === product.creator.id) sees the muted info panel "You're the creator — reply to buyer questions from Creator Studio → Q&A." + ghost "Open Q&A inbox" h-11 button → navigate("creator", {creatorTab: "questions"}); buyers get Textarea rows=3 maxLength=500 + live counter (muted → amber ≥480 → red >500) + h-11 "Ask question" with spinner → POST → "Question posted" toast + refetch (server re-sorts OPEN-first by upvotes); 400s surface the server message destructively; <5 chars blocked client-side
+- QuestionCard (motion stagger y:8, delay min(i*0.04, 0.35), grid gap-3 single column): left vote rail = outline icon Button h-9 w-9 aria-label "Upvote question" aria-pressed (voted → emerald border/bg/text) + tabular-nums count, optimistic toggle reconciled with server {upvotes, hasVoted}, revert + destructive toast on error; body + meta row (UserAvatar with explicit author.avatarColor, name, · timeAgo, status chip: ANSWERED emerald outline w/ BadgeCheck h-3 / OPEN muted "Awaiting reply"); answers thread border-l-2 pl-4 space-y-3 — creator answers get border-emerald-400/60 bg-emerald-500/[0.04] rounded-r-lg p-3 + emerald "Creator" mini-badge (BadgeCheck), member answers plain rail; ghost "Reply" h-9 (MessageSquarePlus, aria-expanded) expands Textarea rows=2 + h-10 "Post answer" (Send icon, 2-1000 chars) → optimistic append (author = store user, isCreator flips status chip locally) → POST reconciles answer id + server status → toast "Answer posted" ("Question marked as answered." for creators / "Thanks for helping out!" otherwise); composer collapses on success; sign-in guard toasts for vote/reply
+- EmptyState (MessageCircleQuestion) "No questions yet — Be the first to ask — the creator usually replies within a day."
+- Verification: bunx eslint src/components/views/marketplace-views.tsx exit 0; bunx tsc --noEmit zero errors in src/ for my file (only remaining src error is 12-c's in-flight creator-views.tsx "QuestionsTab is not defined" — theirs, observed mid-edit; examples/ + skills/ pre-existing ignored); whole-project `bun run lint` currently fails ONLY on that same 12-c line
+- Live QA (agent-browser, isolated --session qb): TSP page renders Q&A below Reviews — 3 seeded questions OPEN-first (student-discount 3↑ awaiting, stop-loss 8↑ ANSWERED w/ Hugo member + Marcus creator emerald-badge answers, signals-volume 5↑ ANSWERED); as Alex toggled upvote 3→4 (button emerald + aria-pressed) and back 4→3; asked "QA test question from 12-b…" → "Question posted" toast + question appears after refetch (OPEN group, under the 3↑ question) + header flips to "4 questions"; switched to Marcus → ask card replaced by creator info panel + "Open Q&A inbox" → lands on Creator Studio Q&A tab (12-c's tab already live — stats Open 4 / Answered 3 / 34↑ / 34.0h avg render); replied to the test question as Marcus → answer shows Creator badge, chip flips to "Answered", toast "Answer posted — Question marked as answered."; mobile 390×844 scrollWidth = 390 (no overflow), vote button exactly 36×36; dark mode via theme toggle (app uses defaultTheme light + enableSystem false, so `set media dark` alone doesn't switch) — computed styles sane (emerald-400 chips/badges, emerald/4% creator answer bg); screenshots saved to download/qa-12b-{product-light,section-light,mobile-light,product-qa-dark,mobile-dark}.png; zero page errors, zero console errors (HMR noise filtered)
+- Restored pristine data: bunx tsx prisma/seed.ts (9q/7a/55v), reloaded as Alex → TSP Q&A renders 3 seeded questions OPEN-first, stop-loss has Alex's seeded vote (8↑, pressed), test question/answers wiped; browser session closed; dev.log clean (Q&A routes all 200/201, the lone 401 on /api/creator/questions is the auth guard before hydration)
+
+Stage Summary:
+- Shipped: public product Q&A on the marketplace product page — ask card with creator inbox deep-link fallback, upvote rail with optimistic toggles, status chips, threaded answers with emerald creator styling, optimistic reply composer, empty/loading states — fully against the 12-a contract
+- Files touched: src/components/views/marketplace-views.tsx only (+~370 lines); no backend/type/store changes
+- Spec deviations: vote button h-9 w-9 (36px, spec's minimum — 44px broke the compact rail); answer toast fires after the POST resolves (not simultaneously with the optimistic append); reply composer keeps a Cancel button and a 0/1000 counter for symmetry with the ask card; section description shows a neutral string while loading
+- Notes for 12-c: QuestionCard/AnswerRow/ProductQaSection live in marketplace-views.tsx if the creator inbox ever wants to deep-link back; `navigate("creator", {creatorTab: "questions"})` confirmed working end-to-end
+
+---
+Task ID: 12-c
+Agent: frontend (creator Q&A inbox)
+Task: Add an 11th Creator Studio tab — Q&A inbox (key "questions") answering buyer questions with optimistic posting
+
+Work Log:
+- Read worklog (12-a Q&A contract, 5-c promos + 11-b giveaways creator-tab conventions), types.ts (CreatorQuestionDTO/QuestionsStatsDTO/AnswerDTO), the full creator-views.tsx; verified icons exist in lucide-react 0.525.0 and the live contract with curl as Marcus (6 questions, stats {open:3,answered:3,totalUpvotes:34,avgResponseHours:34})
+- Wired the tab exactly like 11-b: "questions" in the CreatorTab union + CREATOR_TABS registry (MessagesSquare icon, between Giveaways and Webhooks) — sidebar, mobile pill nav and store-driven params.creatorTab routing (incl. question_asked notification deep-links) pick it up for free; imports extended (BadgeCheck/ChevronUp/CircleHelp/Clock/Inbox/MessageSquare/MessagesSquare + the 3 Q&A DTOs)
+- QuestionsTab (single GET /api/creator/questions on mount/nonce/user via useCreatorFetch): skeleton → LoadError → SectionHeader "Q&A inbox / Answer buyer questions — fast replies sell more memberships."; stats row via local tone-tinted QaStatCard (StatCard markup + colored icon chips): Open (emerald CircleHelp), Answered (teal BadgeCheck), Total upvotes (amber ChevronUp), Avg response (cyan Clock, "34.0h" / "—" when null), all tabular-nums; filters: status segmented control h-10 with counts ("Open (3)", honoring the product filter) + product Select ("All products" + distinct titles); hidden when the inbox is empty
+- QuestionCard grid gap-3 single column, motion initial y:8 opacity:0 delay min(i*0.05, 0.4): header = ProductCover cover-theme chip + product-title button (min-h-10, → navigate("product",{productId})) + status chip (ANSWERED emerald outline BadgeCheck / OPEN amber pulse "Awaiting reply") + ChevronUp upvote chip; body text-sm font-medium + UserAvatar/author/timeAgo (relTime against the ticking useNowMs anchor, not the stale bootstrap snapshot, so fresh answers read "just now"); existing answers collapsed behind a "N answers" toggle (aria-expanded + aria-controls, ChevronDown rotates) expanding a border-l-2 pl-4 thread — creator answers border-l-2 border-emerald-400/60 bg-emerald-500/[0.04] rounded-r-lg + emerald "Creator" mini-badge, members muted
+- Inline composer: Textarea rows=3 maxLength=1000 "Reply as the creator…" + h-11 "Post answer" (Send, spinner, 0/1000 counter) ALWAYS visible on OPEN questions; on ANSWERED ones behind a ghost "Add another reply" toggle (+Cancel); POST /api/questions/{id}/answers → optimistic append (author = store user, isCreator true, temp id), OPEN→ANSWERED flip, stats open-1/answered+1, toast "Answer posted / The buyer will be notified.", thread auto-expands + composer collapses; server answer swaps the temp row; snapshot revert + destructive toast on error
+- EmptyState (Inbox) "Inbox zero — No questions yet — they'll land here the moment a buyer asks on your product pages."; filter-mismatch state with ghost Reset filters button
+- Verification: bun run lint exit 0 (fixed one missing MessageSquare import found by it); bunx tsc --noEmit zero errors in src/ (examples/+skills/ pre-existing only)
+- Live QA (agent-browser, isolated --session qc, 12-b's mid-QA reseed absorbed by re-switching to the new Marcus id): tab renders seeded inbox (Open 3 / Answered 3 / 34↑ / 34.0h + cards with product chips, status chips, upvote counts, OPEN-first ordering); product filter → only that product's cards + counts recompute; status Open → only OPEN; CAG+Answered → "No questions match this filter" + Reset filters restores; product chip click → CAG product page; answered Gina's question with "12-c test answer" → toast, chip flips Answered, stats 3/3→2/4, answer visible with Creator badge + "2m ago"; second reply via "Add another reply" on the seeded TSP thread → toast captured verbatim, "3 answers", stats unchanged, server cross-check matched UI exactly (2/4/34/73.5h incl. my test answers); aria-expanded true/false toggling verified; bell → "New question — Trade Signals Pro…" → lands on Creator Studio Q&A tab; mobile 390×844 scrollWidth=390 zero overflow; zero page/console errors (HMR noise filtered); dark mode via theme toggle (set media dark alone can't switch — defaultTheme light + enableSystem false, same finding as 12-b) → download/qa-12c-creator-qa-dark.png (+ qa-12c-creator-qa-mobile-light.png); session closed
+- Restored pristine data: bunx tsx prisma/seed.ts → reloaded as Marcus → Q&A tab shows seeded state (3/3/34/34.0h, 6 cards, test answers gone); dev.log clean (only 200s, no compile errors)
+
+Stage Summary:
+- Shipped: 11th creator tab "questions" (Q&A) — full inbox against the 12-a contract: single-fetch stats+list, tone-tinted stat cards, status/product client filters with live counts, question cards with product chips + status/upvote chips, collapsible answer threads with emerald Creator styling, always-on composer for OPEN questions with optimistic posting/revert, empty + no-match states, 40-44px targets, aria-expanded/labels
+- Files touched: src/components/views/creator-views.tsx ONLY (+~410 lines → 6,810); no backend/type/store/marketplace changes (12-b's file untouched)
+- Spec deviations: (1) tone-tinted local QaStatCard instead of the shared StatCard (its icon is hardcoded text-primary — spec required emerald/teal/amber/cyan accents); (2) relTime anchored to the ticking useNowMs() like 11-b's countdowns, not useSimNow(); (3) stats row + filters hidden when the inbox is empty (giveaways-tab convention); (4) first dark screenshot was light-mode (enableSystem=false) — redone via the theme toggle
+- Notes: 12-b's observed "QuestionsTab is not defined" was my mid-edit transient (wiring landed before the component body); final lint/tsc clean. Pristine data verified; dev server healthy
+
+---
+Task ID: 12-d
+Agent: main (Z.ai Code)
+Task: Round-6 styling polish + round-12 final QA + handover
+
+Work Log:
+- Opening assessment (per user workflow): reviewed worklog.md (514 lines, Tasks 1–11-c complete), dev server healthy (200), lint exit 0, tsc clean. Closed 3 stale agent-browser sessions (default/mg/pg) that were causing the alternating 401/200 /api/notifications polling in dev.log — app itself handled them silently (bell catches errors); no real bug
+- agent-browser QA of all three views (Discover hero/catalog/giveaways, portal 10 tabs as Alex, Creator Studio dashboard as Marcus: MRR $333.42 / 6 active / churn 14.3%): zero console/page errors, mobile 390px no overflow. VLM assessment of the hero: 8/10 — recommended glassmorphism/blur, gradient+noise backgrounds, richer micro-interactions/shadows. VERDICT: project stable → work focus = new feature + mandatory styling (no bugs to fix)
+- Round-12 feature: Product Q&A system, dispatched as 12-a (backend subagent) → 12-b + 12-c (frontend subagents, parallel, different files). All three delivered + verified (entries above)
+- 12-d styling polish (main, this agent): globals.css — added .noise-overlay (SVG feTurbulence film-grain utility), .animate-drift/.animate-drift-2 (14s/18s aurora keyframes, GPU-friendly translate3d+scale, prefers-reduced-motion guard). marketplace-views hero — the two static glow orbs now drift (animate-drift / animate-drift-2), added a third teal orb (bottom-left, -7s offset), noise overlay (opacity 0.035 / dark 0.05), emerald gradient hairline on the hero's bottom edge (softened /50→/35 after VLM feedback), primary "Browse products" CTA gained hover lift + emerald shadow (matches the outline CTA). shared.tsx StatCard — hover lift (-translate-y-0.5, emerald-tinted shadow) + icon scale-110 on group-hover. Fixed a self-inflicted CSS layering bug from the first globals.css edit (orphaned utilities + extra brace)
+- Final E2E QA (agent-browser): hero DOM-verified (3 animated orbs with drift/drift-2 animationName, noise overlay present); product page Q&A renders 3 seeded questions with vote buttons; upvote toggle 3→4→3 with aria-pressed; Marcus localStorage switch → Creator Studio shows 11 tabs incl. Q&A (8th, between Giveaways and Webhooks) with stats 3/3/34/34.0h; answered Crypto Alpha question via inline composer → chip flipped to Answered + 4 Creator badges + no console errors; bell deep-links BOTH directions: "New question — …" → creator Q&A tab, "Answered — …" → product page (Alex has access so it shows the "You already have access" card — correct); real dark mode verified via theme toggle (enableSystem=false means set media dark is a no-op — use the toggle); mobile 390px scrollWidth = 390; zero console/page errors
+- Pristine data restored: bunx tsx prisma/seed.ts after the answer test → API re-verified (Marcus stats 3/3/34/34h, 9 questions / 7 answers / 55 votes); browser restored to default user; dev.log tail healthy (the 29 historical ⨯ markers are from ancient sessions — old @/ui/button import long fixed + 12-a's server relaunch; current traffic all 200)
+- Screenshots: download/qa-12d-hero-light.png, qa-12d-hero-dark-real.png, qa-12-final-light.png (+ 12-b/12-c's own)
+
+Stage Summary:
+- ROUND 12 COMPLETE — new feature: Product Q&A across the full stack (schema Question/Answer/QuestionVote + 6 API routes + notifications with product deep-links + seed 9q/7a/55v; marketplace product-page section with ask/vote/reply; creator 11th tab "Q&A" inbox with stats/filters/inline answering)
+- Styling: aurora hero (3 drifting orbs + film grain + gradient hairline), CTA hover lift, StatCard micro-interactions, prefers-reduced-motion guard
+- Verification: eslint exit 0; tsc --noEmit clean (src/); agent-browser E2E all flows pass; zero console/page errors; dark + mobile verified; demo data pristine
+
+================================================================================
+ROUND 12 HANDOVER — three-section status
+================================================================================
+
+## 1. Current project status / assessment
+STABLE & FEATURE-COMPLETE through round 12. Vendly is a single-page (/) Whop-style marketplace:
+marketplace (discover/search/filters/featured/giveaways/product pages with reviews+Q&A/wishlist/
+multi-gateway checkout with trials+promos+crypto quotes), customer portal (10 tabs: overview,
+memberships, licenses, downloads, wishlist, affiliates, giveaways, invoices+printable receipts,
+payment methods, settings), creator studio (11 tabs: overview+MRR trend, products, subscribers,
+orders, promos, affiliates, giveaways, Q&A inbox, webhooks, payouts, time machine). Backend:
+simulated recurring billing engine (renewals/dunning/trials/cancel-at-period-end via time machine),
+webhooks with delivery log, license keys, secure tokenized downloads, notifications with deep-links.
+All lint/tsc/browser checks green; demo data pristine (6 products, 3 giveaways, 9 Q&A).
+
+## 2. Goals / completed modifications / verification results
+- Goal: continue advancement per user directive — QA first, then mandatory new features + styling
+- QA: full smoke pass found NO bugs (401s were stale headless sessions, since closed)
+- Feature: Product Q&A (12-a/b/c subagents) — DONE, all flows verified live (see Stage Summaries above)
+- Styling (12-d): aurora hero + noise + hairline + CTA/StatCard micro-interactions — DONE, VLM-rated 8/10 light
+- Verification: eslint 0 · tsc clean · E2E upvote/answer/deep-links/dark/mobile all pass · 0 console errors
+
+## 3. Unresolved issues / risks + next-phase priorities
+Minor known notes:
+- Creator "Creator" badge count in Q&A relies on isCreator flags — no edit/delete for answers (API allows question delete by author/creator; no UI for it yet)
+- Avg response stat counts only creator answers; a member answering first doesn't reset it (by design)
+- enableSystem=false: dark mode only via the toggle (agent-browser set media dark is a no-op)
+- RAM ~4GB: avoid agent-browser + VLM simultaneously (one VLM call timed out this round)
+- examples/ + skills/ carry pre-existing tsc errors (ignored by design); dev server relaunch = python3 /tmp/launch-dev.py
+Recommended next-phase options (in priority order):
+1. Bundle offers (buy 2+ products together at a discount — cart/checkout integration, bundle analytics)
+2. Creator revenue forecast chart (MRR projection from trend + churn on the analytics tab)
+3. Activity feed: aggregate webhook events + Q&A + reviews into a creator timeline
+4. Per-grant Discord/Telegram sync drill-down (retry failed grants from the webhooks tab)

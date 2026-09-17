@@ -3,10 +3,10 @@
 // CREATOR ANALYTICS DASHBOARD — "Creator Studio".
 // Owned by Task 2-c. Rendered when store.view === "creator".
 // Internal tab system (synced from params.creatorTab): overview | products |
-// subscribers | orders | promos | affiliates | giveaways | webhooks |
+// subscribers | orders | promos | affiliates | giveaways | questions | webhooks |
 // payouts | time (billing time machine). Promos + payouts tabs added by
 // Task 5-c; the affiliates tab + the product edit dialog with plans editor
-// by Task 8-b; the giveaways tab by Task 11-b.
+// by Task 8-b; the giveaways tab by Task 11-b; the Q&A inbox by Task 12-c.
 
 import { useEffect, useMemo, useRef, useState, type ComponentProps, type FormEvent } from "react";
 import { AnimatePresence, motion, type Variants } from "framer-motion";
@@ -32,7 +32,9 @@ import { api } from "@/lib/api";
 import type {
   AffiliateProgramDTO,
   AnalyticsDTO,
+  AnswerDTO,
   BillingRunResult,
+  CreatorQuestionDTO,
   GiveawayCreatorDTO,
   PayoutBalanceDTO,
   PayoutDTO,
@@ -40,6 +42,7 @@ import type {
   ProductCardDTO,
   ProductDetailDTO,
   PromoCodeDTO,
+  QuestionsStatsDTO,
   SessionUser,
   WebhookDeliveryDTO,
   WebhookEndpointDTO,
@@ -109,6 +112,7 @@ import {
   ArrowRight,
   Ban,
   Banknote,
+  BadgeCheck,
   BadgePercent,
   Bitcoin,
   CalendarClock,
@@ -116,7 +120,10 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
+  ChevronUp,
   CircleDollarSign,
+  CircleHelp,
+  Clock,
   CreditCard,
   Dices,
   DollarSign,
@@ -126,6 +133,7 @@ import {
   FlaskConical,
   Gift,
   Handshake,
+  Inbox,
   Info,
   KeyRound,
   Landmark,
@@ -133,6 +141,8 @@ import {
   LayoutDashboard,
   Loader2,
   Megaphone,
+  MessageSquare,
+  MessagesSquare,
   MoreHorizontal,
   MousePointerClick,
   Package,
@@ -184,6 +194,7 @@ type CreatorTab =
   | "promos"
   | "affiliates"
   | "giveaways"
+  | "questions"
   | "webhooks"
   | "payouts"
   | "time";
@@ -196,6 +207,7 @@ const CREATOR_TABS: { key: CreatorTab; label: string; icon: LucideIcon }[] = [
   { key: "promos", label: "Promos", icon: Tag },
   { key: "affiliates", label: "Affiliates", icon: Megaphone },
   { key: "giveaways", label: "Giveaways", icon: Gift },
+  { key: "questions", label: "Q&A", icon: MessagesSquare },
   { key: "webhooks", label: "Webhooks", icon: Webhook },
   { key: "payouts", label: "Payouts", icon: Banknote },
   { key: "time", label: "Time machine", icon: Timer },
@@ -614,6 +626,7 @@ export function CreatorViews() {
               {tab === "promos" && <PromosTab user={user} />}
               {tab === "affiliates" && <AffiliatesTab user={user} />}
               {tab === "giveaways" && <GiveawaysTab user={user} />}
+              {tab === "questions" && <QuestionsTab user={user} />}
               {tab === "webhooks" && <WebhooksTab />}
               {tab === "payouts" && <PayoutsTab />}
               {tab === "time" && <TimeTab />}
@@ -5053,6 +5066,448 @@ function CreateGiveawayDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+// ============================================================================
+// TAB: QUESTIONS — product Q&A inbox (Task 12-c)
+// ============================================================================
+
+/** Tone-tinted stat card — mirrors the shared StatCard markup with colored icon chips. */
+const QA_STAT_TONES: Record<string, string> = {
+  emerald: "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400",
+  teal: "bg-teal-500/10 text-teal-600 dark:text-teal-400",
+  amber: "bg-amber-500/10 text-amber-600 dark:text-amber-400",
+  cyan: "bg-cyan-500/10 text-cyan-600 dark:text-cyan-400",
+};
+
+function QaStatCard({
+  label,
+  value,
+  sub,
+  icon: Icon,
+  tone,
+}: {
+  label: string;
+  value: string;
+  sub?: string;
+  icon: LucideIcon;
+  tone: keyof typeof QA_STAT_TONES;
+}) {
+  return (
+    <div className="rounded-2xl border bg-card p-5 shadow-sm transition-shadow hover:shadow-md">
+      <div className="flex items-start justify-between">
+        <p className="text-sm font-medium text-muted-foreground">{label}</p>
+        <div className={cn("flex h-8 w-8 items-center justify-center rounded-lg", QA_STAT_TONES[tone])}>
+          <Icon className="h-4 w-4" />
+        </div>
+      </div>
+      <p className="mt-2 text-2xl font-bold tracking-tight tabular-nums">{value}</p>
+      {sub && <p className="mt-1 text-xs text-muted-foreground">{sub}</p>}
+    </div>
+  );
+}
+
+type QuestionStatusFilter = "ALL" | "OPEN" | "ANSWERED";
+
+function QuestionsTab({ user }: { user: SessionUser }) {
+  const { toast } = useToast();
+  const navigate = useAppStore((s) => s.navigate);
+  // Ticking anchor (max(real now, sim clock)) so freshly posted answers read
+  // "just now" instead of "in 1m" against the stale bootstrap snapshot.
+  const nowMs = useNowMs();
+  const now = useMemo(() => new Date(nowMs).toISOString(), [nowMs]);
+
+  // One round trip — the inbox and its global stats (server order: OPEN first,
+  // then upvotes desc, then newest).
+  const { data, error, loading, setData } = useCreatorFetch(() =>
+    api<{ questions: CreatorQuestionDTO[]; stats: QuestionsStatsDTO }>("/api/creator/questions")
+  );
+
+  const [statusFilter, setStatusFilter] = useState<QuestionStatusFilter>("ALL");
+  const [productFilter, setProductFilter] = useState("ALL");
+
+  // Distinct products for the filter select, in inbox order.
+  const products = useMemo(() => {
+    const seen = new Map<string, string>();
+    for (const q of data?.questions ?? []) if (!seen.has(q.product.id)) seen.set(q.product.id, q.product.title);
+    return [...seen.entries()].map(([id, title]) => ({ id, title }));
+  }, [data]);
+
+  // Status counts honor the product filter; the list honors both filters.
+  const byProduct = useMemo(
+    () => (data?.questions ?? []).filter((q) => productFilter === "ALL" || q.product.id === productFilter),
+    [data, productFilter]
+  );
+  const filtered = useMemo(
+    () => byProduct.filter((q) => statusFilter === "ALL" || q.status === statusFilter),
+    [byProduct, statusFilter]
+  );
+
+  function resetFilters() {
+    setStatusFilter("ALL");
+    setProductFilter("ALL");
+  }
+
+  /**
+   * Optimistic answer: append locally as the creator, flip OPEN→ANSWERED and
+   * move the stat counters; revert the snapshot + destructive toast on error.
+   */
+  async function postAnswer(q: CreatorQuestionDTO, body: string): Promise<boolean> {
+    const wasOpen = q.status === "OPEN";
+    const optimistic: AnswerDTO = {
+      id: `tmp-${q.id}-${Date.now()}`,
+      body,
+      isCreator: true,
+      createdAt: new Date().toISOString(),
+      author: { id: user.id, name: user.name || user.email, avatarColor: user.avatarColor },
+    };
+    const snapshot = data;
+    setData((prev) =>
+      prev
+        ? {
+            questions: prev.questions.map((qq) =>
+              qq.id === q.id
+                ? {
+                    ...qq,
+                    status: wasOpen ? ("ANSWERED" as const) : qq.status,
+                    answers: [...qq.answers, optimistic],
+                    answerCount: qq.answerCount + 1,
+                  }
+                : qq
+            ),
+            stats: wasOpen
+              ? { ...prev.stats, open: Math.max(0, prev.stats.open - 1), answered: prev.stats.answered + 1 }
+              : prev.stats,
+          }
+        : prev
+    );
+    try {
+      const res = await api<{ answer: AnswerDTO; question: { id: string; status: "OPEN" | "ANSWERED" } }>(
+        `/api/questions/${q.id}/answers`,
+        { json: { body } }
+      );
+      // Swap the temp row for the server's canonical one (real id + timestamp).
+      setData((prev) =>
+        prev
+          ? {
+              ...prev,
+              questions: prev.questions.map((qq) =>
+                qq.id === q.id ? { ...qq, answers: qq.answers.map((a) => (a.id === optimistic.id ? res.answer : a)) } : qq
+              ),
+            }
+          : prev
+      );
+      toast({ title: "Answer posted", description: "The buyer will be notified." });
+      return true;
+    } catch (e) {
+      setData(snapshot);
+      toast({ title: "Couldn't post the answer", description: (e as Error).message, variant: "destructive" });
+      return false;
+    }
+  }
+
+  if (loading) {
+    return (
+      <div className="space-y-5" aria-busy="true" aria-label="Loading Q&A inbox">
+        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          {[0, 1, 2, 3].map((i) => (
+            <Skeleton key={i} className="h-28 rounded-2xl" />
+          ))}
+        </div>
+        <div className="grid gap-3">
+          {[0, 1, 2].map((i) => (
+            <Skeleton key={i} className="h-48 rounded-2xl" />
+          ))}
+        </div>
+      </div>
+    );
+  }
+  if (error || !data) return <LoadError message={error || "Q&A inbox unavailable."} />;
+
+  const { questions, stats } = data;
+  const openInProduct = byProduct.filter((q) => q.status === "OPEN").length;
+  const answeredInProduct = byProduct.length - openInProduct;
+
+  return (
+    <div className="space-y-5">
+      <SectionHeader title="Q&A inbox" description="Answer buyer questions — fast replies sell more memberships." />
+
+      {questions.length === 0 ? (
+        <EmptyState
+          icon={Inbox}
+          title="Inbox zero"
+          description="No questions yet — they&apos;ll land here the moment a buyer asks on your product pages."
+        />
+      ) : (
+        <>
+          {/* Stats */}
+          <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+            <QaStatCard label="Open" value={String(stats.open)} sub="awaiting your reply" icon={CircleHelp} tone="emerald" />
+            <QaStatCard
+              label="Answered"
+              value={String(stats.answered)}
+              sub={`${questions.length} total`}
+              icon={BadgeCheck}
+              tone="teal"
+            />
+            <QaStatCard
+              label="Total upvotes"
+              value={String(stats.totalUpvotes)}
+              sub="across all questions"
+              icon={ChevronUp}
+              tone="amber"
+            />
+            <QaStatCard
+              label="Avg response"
+              value={stats.avgResponseHours === null ? "—" : `${stats.avgResponseHours.toFixed(1)}h`}
+              sub="question → first reply"
+              icon={Clock}
+              tone="cyan"
+            />
+          </div>
+
+          {/* Filters */}
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="flex gap-1.5 rounded-full border bg-card p-1" role="group" aria-label="Filter by status">
+              {(["ALL", "OPEN", "ANSWERED"] as const).map((s) => {
+                const count = s === "ALL" ? byProduct.length : s === "OPEN" ? openInProduct : answeredInProduct;
+                return (
+                  <button
+                    key={s}
+                    onClick={() => setStatusFilter(s)}
+                    aria-pressed={statusFilter === s}
+                    className={cn(
+                      "h-10 rounded-full px-3.5 text-xs font-semibold transition-colors",
+                      statusFilter === s
+                        ? s === "OPEN"
+                          ? "bg-amber-500/15 text-amber-700 dark:text-amber-400"
+                          : s === "ANSWERED"
+                            ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400"
+                            : "bg-primary text-primary-foreground"
+                        : "text-muted-foreground hover:text-foreground"
+                    )}
+                  >
+                    {s === "ALL" ? `All (${count})` : s === "OPEN" ? `Open (${count})` : `Answered (${count})`}
+                  </button>
+                );
+              })}
+            </div>
+            <Select value={productFilter} onValueChange={setProductFilter}>
+              <SelectTrigger className="h-10 w-full sm:w-[220px]" aria-label="Filter by product">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="ALL">All products</SelectItem>
+                {products.map((p) => (
+                  <SelectItem key={p.id} value={p.id}>
+                    {p.title}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          {/* Question cards */}
+          {filtered.length === 0 ? (
+            <EmptyState
+              icon={Search}
+              title="No questions match this filter"
+              description="Try a different status or product."
+              action={
+                <Button variant="ghost" onClick={resetFilters}>
+                  <RotateCcw className="h-4 w-4" /> Reset filters
+                </Button>
+              }
+            />
+          ) : (
+            <div className="grid gap-3">
+              {filtered.map((q, i) => (
+                <motion.div
+                  key={q.id}
+                  initial={{ opacity: 0, y: 8 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ delay: Math.min(i * 0.05, 0.4), duration: 0.28, ease: "easeOut" }}
+                >
+                  <QuestionCard
+                    q={q}
+                    now={now}
+                    onAnswer={postAnswer}
+                    onOpenProduct={(productId) => navigate("product", { productId })}
+                  />
+                </motion.div>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+/** One question card — product chip, status + upvotes, collapsible answer thread, inline composer. */
+function QuestionCard({
+  q,
+  now,
+  onAnswer,
+  onOpenProduct,
+}: {
+  q: CreatorQuestionDTO;
+  now: string;
+  onAnswer: (q: CreatorQuestionDTO, body: string) => Promise<boolean>;
+  onOpenProduct: (productId: string) => void;
+}) {
+  // The composer stays expanded on OPEN questions (an inbox — friction kills
+  // replies); on answered ones it hides behind the "Add another reply" toggle.
+  const [composerOpen, setComposerOpen] = useState(q.status === "OPEN");
+  const [draft, setDraft] = useState("");
+  const [posting, setPosting] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  const answered = q.status === "ANSWERED";
+
+  async function submit() {
+    const body = draft.trim();
+    if (!body || posting) return;
+    setPosting(true);
+    const ok = await onAnswer(q, body);
+    setPosting(false);
+    if (ok) {
+      setDraft("");
+      setExpanded(true); // reveal the freshly posted reply in the thread
+      setComposerOpen(false); // the question is answered now — collapse behind the toggle
+    }
+  }
+
+  return (
+    <Panel className="p-4 sm:p-5">
+      {/* Product chip + status / upvotes */}
+      <div className="flex flex-wrap items-start justify-between gap-x-3 gap-y-2">
+        <div className="flex min-w-0 items-center gap-2.5">
+          <ProductCover
+            theme={q.product.coverTheme}
+            category="OTHER"
+            title={q.product.title}
+            className="h-10 w-14 shrink-0 rounded-lg"
+            iconClassName="h-9 w-9"
+          />
+          <button
+            onClick={() => onOpenProduct(q.product.id)}
+            className="flex min-h-10 min-w-0 items-center gap-1 rounded-lg text-left text-sm font-semibold transition-colors hover:text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            aria-label={`Open ${q.product.title} in the marketplace`}
+          >
+            <span className="truncate">{q.product.title}</span>
+            <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+          </button>
+        </div>
+        <div className="flex shrink-0 flex-wrap items-center gap-1.5">
+          {answered ? (
+            <span className="inline-flex items-center gap-1 rounded-full border border-emerald-500/25 bg-emerald-500/12 px-2.5 py-1 text-[11px] font-semibold text-emerald-700 dark:text-emerald-400">
+              <BadgeCheck className="h-3.5 w-3.5" aria-hidden /> Answered
+            </span>
+          ) : (
+            <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-500/25 bg-amber-500/12 px-2.5 py-1 text-[11px] font-semibold text-amber-700 dark:text-amber-400">
+              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-500" aria-hidden /> Awaiting reply
+            </span>
+          )}
+          <span
+            className="inline-flex items-center gap-0.5 rounded-full border bg-card px-2.5 py-1 text-[11px] font-semibold tabular-nums"
+            aria-label={`${q.upvotes} ${q.upvotes === 1 ? "upvote" : "upvotes"}`}
+          >
+            <ChevronUp className="h-3.5 w-3.5 text-amber-500" aria-hidden />
+            {q.upvotes}
+          </span>
+        </div>
+      </div>
+
+      {/* Question body + author */}
+      <p className="mt-3 text-sm font-medium leading-relaxed">{q.body}</p>
+      <div className="mt-2.5 flex items-center gap-2">
+        <UserAvatar name={q.author.name} color={q.author.avatarColor} size="sm" />
+        <p className="min-w-0 truncate text-xs text-muted-foreground">
+          <span className="font-medium text-foreground">{q.author.name}</span> · asked {relTime(q.createdAt, now)}
+        </p>
+      </div>
+
+      {/* Existing answers — collapsed behind a toggle */}
+      {q.answers.length > 0 && (
+        <div className="mt-1.5">
+          <button
+            onClick={() => setExpanded((v) => !v)}
+            aria-expanded={expanded}
+            aria-controls={`${q.id}-answers`}
+            className="flex min-h-10 w-full items-center gap-1.5 rounded-lg px-1 text-xs font-semibold text-muted-foreground transition-colors hover:text-foreground"
+          >
+            <MessageSquare className="h-3.5 w-3.5 text-primary" aria-hidden />
+            {q.answerCount} answer{q.answerCount === 1 ? "" : "s"}
+            <ChevronDown className={cn("h-4 w-4 transition-transform", expanded && "rotate-180")} aria-hidden />
+          </button>
+          {expanded && (
+            <div id={`${q.id}-answers`} className="mt-1 space-y-2 border-l-2 pl-4">
+              {q.answers.map((a) => (
+                <div
+                  key={a.id}
+                  className={cn("rounded-r-lg px-3 py-2.5", a.isCreator ? "border-l-2 border-emerald-400/60 bg-emerald-500/[0.04]" : "bg-muted/40")}
+                >
+                  <div className="flex items-center gap-2">
+                    <UserAvatar name={a.author.name} color={a.author.avatarColor} size="sm" />
+                    <div className="min-w-0 flex-1">
+                      <p className="flex flex-wrap items-center gap-1.5 text-[13px] font-medium leading-tight">
+                        <span className="truncate">{a.author.name}</span>
+                        {a.isCreator && (
+                          <span className="inline-flex shrink-0 items-center gap-0.5 rounded-full border border-emerald-400/60 bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700 dark:text-emerald-400">
+                            <BadgeCheck className="h-3 w-3" aria-hidden /> Creator
+                          </span>
+                        )}
+                      </p>
+                      <p className="text-[11px] text-muted-foreground">{relTime(a.createdAt, now)}</p>
+                    </div>
+                  </div>
+                  <p className="mt-1.5 text-[13px] leading-relaxed">{a.body}</p>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Inline composer — always visible on OPEN questions */}
+      {composerOpen ? (
+        <div className="mt-3 border-t pt-3">
+          <Textarea
+            rows={3}
+            maxLength={1000}
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            placeholder="Reply as the creator…"
+            aria-label={`Reply to ${q.author.name} on ${q.product.title}`}
+          />
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <Button className="h-11" disabled={!draft.trim() || posting} onClick={() => void submit()}>
+              {posting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />} Post answer
+            </Button>
+            {answered && !posting && (
+              <Button
+                variant="ghost"
+                className="h-11"
+                onClick={() => {
+                  setComposerOpen(false);
+                  setDraft("");
+                }}
+              >
+                Cancel
+              </Button>
+            )}
+            <span className="ml-auto text-[11px] tabular-nums text-muted-foreground">{draft.length}/1000</span>
+          </div>
+        </div>
+      ) : (
+        <div className="mt-3 border-t pt-3">
+          <Button variant="ghost" className="min-h-10 text-muted-foreground" onClick={() => setComposerOpen(true)}>
+            <Plus className="h-4 w-4" /> Add another reply
+          </Button>
+        </div>
+      )}
+    </Panel>
   );
 }
 

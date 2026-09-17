@@ -16,6 +16,7 @@ export type NotificationIcon =
   | "bank"
   | "share"
   | "gift"
+  | "message"
   | "bell";
 
 export async function notify(opts: {
@@ -24,6 +25,7 @@ export async function notify(opts: {
   title: string;
   body?: string;
   icon?: NotificationIcon;
+  productId?: string; // optional deep-link context (e.g. question_answered → product page)
 }): Promise<void> {
   try {
     await db.notification.create({
@@ -33,6 +35,7 @@ export async function notify(opts: {
         title: opts.title,
         body: opts.body ?? null,
         icon: opts.icon ?? "bell",
+        productId: opts.productId ?? null,
       },
     });
   } catch {
@@ -40,8 +43,14 @@ export async function notify(opts: {
   }
 }
 
-// Which view/tab a notification deep-links to, if any.
-export function notificationTarget(type: string): { view: "portal" | "creator"; tab: string } | null {
+// Which view/tab a notification deep-links to, if any. Some types need
+// per-notification context (e.g. question_answered points at a product).
+export type NotificationTarget =
+  | { view: "portal" | "creator"; tab: string }
+  | { view: "product"; productId: string }
+  | null;
+
+export function notificationTarget(type: string, n?: { productId?: string | null }): NotificationTarget {
   switch (type) {
     case "invoice_paid":
     case "payment_failed":
@@ -71,6 +80,10 @@ export function notificationTarget(type: string): { view: "portal" | "creator"; 
     case "giveaway_entered":
     case "giveaway_ended":
       return { view: "creator", tab: "giveaways" };
+    case "question_asked":
+      return { view: "creator", tab: "questions" };
+    case "question_answered":
+      return n?.productId ? { view: "product", productId: n.productId } : null;
     default:
       return null;
   }

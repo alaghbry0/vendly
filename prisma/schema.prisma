@@ -38,6 +38,9 @@ model User {
   affiliateCommissions AffiliateCommission[]
   giveaways        Giveaway[]
   giveawayEntries  GiveawayEntry[]
+  questions        Question[]
+  answers          Answer[]
+  questionVotes    QuestionVote[]
 }
 
 // ============ Catalog ============
@@ -72,6 +75,7 @@ model Product {
   wishlistItems WishlistItem[]
   affiliateProgram AffiliateProgram?
   giveaways      Giveaway[]
+  questions     Question[]
 }
 
 model Plan {
@@ -326,8 +330,9 @@ model Notification {
   type      String   // invoice_paid | payment_failed | past_due | subscription_created | subscription_canceled | subscription_renewed | trial_converted | license_created | review_new | promo_redeemed | payout_paid | payout_pending
   title     String
   body      String?
-  icon      String   @default("bell") // receipt | alert | user-plus | x-circle | refresh | key | star | tag | bank
+  icon      String   @default("bell") // receipt | alert | user-plus | x-circle | refresh | key | star | tag | bank | gift | message
   read      Boolean  @default(false)
+  productId String?   // optional context: product the notification points at (Q&A deep links)
   createdAt DateTime @default(now())
 }
 
@@ -425,4 +430,43 @@ model GiveawayEntry {
   createdAt  DateTime @default(now())
 
   @@unique([giveawayId, userId])
+}
+
+// ============ Product Q&A ============
+model Question {
+  id        String   @id @default(cuid())
+  productId String
+  authorId  String
+  body      String
+  status    String   @default("OPEN") // OPEN | ANSWERED
+  createdAt DateTime @default(now())
+
+  product  Product         @relation(fields: [productId], references: [id])
+  author   User            @relation(fields: [authorId], references: [id])
+  answers  Answer[]
+  votes    QuestionVote[]
+}
+
+model Answer {
+  id         String   @id @default(cuid())
+  questionId String
+  authorId   String
+  body       String
+  isCreator  Boolean  @default(false)
+  createdAt  DateTime @default(now())
+
+  question Question @relation(fields: [questionId], references: [id])
+  author   User     @relation(fields: [authorId], references: [id])
+}
+
+model QuestionVote {
+  id         String   @id @default(cuid())
+  questionId String
+  userId     String
+  createdAt  DateTime @default(now())
+
+  question Question @relation(fields: [questionId], references: [id])
+  user     User     @relation(fields: [userId], references: [id])
+
+  @@unique([questionId, userId])
 }

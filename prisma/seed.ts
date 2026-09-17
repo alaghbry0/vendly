@@ -38,6 +38,9 @@ async function main() {
   await db.affiliateProgram.deleteMany();
   await db.giveawayEntry.deleteMany();
   await db.giveaway.deleteMany();
+  await db.questionVote.deleteMany();
+  await db.answer.deleteMany();
+  await db.question.deleteMany();
   await db.product.deleteMany();
   await db.user.deleteMany();
   await db.systemClock.deleteMany();
@@ -854,6 +857,107 @@ async function main() {
   await notif(bob.id, "giveaway_entered", "New giveaway entry — 1-Year Elite Membership Giveaway", "Someone just entered your drop. (Trade Signals Pro)", "gift", false, 2);
   await notif(carol.id, "giveaway_entered", "New giveaway entry — Lifetime Design Vault Pass", "Someone just entered your drop. (Design Vault)", "gift", false, 3);
 
+  // ============ Product Q&A ============
+  const mkQuestion = (productId: string, authorId: string, body: string, status: string, ago: number) =>
+    db.question.create({ data: { productId, authorId, body, status, createdAt: daysAgo(ago) } });
+  const mkAnswer = (questionId: string, authorId: string, body: string, isCreator: boolean, ago: number) =>
+    db.answer.create({ data: { questionId, authorId, body, isCreator, createdAt: daysAgo(ago) } });
+  const mkVotes = async (questionId: string, voters: string[], qAgo: number) => {
+    for (let i = 0; i < voters.length; i++) {
+      await db.questionVote.create({ data: { questionId, userId: voters[i], createdAt: daysAgo(Math.max(0.1, qAgo - 1 - i * 0.4)) } });
+    }
+  };
+
+  // Trade Signals Pro (Marcus) — the busiest Q&A board
+  const qStopLoss = await mkQuestion(
+    tradeSignals.id, dave.id,
+    "Does the signal feed include stop-loss and take-profit levels, or do I need to calculate risk management myself?",
+    "ANSWERED", 16,
+  );
+  await mkAnswer(qStopLoss.id, hank.id, "Pro includes both SL and TP on every signal, plus suggested position sizing by risk band. Starter gets the entry and the stop — targets land in the weekly report.", false, 15);
+  await mkAnswer(qStopLoss.id, bob.id, "Every signal ships with a stop-loss, two take-profit targets and a suggested risk-per-trade band. Starter covers entries + stops; Pro adds the full target ladder and the position-sizing toolkit.", true, 14);
+  await mkVotes(qStopLoss.id, [alice.id, eve.id, frank.id, grace.id, hank.id, ivy.id, bob.id, carol.id], 16);
+
+  const qVolume = await mkQuestion(
+    tradeSignals.id, eve.id,
+    "How many signals per day does the Starter plan include compared to Pro? Considering upgrading but want to know the volume first.",
+    "ANSWERED", 11,
+  );
+  await mkAnswer(qVolume.id, bob.id, "Starter is capped at 3 signals per day during the London session. Pro is unlimited across both sessions — on active days that's typically 8-12.", true, 10.75); // ~6h response
+  await mkVotes(qVolume.id, [dave.id, frank.id, hank.id, grace.id, ivy.id], 11);
+
+  const qStudent = await mkQuestion(
+    tradeSignals.id, frank.id,
+    "Is there a student discount for the monthly plans? Happy to verify with my university email.",
+    "OPEN", 4,
+  );
+  await mkVotes(qStudent.id, [eve.id, grace.id, hank.id], 4);
+
+  // SaaS Growth Blueprint (Marcus)
+  const qLicense = await mkQuestion(
+    saasBlueprint.id, alice.id,
+    "Can I use the license key on two machines — my laptop and my desktop — or is it strictly one activation?",
+    "ANSWERED", 14,
+  );
+  await mkAnswer(qLicense.id, bob.id, "The Founder license activates on up to 3 devices, so laptop + desktop is fine. Studio bumps it to 10 if you ever need team seats.", true, 12);
+  await mkVotes(qLicense.id, [dave.id, eve.id, frank.id, grace.id, hank.id, ivy.id, carol.id], 14);
+
+  const qSheets = await mkQuestion(
+    saasBlueprint.id, hank.id,
+    "Do the financial models in the vault work in Google Sheets, or are they Excel-only?",
+    "OPEN", 9,
+  );
+  await mkAnswer(qSheets.id, dave.id, "I opened the ARR waterfall in Google Sheets — imports fine with minor formula tweaks. The cohort model uses Excel array formulas that don't translate.", false, 8);
+  await mkVotes(qSheets.id, [eve.id, grace.id, ivy.id, dave.id], 9);
+
+  // FitCore Coaching (Aisha)
+  const qHome = await mkQuestion(
+    fitcore.id, ivy.id,
+    "Do the adaptive plans adjust for home workouts with minimal equipment, or do they assume a full gym setup?",
+    "ANSWERED", 13,
+  );
+  await mkAnswer(qHome.id, carol.id, "The plans adapt to whatever equipment you list in onboarding — dumbbells and a bench is plenty. Every movement has a home variant with band substitutions.", true, 12.75); // ~6h response
+  await mkVotes(qHome.id, [alice.id, bob.id, carol.id, dave.id, eve.id, frank.id, grace.id, hank.id], 13);
+
+  const qVeg = await mkQuestion(
+    fitcore.id, alice.id,
+    "Is the nutrition guidance suitable for vegetarians? Mostly asking about the custom meal plans in the Coached tier.",
+    "ANSWERED", 6,
+  );
+  await mkAnswer(qVeg.id, carol.id, "Yes — the Coached meal plans default to omnivore but have vegetarian, vegan and halal toggles. Your coach builds the weekly plan around whichever you pick.", true, 5);
+  await mkVotes(qVeg.id, [dave.id, eve.id, frank.id, grace.id, hank.id, ivy.id, carol.id], 6);
+
+  const qSwitch = await mkQuestion(
+    fitcore.id, grace.id,
+    "Can I switch between the Solo and Coached plans mid-month without losing my check-in history?",
+    "OPEN", 3,
+  );
+  await mkVotes(qSwitch.id, [dave.id, eve.id, hank.id, ivy.id, frank.id, carol.id], 3);
+
+  // Crypto Alpha Group (Marcus)
+  const qAlerts = await mkQuestion(
+    cryptoAlpha.id, grace.id,
+    "How fresh are the on-chain alerts compared to the free Telegram channels? What's the typical delay?",
+    "OPEN", 8,
+  );
+  await mkVotes(qAlerts.id, [alice.id, dave.id, eve.id, frank.id, hank.id, ivy.id, bob.id], 8);
+
+  // Q&A notifications (question_asked → creator inbox, question_answered → product page)
+  await notif(bob.id, "question_asked", "New question — Trade Signals Pro", `"Is there a student discount for the monthly plans? Happy to verify with my university email." — Farid Haddad`, "message", false, 4);
+  await notif(carol.id, "question_asked", "New question — FitCore Coaching", `"Can I switch between the Solo and Coached plans mid-month without losing my check-in history?" — Gina Park`, "message", false, 3);
+  await db.notification.create({
+    data: {
+      userId: alice.id,
+      type: "question_answered",
+      title: "Answered — SaaS Growth Blueprint",
+      body: `"The Founder license activates on up to 3 devices, so laptop + desktop is fine. Studio bumps it to 10…" — Marcus Chen`,
+      icon: "message",
+      read: true,
+      productId: saasBlueprint.id,
+      createdAt: daysAgo(12),
+    },
+  });
+
   console.log("✅ Seed complete:", {
     users: await db.user.count(),
     products: await db.product.count(),
@@ -874,6 +978,9 @@ async function main() {
     affiliateCommissions: await db.affiliateCommission.count(),
     giveaways: await db.giveaway.count(),
     giveawayEntries: await db.giveawayEntry.count(),
+    questions: await db.question.count(),
+    answers: await db.answer.count(),
+    questionVotes: await db.questionVote.count(),
   });
 }
 

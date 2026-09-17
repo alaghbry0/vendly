@@ -220,11 +220,11 @@ export function StatCard({
   className?: string;
 }) {
   return (
-    <div className={cn("rounded-2xl border bg-card p-5 shadow-sm transition-shadow hover:shadow-md", className)}>
+    <div className={cn("group rounded-2xl border bg-card p-5 shadow-sm transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md hover:shadow-emerald-500/5", className)}>
       <div className="flex items-start justify-between">
         <p className="text-sm font-medium text-muted-foreground">{label}</p>
         {Icon && (
-          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10">
+          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10 transition-transform duration-200 group-hover:scale-110">
             <Icon className="h-4 w-4 text-primary" />
           </div>
         )}

@@ -240,7 +240,7 @@ export interface NotificationDTO {
   icon: string;
   read: boolean;
   createdAt: string;
-  target: { view: "portal" | "creator"; tab: string } | null;
+  target: { view: "portal" | "creator"; tab: string } | { view: "product"; productId: string } | null;
 }
 
 // ============ Payouts ============
@@ -391,6 +391,38 @@ export interface MyGiveawayEntryDTO {
   giveaway: GiveawayDTO;
 }
 
+// ============ Product Q&A ============
+export interface AnswerDTO {
+  id: string;
+  body: string;
+  isCreator: boolean;
+  createdAt: string; // ISO
+  author: { id: string; name: string; avatarColor: string };
+}
+
+export interface QuestionDTO {
+  id: string;
+  body: string;
+  status: "OPEN" | "ANSWERED";
+  createdAt: string; // ISO
+  author: { id: string; name: string; avatarColor: string };
+  upvotes: number;
+  hasVoted: boolean; // caller's vote (false for anonymous)
+  answers: AnswerDTO[]; // oldest first
+  answerCount: number;
+}
+
+export interface CreatorQuestionDTO extends QuestionDTO {
+  product: { id: string; title: string; coverTheme: string };
+}
+
+export interface QuestionsStatsDTO {
+  open: number;
+  answered: number;
+  totalUpvotes: number;
+  avgResponseHours: number | null; // avg hours question→first creator answer; null when no creator answers
+}
+
 export const COVER_THEMES = [
   "emerald", "teal", "amber", "rose", "violet", "cyan", "lime", "orange",
 ] as const;
@@ -411,4 +443,5 @@ export const STATUS_META: Record<string, { label: string; tone: string }> = {
   EXPIRED: { label: "Expired", tone: "muted" },
   LIVE: { label: "Live", tone: "success" },
   ENDED: { label: "Ended", tone: "muted" },
+  ANSWERED: { label: "Answered", tone: "success" },
 };

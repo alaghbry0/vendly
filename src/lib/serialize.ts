@@ -1,6 +1,6 @@
 import { db } from "@/lib/db";
-import type { Plan, Product, User } from "@prisma/client";
-import type { PlanDTO, ProductCardDTO, ProductDetailDTO } from "@/lib/types";
+import type { Answer, Plan, Product, Question, QuestionVote, User } from "@prisma/client";
+import type { AnswerDTO, PlanDTO, ProductCardDTO, ProductDetailDTO, QuestionDTO } from "@/lib/types";
 
 type ProductWithRelations = Product & {
   creator: Pick<User, "id" | "name" | "avatarColor" | "bio">;
@@ -106,3 +106,49 @@ export async function hasActiveAccess(userId: string, productId: string): Promis
   });
   return !!sub;
 }
+
+// ============ Product Q&A ============
+type QaAuthor = Pick<User, "id" | "name" | "email" | "avatarColor">;
+
+export type QuestionWithRelations = Question & {
+  author: QaAuthor;
+  answers: (Answer & { author: QaAuthor })[];
+  votes: QuestionVote[];
+};
+
+function qaAuthor(u: QaAuthor) {
+  return { id: u.id, name: u.name || u.email, avatarColor: u.avatarColor };
+}
+
+export function serializeAnswer(a: Answer & { author: QaAuthor }): AnswerDTO {
+  return {
+    id: a.id,
+    body: a.body,
+    isCreator: a.isCreator,
+    createdAt: a.createdAt.toISOString(),
+    author: qaAuthor(a.author),
+  };
+}
+
+// viewerId drives hasVoted (null/anonymous → false). Answers come back oldest-first.
+export function serializeQuestion(q: QuestionWithRelations, viewerId: string | null): QuestionDTO {
+  const answers = [...q.answers].sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+  return {
+    id: q.id,
+    body: q.body,
+    status: q.status === "ANSWERED" ? "ANSWERED" : "OPEN",
+    createdAt: q.createdAt.toISOString(),
+    author: qaAuthor(q.author),
+    upvotes: q.votes.length,
+    hasVoted: viewerId ? q.votes.some((v) => v.userId === viewerId) : false,
+    answers: answers.map(serializeAnswer),
+    answerCount: answers.length,
+  };
+}
+
+// shared include that hydrates QuestionWithRelations (author/answers/votes)
+export const QUESTION_INCLUDE = {
+  author: { select: { id: true, name: true, email: true, avatarColor: true } },
+  answers: { include: { author: { select: { id: true, name: true, email: true, avatarColor: true } } } },
+  votes: true,
+} as const;

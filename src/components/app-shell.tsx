@@ -21,7 +21,7 @@ import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
 import {
-  Bell, Banknote, Compass, CreditCard, Gift, KeyRound, LayoutDashboard, LogIn, Menu, Moon,
+  Bell, Banknote, Compass, CreditCard, Gift, KeyRound, LayoutDashboard, LogIn, Menu, MessageSquare, Moon,
   Receipt, RefreshCw, Search, Star, Store, Sun, Tag, Timer, UserPlus, X, XCircle, AlertTriangle,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -44,6 +44,7 @@ const NOTIF_ICONS: Record<string, { icon: typeof Bell; cls: string }> = {
   tag: { icon: Tag, cls: "bg-lime-500/10 text-lime-600 dark:text-lime-400" },
   bank: { icon: Banknote, cls: "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400" },
   gift: { icon: Gift, cls: "bg-amber-500/10 text-amber-600 dark:text-amber-400" },
+  message: { icon: MessageSquare, cls: "bg-teal-500/10 text-teal-600 dark:text-teal-400" },
   bell: { icon: Bell, cls: "bg-muted text-muted-foreground" },
 };
 
@@ -97,7 +98,13 @@ function NotificationBell() {
       }
     }
     setOpen(false);
-    if (n.target) navigate(n.target.view, n.target.view === "portal" ? { portalTab: n.target.tab } : { creatorTab: n.target.tab });
+    if (n.target) {
+      if (n.target.view === "product") {
+        navigate("product", { productId: n.target.productId });
+      } else {
+        navigate(n.target.view, n.target.view === "portal" ? { portalTab: n.target.tab } : { creatorTab: n.target.tab });
+      }
+    }
   }
 
   async function markAllRead() {

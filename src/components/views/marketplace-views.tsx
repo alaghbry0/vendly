@@ -7,15 +7,16 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import type { LucideIcon } from "lucide-react";
 import {
-  ArrowLeft, ArrowRight, ArrowUpRight, BadgeCheck, Bitcoin, CalendarDays, Check, CircleAlert,
-  CreditCard, ExternalLink, FileDown, Gift, Heart, Info, KeyRound, Loader2, Lock, Mail, Megaphone, MessageSquare,
+  ArrowLeft, ArrowRight, ArrowUpRight, BadgeCheck, Bitcoin, CalendarDays, Check, ChevronUp, CircleAlert,
+  CreditCard, ExternalLink, FileDown, Gift, Heart, Info, KeyRound, Loader2, Lock, Mail, Megaphone,
+  MessageCircleQuestion, MessageSquare, MessageSquarePlus,
   MousePointerClick, PackageOpen, PenLine, RefreshCw, Search, SearchX, Send, ShieldCheck, ShoppingBag,
   Sparkles, Star, Tag, Timer, Trophy, Users, Wallet, X,
 } from "lucide-react";
 
 import { useAppStore } from "@/lib/store";
 import { api, ApiError } from "@/lib/api";
-import { CATEGORIES, type AffiliateLinkDTO, type AssetDTO, type GiveawayDTO, type PlanDTO, type ProductCardDTO, type ProductDetailDTO, type PromoValidationDTO } from "@/lib/types";
+import { CATEGORIES, type AffiliateLinkDTO, type AnswerDTO, type AssetDTO, type GiveawayDTO, type PlanDTO, type ProductCardDTO, type ProductDetailDTO, type PromoValidationDTO, type QuestionDTO } from "@/lib/types";
 import { COVER_THEMES, fmtBytes, fmtCompact, fmtDate, fmtMoney, timeAgo } from "@/lib/format";
 import {
   CategoryIcon, CopyButton, EmptyState, GatewayBadge, ProductCover, ProviderBadge, SectionHeader,
@@ -1125,8 +1126,12 @@ function DiscoverView() {
         <div aria-hidden className="pointer-events-none absolute inset-0">
           <div className="absolute inset-0 bg-gradient-to-br from-emerald-500/[0.08] via-teal-500/[0.05] to-cyan-500/[0.09]" />
           <div className="absolute inset-0 [background-image:linear-gradient(to_right,rgba(16,185,129,0.07)_1px,transparent_1px),linear-gradient(to_bottom,rgba(16,185,129,0.07)_1px,transparent_1px)] [background-size:36px_36px] [mask-image:radial-gradient(ellipse_70%_70%_at_50%_30%,black_20%,transparent_75%)]" />
-          <div className="absolute -top-24 left-1/4 h-72 w-72 rounded-full bg-emerald-400/20 blur-3xl" />
-          <div className="absolute right-1/5 top-8 h-64 w-64 rounded-full bg-cyan-400/15 blur-3xl" />
+          {/* Aurora orbs — slowly drifting blurred glows for depth */}
+          <div className="absolute -top-24 left-1/4 h-72 w-72 animate-drift rounded-full bg-emerald-400/20 blur-3xl" />
+          <div className="absolute right-1/5 top-8 h-64 w-64 animate-drift-2 rounded-full bg-cyan-400/15 blur-3xl" />
+          <div className="absolute -bottom-24 left-[6%] h-64 w-64 animate-drift rounded-full bg-teal-400/15 blur-3xl [animation-delay:-7s]" />
+          {/* Film-grain overlay — keeps large flat areas from feeling sterile */}
+          <div className="noise-overlay absolute inset-0 opacity-[0.035] dark:opacity-[0.05]" />
           {HERO_PARTICLES.map((p, i) => (
             <motion.span
               key={i}
@@ -1160,7 +1165,7 @@ function DiscoverView() {
             <div className="mt-7 flex flex-col items-center justify-center gap-3 sm:flex-row">
               <Button
                 size="lg"
-                className="h-12 rounded-full px-8 text-base"
+                className="h-12 rounded-full px-8 text-base transition-all hover:-translate-y-0.5 hover:shadow-lg hover:shadow-emerald-500/15"
                 onClick={() => gridRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })}
               >
                 <ShoppingBag className="h-4.5 w-4.5" />
@@ -1219,6 +1224,9 @@ function DiscoverView() {
             </dl>
           </motion.div>
         </div>
+
+        {/* Gradient hairline accent along the hero's bottom edge */}
+        <div aria-hidden className="pointer-events-none absolute inset-x-0 bottom-0 h-px bg-gradient-to-r from-transparent via-emerald-500/35 to-transparent" />
       </section>
 
       {/* ------------------------- Catalog + filters ------------------------ */}
@@ -1530,6 +1538,383 @@ function ReviewDialog({
   );
 }
 
+// ---------------------------------------------------------------------------
+// Product Q&A — public questions & answers on the product detail page
+// ---------------------------------------------------------------------------
+
+/** One answer inside a question's thread. Creator answers get the emerald treatment. */
+function AnswerRow({ answer }: { answer: AnswerDTO }) {
+  return (
+    <div className={cn("border-l-2 pl-4", answer.isCreator ? "rounded-r-lg border-emerald-400/60 bg-emerald-500/[0.04] p-3 pl-4" : "border-border")}>
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5">
+        <span className="flex items-center gap-1.5">
+          <UserAvatar name={answer.author.name} color={answer.author.avatarColor} size="sm" className="h-6 w-6 text-[9px]" />
+          <span className="text-xs font-semibold">{answer.author.name}</span>
+        </span>
+        {answer.isCreator && (
+          <span className="inline-flex items-center gap-1 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700 dark:text-emerald-400">
+            <BadgeCheck className="h-3 w-3" /> Creator
+          </span>
+        )}
+        <span aria-hidden className="text-xs text-muted-foreground">·</span>
+        <span className="text-xs text-muted-foreground">{timeAgo(answer.createdAt)}</span>
+      </div>
+      <p className="mt-1.5 text-sm leading-relaxed text-muted-foreground">{answer.body}</p>
+    </div>
+  );
+}
+
+/** A single buyer question: vote rail, body, status chip, answer thread + reply composer. */
+function QuestionCard({
+  question,
+  index,
+  signedIn,
+  isProductCreator,
+  onVote,
+  onAnswer,
+}: {
+  question: QuestionDTO;
+  index: number;
+  signedIn: boolean;
+  isProductCreator: boolean;
+  onVote: (q: QuestionDTO) => void;
+  onAnswer: (q: QuestionDTO, body: string) => Promise<boolean>;
+}) {
+  const { toast } = useToast();
+  const [composing, setComposing] = useState(false);
+  const [reply, setReply] = useState("");
+  const [posting, setPosting] = useState(false);
+
+  function startReply() {
+    if (!signedIn) {
+      toast({ title: "Sign in to reply", description: "Pick a demo account from the header, then share what you know." });
+      return;
+    }
+    setComposing(true);
+  }
+
+  async function post() {
+    const body = reply.trim();
+    if (posting || body.length < 2) return;
+    setPosting(true);
+    const ok = await onAnswer(question, body);
+    setPosting(false);
+    if (ok) {
+      setComposing(false);
+      setReply("");
+    }
+  }
+
+  return (
+    <motion.article
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.25, delay: Math.min(index * 0.04, 0.35) }}
+      className="rounded-2xl border bg-card p-4"
+    >
+      <div className="flex gap-3.5">
+        {/* Vote rail */}
+        <div className="flex w-9 shrink-0 flex-col items-center gap-1">
+          <Button
+            type="button"
+            variant="outline"
+            size="icon"
+            aria-label="Upvote question"
+            aria-pressed={question.hasVoted}
+            onClick={() => onVote(question)}
+            className={cn(
+              "h-9 w-9 rounded-xl",
+              question.hasVoted &&
+                "border-emerald-500/30 bg-emerald-500/10 text-emerald-600 hover:bg-emerald-500/15 hover:text-emerald-600 dark:text-emerald-400 dark:hover:text-emerald-400"
+            )}
+          >
+            <ChevronUp className="h-4.5 w-4.5" strokeWidth={2.5} />
+          </Button>
+          <span className="text-sm font-semibold tabular-nums">{question.upvotes}</span>
+        </div>
+
+        {/* Body, meta, answers */}
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-medium leading-relaxed">{question.body}</p>
+          <div className="mt-2.5 flex flex-wrap items-center gap-x-2 gap-y-2">
+            <span className="flex items-center gap-1.5">
+              <UserAvatar name={question.author.name} color={question.author.avatarColor} size="sm" />
+              <span className="text-xs font-semibold">{question.author.name}</span>
+            </span>
+            <span aria-hidden className="text-xs text-muted-foreground">·</span>
+            <span className="text-xs text-muted-foreground">{timeAgo(question.createdAt)}</span>
+            {question.status === "ANSWERED" ? (
+              <span className="inline-flex items-center gap-1 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[11px] font-medium text-emerald-700 dark:text-emerald-400">
+                <BadgeCheck className="h-3 w-3" /> Answered
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1 rounded-full border bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
+                Awaiting reply
+              </span>
+            )}
+          </div>
+
+          {question.answers.length > 0 && (
+            <div className="mt-3.5 space-y-3">
+              {question.answers.map((a) => (
+                <AnswerRow key={a.id} answer={a} />
+              ))}
+            </div>
+          )}
+
+          {/* Reply composer */}
+          {composing ? (
+            <motion.div initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.18 }} className="mt-3.5">
+              <Textarea
+                value={reply}
+                onChange={(e) => setReply(e.target.value)}
+                rows={2}
+                maxLength={1000}
+                placeholder="Share what you know — pricing, access, results…"
+                aria-label="Write an answer"
+                className="text-sm"
+                disabled={posting}
+              />
+              <div className="mt-2 flex flex-wrap items-center justify-end gap-2">
+                <span className="mr-auto text-xs tabular-nums text-muted-foreground">{reply.length}/1000</span>
+                <Button type="button" variant="ghost" className="h-10" onClick={() => { setComposing(false); setReply(""); }} disabled={posting}>
+                  Cancel
+                </Button>
+                <Button type="button" className="h-10" onClick={post} disabled={posting || reply.trim().length < 2}>
+                  {posting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+                  Post answer
+                </Button>
+              </div>
+            </motion.div>
+          ) : (
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={startReply}
+              aria-expanded={composing}
+              className="mt-3 h-9 gap-1.5 px-2.5 text-xs font-medium text-muted-foreground hover:text-foreground"
+            >
+              <MessageSquarePlus className="h-3.5 w-3.5" /> Reply
+            </Button>
+          )}
+        </div>
+      </div>
+    </motion.article>
+  );
+}
+
+/** Public Q&A section on the product page — ask card, question list, upvotes, answers. */
+function ProductQaSection({ product }: { product: ProductDetailDTO }) {
+  const user = useAppStore((s) => s.user);
+  const navigate = useAppStore((s) => s.navigate);
+  const nonce = useAppStore((s) => s.nonce);
+  const { toast } = useToast();
+
+  const [questions, setQuestions] = useState<QuestionDTO[]>([]);
+  const [loadedId, setLoadedId] = useState<string | null>(null);
+  const [askBody, setAskBody] = useState("");
+  const [asking, setAsking] = useState(false);
+
+  const isCreator = !!user && user.id === product.creator.id;
+  const loaded = loadedId === product.id;
+
+  const load = useCallback(async () => {
+    try {
+      const res = await api<{ questions: QuestionDTO[] }>(`/api/products/${product.id}/questions`);
+      setQuestions(res.questions);
+    } catch {
+      setQuestions([]); // the section always renders — fall back to the empty state
+    } finally {
+      setLoadedId(product.id);
+    }
+  }, [product.id]);
+
+  useEffect(() => {
+    void load();
+  }, [load, nonce]);
+
+  async function submitQuestion(e: React.FormEvent) {
+    e.preventDefault();
+    const body = askBody.trim();
+    if (asking) return;
+    if (body.length < 5) {
+      toast({ title: "Question too short", description: "Write at least 5 characters so the creator can help.", variant: "destructive" });
+      return;
+    }
+    setAsking(true);
+    try {
+      await api(`/api/products/${product.id}/questions`, { json: { body } });
+      setAskBody("");
+      toast({ title: "Question posted", description: "The creator will be notified and usually replies within a day." });
+      await load(); // server re-sorts: OPEN group by upvotes
+    } catch (e) {
+      toast({ title: "Could not post question", description: (e as Error).message, variant: "destructive" });
+    } finally {
+      setAsking(false);
+    }
+  }
+
+  async function toggleUpvote(q: QuestionDTO) {
+    if (!user) {
+      toast({ title: "Sign in to vote", description: "Pick a demo account from the header to upvote questions." });
+      return;
+    }
+    // Optimistic toggle, reconciled with the server count (revert + toast on failure).
+    setQuestions((qs) => qs.map((x) => (x.id === q.id ? { ...x, hasVoted: !x.hasVoted, upvotes: x.upvotes + (x.hasVoted ? -1 : 1) } : x)));
+    try {
+      const res = await api<{ ok: boolean; upvotes: number; hasVoted: boolean }>(`/api/questions/${q.id}/upvote`, { json: {} });
+      setQuestions((qs) => qs.map((x) => (x.id === q.id ? { ...x, upvotes: res.upvotes, hasVoted: res.hasVoted } : x)));
+    } catch (e) {
+      setQuestions((qs) => qs.map((x) => (x.id === q.id ? q : x)));
+      toast({ title: "Couldn't register vote", description: (e as Error).message, variant: "destructive" });
+    }
+  }
+
+  async function submitAnswer(q: QuestionDTO, body: string): Promise<boolean> {
+    if (!user) return false;
+    // Optimistic append — the author is the current user; creators flip the status chip.
+    const optimistic: AnswerDTO = {
+      id: `optimistic-${q.id}-${Date.now()}`,
+      body,
+      isCreator,
+      createdAt: new Date().toISOString(),
+      author: { id: user.id, name: user.name ?? user.email, avatarColor: user.avatarColor },
+    };
+    setQuestions((qs) =>
+      qs.map((x) =>
+        x.id === q.id
+          ? { ...x, answers: [...x.answers, optimistic], answerCount: x.answerCount + 1, status: isCreator ? ("ANSWERED" as const) : x.status }
+          : x
+      )
+    );
+    try {
+      const res = await api<{ answer: AnswerDTO; question: { id: string; status: "OPEN" | "ANSWERED" } }>(`/api/questions/${q.id}/answers`, {
+        json: { body },
+      });
+      setQuestions((qs) =>
+        qs.map((x) =>
+          x.id === q.id
+            ? { ...x, answers: x.answers.map((a) => (a.id === optimistic.id ? res.answer : a)), status: res.question.status }
+            : x
+        )
+      );
+      toast({ title: "Answer posted", description: isCreator ? "Question marked as answered." : "Thanks for helping out!" });
+      return true;
+    } catch (e) {
+      setQuestions((qs) =>
+        qs.map((x) =>
+          x.id === q.id
+            ? { ...x, answers: x.answers.filter((a) => a.id !== optimistic.id), answerCount: Math.max(0, x.answerCount - 1), status: q.status }
+            : x
+        )
+      );
+      toast({ title: "Could not post answer", description: (e as Error).message, variant: "destructive" });
+      return false;
+    }
+  }
+
+  const askLen = askBody.length;
+
+  return (
+    <section aria-label="Questions and answers">
+      <SectionHeader
+        title="Questions & answers"
+        description={
+          !loaded
+            ? "Buyer questions, answered by the creator and members"
+            : questions.length === 0
+              ? "Ask the creator and members anything before you buy"
+              : `${questions.length} question${questions.length === 1 ? "" : "s"} · answered by the creator and members`
+        }
+        className="mb-4"
+      />
+
+      {/* Ask card — the creator gets an inbox pointer instead */}
+      <div className="rounded-2xl border bg-card p-4 md:p-5">
+        {isCreator ? (
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex items-start gap-3">
+              <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-muted text-muted-foreground">
+                <MessageCircleQuestion className="h-5 w-5" />
+              </span>
+              <p className="text-sm leading-relaxed text-muted-foreground">
+                <span className="font-semibold text-foreground">You&apos;re the creator</span> — reply to buyer questions from
+                Creator Studio → Q&amp;A.
+              </p>
+            </div>
+            <Button variant="ghost" className="h-11 shrink-0" onClick={() => navigate("creator", { creatorTab: "questions" })}>
+              <MessageSquare className="h-4 w-4" /> Open Q&amp;A inbox
+            </Button>
+          </div>
+        ) : (
+          <form onSubmit={submitQuestion} noValidate>
+            <Label htmlFor="question-body" className="text-sm font-semibold">
+              Ask a question
+            </Label>
+            <p className="mt-0.5 text-xs text-muted-foreground">The creator is notified and usually replies within a day.</p>
+            <Textarea
+              id="question-body"
+              value={askBody}
+              onChange={(e) => setAskBody(e.target.value)}
+              rows={3}
+              maxLength={500}
+              placeholder="Ask anything before you buy — pricing, access, refunds…"
+              className="mt-2.5"
+              disabled={asking}
+            />
+            <div className="mt-2 flex items-center justify-between gap-3">
+              <span
+                aria-live="polite"
+                className={cn(
+                  "text-xs tabular-nums",
+                  askLen > 500 ? "text-red-600 dark:text-red-400" : askLen >= 480 ? "text-amber-600 dark:text-amber-400" : "text-muted-foreground"
+                )}
+              >
+                {askLen}/500
+              </span>
+              <Button type="submit" className="h-11" disabled={asking}>
+                {asking ? <Loader2 className="h-4 w-4 animate-spin" /> : <MessageSquarePlus className="h-4 w-4" />}
+                Ask question
+              </Button>
+            </div>
+          </form>
+        )}
+      </div>
+
+      {/* Question list */}
+      {!loaded ? (
+        <div className="mt-4 grid gap-3" aria-busy="true" aria-label="Loading questions">
+          <Skeleton className="h-36 w-full rounded-2xl" />
+          <Skeleton className="h-36 w-full rounded-2xl" />
+        </div>
+      ) : questions.length === 0 ? (
+        <div className="mt-4">
+          <EmptyState
+            icon={MessageCircleQuestion}
+            title="No questions yet"
+            description="Be the first to ask — the creator usually replies within a day."
+          />
+        </div>
+      ) : (
+        <div className="mt-4 grid gap-3">
+          {questions.map((q, i) => (
+            <QuestionCard
+              key={q.id}
+              question={q}
+              index={i}
+              signedIn={!!user}
+              isProductCreator={isCreator}
+              onVote={toggleUpvote}
+              onAnswer={submitAnswer}
+            />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function DetailSkeleton() {
   return (
     <div className="container mx-auto max-w-7xl px-4 py-8" aria-busy="true" aria-label="Loading product">
@@ -1786,6 +2171,8 @@ function ProductDetailView() {
               </ul>
             )}
           </section>
+
+          <ProductQaSection product={product} />
         </div>
 
         {/* ------------------------------ Right column (sticky) ------------------------------ */}
