@@ -655,3 +655,23 @@ Stage Summary:
 - Env: WHOP_API_KEY / WHOP_API_BASE_URL (sandbox-api.whop.com/api/v1) / WHOP_BUSINESS_ID / NEXT_PUBLIC_WHOP_BUSINESS_ID / WORKER_SECRET in .env (gitignored — document them when deploying)
 - Notes: agent-browser can fill the cross-origin Basis Theory card iframes only via mouse-click coordinates + keyboard (frame refs don't pierce nesting); scrollIntoView the card element first; the spike script /tmp/fill-whop-card.sh automates it
 - Recommended next: webhook endpoint for real Whop payment events (payment.succeeded etc.), creator revenue forecast chart, bundle offers, per-grant sync drill-down
+
+---
+Task ID: 14-a
+Agent: main (Z.ai Code, scheduled webDevReview cycle)
+Task: Round 14 — health check, QA pass, creator revenue forecast chart (worklog recommendation #2 from round 13)
+
+Work Log:
+- Health check: app 200 · worker running (19 ticks, 25 durable WorkerRun rows, last WORKER ok) · dev.log clean · eslint 0 · tsc clean
+- agent-browser QA: discover + Creator Studio overview/analytics as Marcus — all charts render, zero console/page errors → verdict: stable → focus = new feature per worklog priority list (picked #2: creator revenue forecast)
+- BACKEND: src/lib/analytics.ts now computes a 30-day MRR forecast — momentum (mean daily MRR delta over trailing 30d of mrrSeries) + churn drag (observed 30d churnRate/30 applied multiplicatively per projected day) + confidence bounds (±σ of daily deltas, churn ±25%, clamped low≥0, high≥low); AnalyticsDTO.gained forecast {horizonDays, points[{date,mrr,low,high}], projectedMrrCents, deltaPct, churnDragCents, trendLabel: growing|flat|declining}
+- FRONTEND (creator-views.tsx): ForecastPanel — full-width panel between the charts grid and Top products on the creator overview: ComposedChart with solid emerald actual-MRR area (30d) → dashed teal projection line (anchored at today so the two connect) + confidence band via the stacked range-area idiom (invisible `low` base + `band`=high−low on top, emerald 14% fill) + ReferenceLine "today" divider + custom ForecastTip (actual/projected/range rows); header trend badge (TrendingUp/Down/Wind icon, tone-tinted) + delta chip; right rail: Projected MRR card (big tabular number + ▲/▼ % vs today), amber Churn-drag card (−$/mo at current churn %), "How it works" model explainer; custom inline legend (solid/dashed/band swatches)
+- Verified via API: Marcus $333.42 → $585.15 (+10.1% growing, drag −$75.92); Aisha $115 → $95.51 (−16.9% — momentum growing but 33% churn outpaces it: honest two-signal story the panel shows via badge + red delta + drag card); Alex (no products) → flat 0, no crash
+- E2E (agent-browser): panel renders with all elements (heading, GROWING badge, $585.15, ▲10.1% vs today, churn drag, momentum explainer, legend); VLM-rated 9/10 — "solid line transitions into dashed projection, light shaded confidence band"; dark mode verified readable with zero glitches; mobile 390×844 scrollWidth=390 no overflow; zero console/page errors after clean reload
+- Final state: re-seeded pristine; eslint exit 0; tsc --noEmit clean; dev.log clean; worker still ticking
+
+Stage Summary:
+- NEW FEATURE: Revenue forecast — 30-day MRR projection (momentum + churn model with confidence band) on the creator overview, the flagship analytics upgrade from the round-13 priority list
+- Styling: forecast panel is itself a visual centerpiece (VLM 9/10): gradient area → dashed projection, shaded confidence range, today divider, tone-tinted badges, driver cards
+- Files: src/lib/analytics.ts (+~45), src/lib/types.ts (+10), src/components/views/creator-views.tsx (+~200: ForecastTip, buildForecastSeries, ForecastPanel + ReferenceLine/TrendingDown/Wind imports)
+- Next-round candidates: bundle offers (cart/checkout), Whop webhook events endpoint (needs public URL), activity-feed timeline, per-grant sync drill-down

@@ -153,6 +153,40 @@ export async function computeCreatorAnalytics(creatorId: string): Promise<Analyt
   }
   recentActivity.sort((a, b) => b.at.localeCompare(a.at));
 
+  // ---------- 30-day MRR forecast ----------
+  // Model: momentum + churn drag. Daily MRR deltas over the trailing 30 days
+  // give a net-trend slope (new/renewed business minus losses); the observed
+  // 30-day churn rate decays MRR multiplicatively each projected day. The
+  // confidence band widens with the variance of historical daily deltas.
+  const currentMrr = mrrSeries.length ? mrrSeries[mrrSeries.length - 1].mrr : mrrCents / 100;
+  const trendWindow = mrrSeries.slice(-30);
+  const deltas: number[] = [];
+  for (let i = 1; i < trendWindow.length; i++) {
+    deltas.push(trendWindow[i].mrr - trendWindow[i - 1].mrr);
+  }
+  const n = deltas.length || 1;
+  const meanDelta = deltas.reduce((s, d) => s + d, 0) / n;
+  const variance = deltas.reduce((s, d) => s + (d - meanDelta) ** 2, 0) / n;
+  const sigma = Math.sqrt(variance);
+
+  const dailyChurn = churnRate / 30; // fraction of MRR expected to churn per day
+  const HORIZON = 30;
+  const forecastPoints: { date: string; mrr: number; low: number; high: number }[] = [];
+  let m = currentMrr;
+  let lo = currentMrr;
+  let hi = currentMrr;
+  for (let d = 1; d <= HORIZON; d++) {
+    m = m * (1 - dailyChurn) + meanDelta;
+    lo = lo * (1 - dailyChurn * 1.25) + meanDelta - sigma * 0.8;
+    hi = hi * (1 - dailyChurn * 0.75) + meanDelta + sigma * 0.8;
+    lo = Math.max(0, lo);
+    hi = Math.max(lo, hi);
+    const day = new Date(nowMs + d * dayMs);
+    forecastPoints.push({ date: dayKey(day), mrr: Math.round(m * 100) / 100, low: Math.round(lo * 100) / 100, high: Math.round(hi * 100) / 100 });
+  }
+  const projectedMrr = forecastPoints.length ? forecastPoints[forecastPoints.length - 1].mrr : currentMrr;
+  const deltaPct = currentMrr > 0 ? ((projectedMrr - currentMrr) / currentMrr) * 100 : 0;
+
   return {
     mrrCents,
     arrCents: mrrCents * 12,
@@ -170,5 +204,13 @@ export async function computeCreatorAnalytics(creatorId: string): Promise<Analyt
     topProducts,
     gatewayBreakdown,
     recentActivity: recentActivity.slice(0, 12),
+    forecast: {
+      horizonDays: HORIZON,
+      points: forecastPoints,
+      projectedMrrCents: Math.round(projectedMrr * 100),
+      deltaPct: Math.round(deltaPct * 10) / 10,
+      churnDragCents: Math.round(currentMrr * 100 * churnRate),
+      trendLabel: meanDelta > 0.5 ? "growing" : meanDelta < -0.5 ? "declining" : "flat",
+    },
   };
 }

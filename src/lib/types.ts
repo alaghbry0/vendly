@@ -197,6 +197,14 @@ export interface AnalyticsDTO {
   topProducts: { id: string; title: string; coverTheme: string; members: number; mrrCents: number; revenueCents: number }[];
   gatewayBreakdown: { gateway: string; count: number; revenueCents: number }[];
   recentActivity: { id: string; type: string; message: string; amountCents: number | null; at: string }[];
+  forecast: {
+    horizonDays: number;
+    points: { date: string; mrr: number; low: number; high: number }[];
+    projectedMrrCents: number;
+    deltaPct: number;
+    churnDragCents: number;
+    trendLabel: "growing" | "flat" | "declining";
+  };
 }
 
 // ============ Promotions ============

@@ -22,6 +22,7 @@ import {
   Line,
   Pie,
   PieChart,
+  ReferenceLine,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -170,6 +171,7 @@ import {
   Terminal,
   Timer,
   Trash2,
+  TrendingDown,
   TrendingUp,
   Trophy,
   TriangleAlert,
@@ -178,6 +180,7 @@ import {
   Users,
   Wallet,
   Webhook,
+  Wind,
   XCircle,
   Zap,
   type LucideIcon,
@@ -431,6 +434,20 @@ function MrrTip({ active, payload, label }: TipProps) {
       rows={[{ color: CHART.emerald, label: "MRR", value: fmtDollars(Number(payload[0].value ?? 0)) }]}
     />
   );
+}
+
+function ForecastTip({ active, payload, label }: TipProps) {
+  if (!active || !payload?.length) return null;
+  const p = payload[0].payload as { mrr?: number; proj?: number; low?: number; high?: number };
+  const rows: { color?: string; label: string; value: string }[] = [];
+  if (p.mrr != null) rows.push({ color: CHART.emerald, label: "MRR (actual)", value: fmtDollars(Number(p.mrr)) });
+  if (p.proj != null) {
+    rows.push({ color: CHART.teal, label: "Projected", value: fmtDollars(Number(p.proj)) });
+    if (p.low != null && p.high != null) {
+      rows.push({ label: "Range", value: `${fmtDollars(Number(p.low))} – ${fmtDollars(Number(p.high))}` });
+    }
+  }
+  return <TipShell label={fmtAxisDate(String(label ?? ""))} rows={rows} />;
 }
 
 function RevenueTip({ active, payload, label }: TipProps) {
@@ -1001,6 +1018,9 @@ function OverviewTab({ user }: { user: SessionUser }) {
         </motion.div>
       </div>
 
+      {/* ---------- Revenue forecast (full width) ---------- */}
+      <ForecastPanel analytics={analytics} />
+
       {/* ---------- Top products + activity ---------- */}
       <div className="grid gap-4 sm:gap-5 lg:grid-cols-5">
         <Panel className="overflow-hidden lg:col-span-3">
@@ -1050,6 +1070,205 @@ function OverviewTab({ user }: { user: SessionUser }) {
         <RecentActivity activity={analytics.recentActivity} />
       </div>
     </div>
+  );
+}
+
+// ------------------------------ Revenue forecast ------------------------------
+
+/** Builds the combined history+forecast series for the projection chart.
+ *  The confidence band renders as two stacked areas (invisible base at `low`,
+ *  then `band` = high−low on top), the recharts range-area idiom. */
+function buildForecastSeries(analytics: AnalyticsDTO) {
+  const history = analytics.mrrSeries.slice(-30).map((p) => ({
+    date: p.date,
+    mrr: p.mrr,
+    proj: null as number | null,
+    low: null as number | null,
+    high: null as number | null,
+    band: null as number | null,
+  }));
+  const points = analytics.forecast.points.map((p) => ({
+    date: p.date,
+    mrr: null as number | null,
+    proj: p.mrr,
+    low: p.low,
+    high: p.high,
+    band: Math.max(0, p.high - p.low),
+  }));
+  // Anchor: today's actual MRR so the dashed line connects to the solid one.
+  const current = analytics.mrrSeries.length ? analytics.mrrSeries[analytics.mrrSeries.length - 1] : null;
+  const anchor =
+    current && points.length
+      ? [{ date: current.date, mrr: current.mrr, proj: current.mrr, low: current.mrr, high: current.mrr, band: 0 }]
+      : [];
+  return [...history, ...anchor, ...points];
+}
+
+function ForecastPanel({ analytics }: { analytics: AnalyticsDTO }) {
+  const f = analytics.forecast;
+  const data = useMemo(() => buildForecastSeries(analytics), [analytics]);
+  const todayKey = analytics.mrrSeries.length ? analytics.mrrSeries[analytics.mrrSeries.length - 1].date : null;
+
+  const up = f.deltaPct >= 0;
+  const trendIcon = f.trendLabel === "growing" ? TrendingUp : f.trendLabel === "declining" ? TrendingDown : Wind;
+  const TrendIcon = trendIcon;
+  const trendCls =
+    f.trendLabel === "growing"
+      ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
+      : f.trendLabel === "declining"
+        ? "border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-400"
+        : "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-400";
+
+  return (
+    <motion.div variants={fadeUp} initial="hidden" animate="show">
+      <Panel className="overflow-hidden">
+        <div className="flex flex-wrap items-end justify-between gap-4 border-b p-5 pb-4">
+          <div>
+            <h2 className="flex items-center gap-2 text-sm font-bold">
+              <TrendIcon className={cn("h-4 w-4", f.trendLabel === "growing" ? "text-emerald-500" : f.trendLabel === "declining" ? "text-red-500" : "text-amber-500")} />
+              Revenue forecast
+            </h2>
+            <p className="mt-0.5 text-xs text-muted-foreground">
+              {f.horizonDays}-day MRR projection from 30-day momentum and observed churn
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className={cn("inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-bold uppercase tracking-wide", trendCls)}>
+              <TrendIcon className="h-3.5 w-3.5" />
+              {f.trendLabel}
+            </span>
+            <span
+              className={cn(
+                "inline-flex items-center gap-1 rounded-full border px-3 py-1 text-xs font-bold tabular-nums",
+                up
+                  ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
+                  : "border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-400"
+              )}
+            >
+              {up ? <TrendingUp className="h-3.5 w-3.5" /> : <TrendingDown className="h-3.5 w-3.5" />}
+              {up ? "+" : ""}
+              {f.deltaPct.toFixed(1)}%
+            </span>
+          </div>
+        </div>
+
+        <div className="grid gap-5 p-5 lg:grid-cols-[1fr_260px]">
+          <div>
+            <ResponsiveContainer width="100%" height={280}>
+              <ComposedChart data={data} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+                <defs>
+                  <linearGradient id="fcHistGrad" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor={CHART.emerald} stopOpacity={0.3} />
+                    <stop offset="100%" stopColor={CHART.emerald} stopOpacity={0.02} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" vertical={false} strokeOpacity={0.6} />
+                <XAxis
+                  dataKey="date"
+                  tickFormatter={(v: string) => fmtAxisDate(v)}
+                  tick={AXIS_TICK}
+                  tickLine={false}
+                  axisLine={false}
+                  minTickGap={48}
+                  tickMargin={8}
+                />
+                <YAxis
+                  tickFormatter={(v: number) => `$${fmtCompact(v)}`}
+                  tick={AXIS_TICK}
+                  tickLine={false}
+                  axisLine={false}
+                  width={52}
+                />
+                <Tooltip content={<ForecastTip />} cursor={{ stroke: "var(--border)", strokeDasharray: "3 3" }} />
+                {todayKey && (
+                  <ReferenceLine
+                    x={todayKey}
+                    stroke="var(--muted-foreground)"
+                    strokeDasharray="4 4"
+                    strokeOpacity={0.5}
+                    label={{ value: "today", position: "insideTopRight", fontSize: 10, fill: "var(--muted-foreground)" }}
+                  />
+                )}
+                {/* Confidence band (stacked range-area idiom) */}
+                <Area dataKey="low" stackId="band" stroke="none" fill="none" fillOpacity={0} connectNulls={false} />
+                <Area
+                  dataKey="band"
+                  stackId="band"
+                  name="Range"
+                  stroke="none"
+                  fill={CHART.emerald}
+                  fillOpacity={0.14}
+                  connectNulls={false}
+                  activeDot={false}
+                />
+                {/* Actual MRR */}
+                <Area
+                  type="monotone"
+                  dataKey="mrr"
+                  name="MRR (actual)"
+                  stroke={CHART.emerald}
+                  strokeWidth={2}
+                  fill="url(#fcHistGrad)"
+                  dot={false}
+                  activeDot={{ r: 4, strokeWidth: 0 }}
+                  connectNulls={false}
+                />
+                {/* Projection */}
+                <Line
+                  type="monotone"
+                  dataKey="proj"
+                  name="Projected"
+                  stroke={CHART.teal}
+                  strokeWidth={2}
+                  strokeDasharray="6 5"
+                  dot={false}
+                  activeDot={{ r: 4, strokeWidth: 0, fill: CHART.teal }}
+                />
+              </ComposedChart>
+            </ResponsiveContainer>
+            <div className="mt-3 flex flex-wrap items-center gap-4 text-[11px] text-muted-foreground">
+              <span className="flex items-center gap-1.5">
+                <span className="h-0.5 w-5 rounded-full bg-[#10b981]" /> Actual MRR (30d)
+              </span>
+              <span className="flex items-center gap-1.5">
+                <span className="h-0.5 w-5 rounded-full border-t-2 border-dashed border-[#14b8a6]" style={{ borderTop: "2px dashed #14b8a6" }} /> Projection
+              </span>
+              <span className="flex items-center gap-1.5">
+                <span className="h-2.5 w-5 rounded-sm bg-emerald-500/20" /> Confidence range
+              </span>
+            </div>
+          </div>
+
+          {/* Forecast drivers */}
+          <div className="space-y-3">
+            <div className="rounded-xl border bg-muted/30 p-4">
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Projected MRR · {f.horizonDays}d</p>
+              <p className="mt-1 text-2xl font-bold tabular-nums tracking-tight">{fmtMoney(f.projectedMrrCents)}</p>
+              <p className={cn("mt-1 text-xs font-semibold tabular-nums", up ? "text-emerald-600 dark:text-emerald-400" : "text-red-600 dark:text-red-400")}>
+                {up ? "▲" : "▼"} {Math.abs(f.deltaPct).toFixed(1)}% vs today ({fmtMoney(analytics.mrrCents)})
+              </p>
+            </div>
+            <div className="rounded-xl border border-amber-500/25 bg-amber-500/[0.05] p-4">
+              <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-amber-700 dark:text-amber-400">
+                <Wind className="h-3.5 w-3.5" /> Churn drag
+              </p>
+              <p className="mt-1 text-lg font-bold tabular-nums text-amber-700 dark:text-amber-400">−{fmtMoney(f.churnDragCents)}/mo</p>
+              <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
+                Expected MRR lost to churn at the current {(analytics.churnRate * 100).toFixed(1)}% monthly rate.
+              </p>
+            </div>
+            <div className="rounded-xl border p-4">
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">How it works</p>
+              <ul className="mt-2 space-y-1.5 text-[11px] leading-relaxed text-muted-foreground">
+                <li>• Momentum: mean daily MRR change over the trailing 30 days</li>
+                <li>• Churn: observed 30-day cancel rate applied daily</li>
+                <li>• Range: ± variance of historical daily deltas</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </Panel>
+    </motion.div>
   );
 }
 
