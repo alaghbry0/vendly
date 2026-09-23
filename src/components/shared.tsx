@@ -111,6 +111,7 @@ export function ProviderBadge({ provider, className }: { provider: string; class
 
 // ---------- Gateway chip ----------
 const GATEWAY_META: Record<string, { label: string; cls: string }> = {
+  WHOP: { label: "Card · Whop", cls: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/25" },
   STRIPE: { label: "Card · Stripe", cls: "bg-violet-500/10 text-violet-700 dark:text-violet-400 border-violet-500/25" },
   PAYPAL: { label: "PayPal", cls: "bg-blue-500/10 text-blue-700 dark:text-blue-400 border-blue-500/25" },
   CRYPTO: { label: "Crypto", cls: "bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/25" },
@@ -120,6 +121,7 @@ export function GatewayBadge({ gateway, className }: { gateway: string; classNam
   const meta = GATEWAY_META[gateway] || { label: gateway, cls: "bg-muted text-muted-foreground border-border" };
   return (
     <span className={cn("inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-medium", meta.cls, className)}>
+      {gateway === "WHOP" && <span className="text-[10px] font-black tracking-tight">W</span>}
       {gateway === "STRIPE" && <span className="inline-block h-2 w-3 rounded-[2px] bg-gradient-to-br from-violet-500 to-fuchsia-500" />}
       {gateway === "PAYPAL" && <span className="text-[10px] font-black italic">P</span>}
       {gateway === "CRYPTO" && <Bitcoin className="h-3 w-3" />}

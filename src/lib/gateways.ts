@@ -1,9 +1,10 @@
-// Multi-gateway payment simulation.
+// Multi-gateway payments.
+// WHOP: real card charges through Whop Elements (sandbox) — see src/lib/whop.ts
 // Stripe: test-card semantics (numbers ending in 0002 decline, 9995 insufficient funds)
 // PayPal: simulated wallet login + approval
 // Crypto: on-chain transfer simulation with confirmation blocks
 
-export type Gateway = "STRIPE" | "PAYPAL" | "CRYPTO";
+export type Gateway = "WHOP" | "STRIPE" | "PAYPAL" | "CRYPTO";
 
 export interface CardInput {
   number: string;
@@ -96,6 +97,14 @@ export async function chargeStoredMethod(
   pm: { brand?: string | null; last4?: string | null; email?: string | null; walletAddress?: string | null },
   amountCents: number
 ): Promise<ChargeResult> {
+  if (gateway === "WHOP") {
+    // Renewals for Whop checkouts run on the simulated engine (the initial
+    // charge was real). Card saved at checkout is on file at Whop.
+    if (pm.last4 === "0002") {
+      return { ok: false, error: "Card declined by issuer (Whop sandbox).", txnId: txnId("pay"), gateway: "WHOP" };
+    }
+    return { ok: true, txnId: txnId("pay"), gateway: "WHOP" };
+  }
   if (gateway === "STRIPE") {
     // Cards ending 0002 always decline -> powers dunning demos
     if (pm.last4 === "0002") {

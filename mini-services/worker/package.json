@@ -1,0 +1,10 @@
+{
+  "name": "vendly-worker",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Recurring billing worker — ticks the Vendly billing engine on a schedule",
+  "scripts": {
+    "dev": "bun --hot index.ts"
+  },
+  "dependencies": {}
+}

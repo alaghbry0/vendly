@@ -29,6 +29,7 @@ import {
 } from "recharts";
 import { useAppStore } from "@/lib/store";
 import { api } from "@/lib/api";
+import { WorkerPanel } from "@/components/views/worker-panel";
 import type {
   AffiliateProgramDTO,
   AnalyticsDTO,
@@ -236,11 +237,13 @@ const CHART = {
 
 /** Gateway colors for the revenue-mix donut. */
 const GATEWAY_CHART_COLORS: Record<string, string> = {
+  WHOP: CHART.teal,
   STRIPE: CHART.violet,
   PAYPAL: CHART.amber,
   CRYPTO: CHART.emerald,
 };
 const GATEWAY_LABELS: Record<string, string> = {
+  WHOP: "Card · Whop",
   STRIPE: "Card · Stripe",
   PAYPAL: "PayPal",
   CRYPTO: "Crypto",
@@ -6644,6 +6647,9 @@ function TimeTab() {
         title="Billing time machine"
         description="Advance the simulated clock to watch renewals, trials and dunning play out in real data"
       />
+
+      {/* Recurring worker — automatic billing runs on a schedule */}
+      <WorkerPanel />
 
       {/* Clock status + advance controls */}
       <div className="grid gap-4 sm:gap-5 lg:grid-cols-5">

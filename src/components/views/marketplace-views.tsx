@@ -16,6 +16,7 @@ import {
 
 import { useAppStore } from "@/lib/store";
 import { api, ApiError } from "@/lib/api";
+import { WhopForm } from "@/components/views/whop-payment";
 import { CATEGORIES, type AffiliateLinkDTO, type AnswerDTO, type AssetDTO, type GiveawayDTO, type PlanDTO, type ProductCardDTO, type ProductDetailDTO, type PromoValidationDTO, type QuestionDTO } from "@/lib/types";
 import { COVER_THEMES, fmtBytes, fmtCompact, fmtDate, fmtMoney, timeAgo } from "@/lib/format";
 import {
@@ -44,9 +45,9 @@ import { cn } from "@/lib/utils";
 
 const EMPTY_PLANS: PlanDTO[] = [];
 const AVATAR_COLORS = ["emerald", "violet", "rose", "amber", "cyan", "lime", "orange", "teal", "fuchsia"];
-const GATEWAY_LABELS: Record<string, string> = { STRIPE: "Stripe", PAYPAL: "PayPal", CRYPTO: "Crypto" };
+const GATEWAY_LABELS: Record<string, string> = { WHOP: "Whop", STRIPE: "Stripe", PAYPAL: "PayPal", CRYPTO: "Crypto" };
 
-type GatewayKey = "STRIPE" | "PAYPAL" | "CRYPTO";
+type GatewayKey = "WHOP" | "STRIPE" | "PAYPAL" | "CRYPTO";
 
 interface CryptoQuoteDTO {
   walletAddress: string;
@@ -66,6 +67,9 @@ interface CheckoutResultDTO {
   promoCode?: string | null;
   referral?: { code: string; affiliateName: string | null; commissionCents: number } | null;
   quote?: CryptoQuoteDTO;
+  whopRef?: string;
+  clientSecret?: string | null;
+  whop?: { paymentId: string; amount: string; currency: string; card: string } | null;
 }
 
 interface CheckoutReceipt {
@@ -77,6 +81,7 @@ interface CheckoutReceipt {
   discountCents: number;
   promoCode: string | null;
   referral: { code: string; affiliateName: string | null; commissionCents: number } | null;
+  whop?: { paymentId: string; amount: string; currency: string; card: string } | null;
 }
 
 // A validated promo applied to the checkout — `planId` is the plan it was last
@@ -2549,6 +2554,7 @@ function OrderSummary({
         <p className="text-sm text-muted-foreground">Select a plan to continue.</p>
       )}
       <div className="mt-4 flex flex-wrap items-center gap-1.5 border-t pt-4">
+        <GatewayBadge gateway="WHOP" />
         <GatewayBadge gateway="STRIPE" />
         <GatewayBadge gateway="PAYPAL" />
         <GatewayBadge gateway="CRYPTO" />
@@ -3029,7 +3035,7 @@ function PaymentPanel({
   onConflict: () => void;
 }) {
   const { toast } = useToast();
-  const [gateway, setGateway] = useState<GatewayKey>("STRIPE");
+  const [gateway, setGateway] = useState<GatewayKey>("WHOP");
   const [banner, setBanner] = useState<string | null>(null);
 
   function onFormError(msg: string) {
@@ -3059,7 +3065,18 @@ function PaymentPanel({
           setBanner(null);
         }}
       >
-        <TabsList className="grid h-auto w-full grid-cols-3 gap-2 rounded-2xl bg-transparent p-0" aria-label="Payment method">
+        <TabsList className="grid h-auto w-full grid-cols-2 gap-2 rounded-2xl bg-transparent p-0 sm:grid-cols-4" aria-label="Payment method">
+          <TabsTrigger
+            value="WHOP"
+            className="relative h-auto min-h-11 flex-col gap-1 rounded-2xl border border-emerald-500/30 bg-card px-2 py-3 text-foreground shadow-none data-[state=active]:border-emerald-500 data-[state=active]:bg-emerald-500/10 data-[state=active]:shadow-sm"
+          >
+            <span className="absolute right-1.5 top-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/15 px-1.5 py-px text-[9px] font-bold uppercase tracking-wide text-emerald-700 dark:text-emerald-400">
+              Real
+            </span>
+            <CreditCard className="h-5 w-5 text-emerald-600 dark:text-emerald-400" />
+            <span className="text-xs font-semibold">Card · Whop</span>
+            <span className="hidden text-[10px] font-normal text-muted-foreground sm:block">sandbox charge</span>
+          </TabsTrigger>
           <TabsTrigger
             value="STRIPE"
             className="h-auto min-h-11 flex-col gap-1 rounded-2xl border border-border bg-card px-2 py-3 text-foreground shadow-none data-[state=active]:border-primary data-[state=active]:bg-primary/5 data-[state=active]:shadow-sm dark:data-[state=active]:bg-primary/10"
@@ -3085,6 +3102,20 @@ function PaymentPanel({
             <span className="hidden text-[10px] font-normal text-muted-foreground sm:block">Ethereum</span>
           </TabsTrigger>
         </TabsList>
+        <TabsContent value="WHOP" className="mt-5">
+          <WhopForm
+            planId={plan.id}
+            planName={plan.name}
+            currency={plan.currency || "usd"}
+            payAmountCents={payAmountCents}
+            startTrial={startTrial}
+            trialDays={plan.trialDays}
+            promoCode={promoCode}
+            refCode={refCode}
+            onComplete={(res) => onComplete("WHOP", res as CheckoutResultDTO)}
+            onApiError={onApiError}
+          />
+        </TabsContent>
         <TabsContent value="STRIPE" className="mt-5">
           <StripeForm
             plan={plan}
@@ -3130,7 +3161,7 @@ function PaymentPanel({
       </AnimatePresence>
       <p className="mt-4 flex items-center justify-center gap-1.5 text-xs text-muted-foreground">
         <ShieldCheck className="h-3.5 w-3.5 text-primary" />
-        Payments are simulated for this demo — {product.title}
+        Card payments run live in the Whop sandbox · PayPal & crypto simulated — {product.title}
       </p>
     </div>
   );
@@ -3167,6 +3198,12 @@ function SuccessPanel({
       text: `${fmtMoney(chargedCents)} charged via ${GATEWAY_LABELS[receipt.gateway] ?? receipt.gateway}${
         receipt.promoCode ? ` — promo ${receipt.promoCode} (−${fmtMoney(discountCents)})` : ""
       }.`,
+    });
+  }
+  if (receipt.whop) {
+    items.push({
+      icon: BadgeCheck,
+      text: `Whop payment ${receipt.whop.paymentId} · ${receipt.whop.card} · ${receipt.whop.currency} ${receipt.whop.amount} settled in the Whop sandbox.`,
     });
   }
   if (receipt.promoCode && receipt.discountCents > 0 && receipt.isTrial) {
@@ -3382,6 +3419,7 @@ function CheckoutView() {
       discountCents: res.discountCents ?? 0,
       promoCode: res.promoCode ?? null,
       referral: res.referral ?? null,
+      whop: res.whop ?? null,
     });
     setStep("done");
     refresh();
@@ -3414,7 +3452,7 @@ function CheckoutView() {
           <h1 className="text-2xl font-extrabold tracking-tight md:text-3xl">Checkout</h1>
           <p className="mt-1 flex items-center gap-1.5 text-sm text-muted-foreground">
             <ShieldCheck className="h-4 w-4 text-primary" />
-            Secure checkout — Stripe, PayPal and crypto
+            Secure checkout — real cards via Whop, plus PayPal & crypto
           </p>
         </div>
         <Stepper current={stepIndex} />

@@ -164,6 +164,7 @@ model Invoice {
   periodEnd      DateTime?
   paidAt         DateTime?
   refundedAt     DateTime?
+  whopRef        String?   // Whop payment id (pay_…) when charged via Whop Elements
   createdAt      DateTime  @default(now())
 }
 
@@ -469,4 +470,21 @@ model QuestionVote {
   user     User     @relation(fields: [userId], references: [id])
 
   @@unique([questionId, userId])
+}
+
+// Durable history of recurring-worker billing runs. The worker mini-service
+// ticks on a schedule and fires POST /api/billing/tick, which runs the billing
+// engine and records a row here. The time machine also records its runs.
+model WorkerRun {
+  id               String   @id @default(cuid())
+  source           String   @default("WORKER") // WORKER | MANUAL | TIME_MACHINE
+  startedAt        DateTime @default(now())
+  durationMs       Int      @default(0)
+  renewals         Int      @default(0)
+  renewalsFailed   Int      @default(0)
+  canceled         Int      @default(0)
+  trialsConverted  Int      @default(0)
+  invoicesCreated  Int      @default(0)
+  events           String   @default("[]") // JSON string array
+  error            String?
 }

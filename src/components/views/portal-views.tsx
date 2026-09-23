@@ -2871,6 +2871,7 @@ function downloadReceipt(inv: InvoiceDTO, email: string | null) {
 
 /** Gateway names for the printable receipt (plain text, no badge chrome). */
 const RECEIPT_GATEWAYS: Record<string, string> = {
+  WHOP: "Whop (card)",
   STRIPE: "Stripe (card)",
   PAYPAL: "PayPal",
   CRYPTO: "Crypto wallet",
