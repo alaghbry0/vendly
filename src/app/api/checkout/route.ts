@@ -4,6 +4,9 @@ import { chargeStripeCard, chargePaypal, quoteCrypto, detectCardBrand, type Gate
 import { provisionSubscription } from "@/lib/billing";
 import { validatePromoForPlan } from "@/lib/promos";
 import { resolveReferral } from "@/lib/affiliates";
+import { getNow } from "@/lib/clock";
+import { rateLimit } from "@/lib/rate-limit";
+import { audit, AUDIT_ACTIONS } from "@/lib/audit";
 
 // POST /api/checkout — multi-gateway subscription checkout
 // body: { planId, gateway: STRIPE|PAYPAL|CRYPTO, card?: {number,expMonth,expYear,cvc},
@@ -11,6 +14,11 @@ import { resolveReferral } from "@/lib/affiliates";
 export async function POST(req: Request) {
   try {
     const user = await requireUser(req);
+    const limited = rateLimit({ req, bucket: "checkout", userId: user.id, max: 10, windowMs: 60_000 });
+    if (limited) {
+      await audit({ actorId: user.id, action: AUDIT_ACTIONS.rateLimited, detail: { endpoint: "checkout" } });
+      return limited;
+    }
     const body = await req.json().catch(() => ({}));
 
     const planId = String(body.planId || "");
@@ -136,7 +144,7 @@ export async function POST(req: Request) {
       data: { userId: user.id, type: "CRYPTO", gateway: "CRYPTO", walletAddress, chain: "ETH" },
     });
     // Crypto: create a PENDING subscription and wait for on-chain confirmations.
-    const now = new Date();
+    const now = await getNow(); // platform clock — consistent with the engine
     const trialEndsAt = startTrial ? new Date(now.getTime() + plan.trialDays * 86400000) : null;
     const sub = await db.subscription.create({
       data: {

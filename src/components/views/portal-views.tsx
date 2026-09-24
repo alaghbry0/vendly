@@ -28,6 +28,7 @@ import type {
 } from "@/lib/types";
 import { CATEGORIES } from "@/lib/types";
 import { fmtBytes, fmtCompact, fmtDate, fmtDateTime, fmtMoney, timeAgo, timeUntil } from "@/lib/format";
+import { usePlatformNowMs } from "@/lib/use-now";
 import {
   CategoryIcon,
   CopyButton,
@@ -787,7 +788,12 @@ interface SubCardProps {
   sub: SubscriptionDTO;
   methods: PaymentMethodDTO[];
   busy: boolean;
-  onAction: (sub: SubscriptionDTO, action: string, extra?: Record<string, unknown>) => Promise<boolean>;
+  onAction: (
+    sub: SubscriptionDTO,
+    action: string,
+    extra?: Record<string, unknown>,
+    successTitle?: string
+  ) => Promise<boolean>;
   onChangePayment: (sub: SubscriptionDTO, pmId: string) => Promise<void>;
   onOpenTier: () => void;
   onCancel: (mode: "period_end" | "now") => void;
@@ -805,6 +811,7 @@ function SubscriptionCard({
   onInvoices,
 }: SubCardProps) {
   const navigate = useAppStore((s) => s.navigate);
+  const nowMs = usePlatformNowMs();
   const isActive = ACTIVE_STATUSES.includes(sub.status);
   const isTrial = sub.status === "TRIALING";
   const isCanceled = sub.status === "CANCELED";
@@ -839,7 +846,7 @@ function SubscriptionCard({
                   className="gap-1 border-teal-500/25 bg-teal-500/10 text-teal-700 dark:text-teal-400"
                 >
                   <Timer className="h-3 w-3" aria-hidden />
-                  Trial: {timeUntil(sub.trialEndsAt)} left
+                  Trial: {timeUntil(sub.trialEndsAt, nowMs)} left
                 </Badge>
               )}
             </div>
@@ -953,8 +960,23 @@ function SubscriptionCard({
             <TriangleAlert className="h-4.5 w-4.5 shrink-0 text-destructive" aria-hidden />
             <p className="min-w-0 flex-1 text-destructive">
               <span className="font-semibold">Payment failed.</span> {sub.dunningAttempts} dunning attempt
-              {sub.dunningAttempts === 1 ? "" : "s"} so far — update the payment method above to retry.
+              {sub.dunningAttempts === 1 ? "" : "s"} so far — update the payment method above, then retry the
+              charge now or wait for the next automatic attempt.
             </p>
+            <Button
+              size="sm"
+              variant="outline"
+              className="rounded-lg border-destructive/40 bg-transparent text-destructive hover:bg-destructive/10 hover:text-destructive"
+              disabled={busy}
+              onClick={() => onAction(sub, "retry_charge", {}, "Payment retried")}
+            >
+              {busy ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+              ) : (
+                <RotateCcw className="h-3.5 w-3.5" aria-hidden />
+              )}
+              Retry charge
+            </Button>
           </div>
         )}
         {isCanceled && (
@@ -1328,6 +1350,7 @@ const VALIDATE_REASONS: Record<string, string> = {
 
 function LicensesTab({ licenses, reload }: { licenses: LicenseDTO[]; reload: () => void }) {
   const { toast } = useToast();
+  const nowMs = usePlatformNowMs();
   const [keyInput, setKeyInput] = useState("WHPL-7K2M-QX9R-4T8V");
   const [validating, setValidating] = useState(false);
   const [result, setResult] = useState<ValidateResult | null>(null);
@@ -1487,7 +1510,7 @@ function LicensesTab({ licenses, reload }: { licenses: LicenseDTO[]; reload: () 
                   </div>
                   <div>
                     <dt className="text-muted-foreground">Last used</dt>
-                    <dd className="mt-0.5 font-medium">{result.lastUsedAt ? timeAgo(result.lastUsedAt) : "never"}</dd>
+                    <dd className="mt-0.5 font-medium">{result.lastUsedAt ? timeAgo(result.lastUsedAt, nowMs) : "never"}</dd>
                   </div>
                 </dl>
               ) : (
@@ -1536,7 +1559,7 @@ function LicensesTab({ licenses, reload }: { licenses: LicenseDTO[]; reload: () 
                   </div>
                   <div className="text-left text-xs text-muted-foreground sm:text-right">
                     <p>Activated {lic.activatedAt ? fmtDate(lic.activatedAt) : "never"}</p>
-                    <p className="mt-0.5">Last used {lic.lastUsedAt ? timeAgo(lic.lastUsedAt) : "never"}</p>
+                    <p className="mt-0.5">Last used {lic.lastUsedAt ? timeAgo(lic.lastUsedAt, nowMs) : "never"}</p>
                   </div>
                 </div>
 
@@ -1906,6 +1929,7 @@ function WishlistCard({
   removing: boolean;
   onRemove: () => void;
 }) {
+  const nowMs = usePlatformNowMs();
   const navigate = useAppStore((s) => s.navigate);
   const product = item.product;
   const price = wishlistFromPrice(product);
@@ -1991,7 +2015,7 @@ function WishlistCard({
               )}
               <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground">
                 <Heart className="h-3 w-3 fill-emerald-500/60 text-emerald-500/60" aria-hidden />
-                Saved {timeAgo(item.createdAt)}
+                Saved {timeAgo(item.createdAt, nowMs)}
               </span>
             </div>
             <div className="flex items-center gap-2">
@@ -2154,6 +2178,7 @@ function bpsPercent(bps: number): string {
 function AffiliateLinkCard({ link, index }: { link: AffiliateLinkDTO; index: number }) {
   const { toast } = useToast();
   const navigate = useAppStore((s) => s.navigate);
+  const nowMs = usePlatformNowMs();
   const [copied, setCopied] = useState(false);
   const url = referralUrl(link);
   const rate = link.clicks > 0 ? (link.conversions / link.clicks) * 100 : null;
@@ -2293,7 +2318,7 @@ function AffiliateLinkCard({ link, index }: { link: AffiliateLinkDTO; index: num
                 </span>
               </span>
             </div>
-            <p className="text-[11px] text-muted-foreground">Joined {timeAgo(link.createdAt)}</p>
+            <p className="text-[11px] text-muted-foreground">Joined {timeAgo(link.createdAt, nowMs)}</p>
           </div>
         </div>
       </div>
@@ -2654,6 +2679,7 @@ function GiveawaysTab({
   user: SessionUser;
   onEnter: (giveawayId: string) => Promise<{ entries: number; bonus: boolean }>;
 }) {
+  const nowMs = usePlatformNowMs();
   const { toast } = useToast();
   const navigate = useAppStore((s) => s.navigate);
   const now = useTickingNow();
@@ -2808,7 +2834,7 @@ function GiveawaysTab({
                     <p className="truncate text-sm font-semibold">{g.title}</p>
                     <p className="truncate text-xs text-muted-foreground tabular-nums">
                       {g.winnerCount} {g.winnerCount === 1 ? "winner" : "winners"} · Ended{" "}
-                      {timeAgo(g.drawnAt ?? g.endsAt)}
+                      {timeAgo(g.drawnAt ?? g.endsAt, nowMs)}
                     </p>
                   </div>
                   {g.myWin ? (
@@ -3173,8 +3199,13 @@ function InvoicesTab({
                       <TableCell className="hidden sm:table-cell">
                         {inv.gateway ? <GatewayBadge gateway={inv.gateway} /> : "—"}
                       </TableCell>
-                      <TableCell className="text-right text-sm font-semibold tabular-nums">
-                        {fmtMoney(inv.amountCents, { cents: true })}
+                      <TableCell className="text-right">
+                        <p className="text-sm font-semibold tabular-nums">{fmtMoney(inv.amountCents, { cents: true })}</p>
+                        {!!inv.refundedCents && inv.refundedCents > 0 && (
+                          <p className="text-[11px] font-medium tabular-nums text-sky-600 dark:text-sky-400">
+                            −{fmtMoney(inv.refundedCents, { cents: true })} refunded
+                          </p>
+                        )}
                       </TableCell>
                       <TableCell>
                         <StatusBadge status={inv.status} />
@@ -3225,6 +3256,12 @@ function InvoicesTab({
                 <dt className="text-xs text-muted-foreground">Amount</dt>
                 <dd className="mt-0.5 font-semibold tabular-nums">
                   {fmtMoney(selected.amountCents, { cents: true })}
+                  {!!selected.refundedCents && selected.refundedCents > 0 && (
+                    <span className="block text-xs font-medium text-sky-600 dark:text-sky-400">
+                      {fmtMoney(selected.refundedCents, { cents: true })} refunded
+                      {selected.status === "PAID" && " (partial)"}
+                    </span>
+                  )}
                 </dd>
               </div>
               <div>

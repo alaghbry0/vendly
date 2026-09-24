@@ -2,6 +2,24 @@ import { db } from "@/lib/db";
 import { errorResponse, HttpError, requireUser } from "@/lib/session";
 import { serializeProductDetail, hasActiveAccess } from "@/lib/serialize";
 
+// First ACTIVE bundle containing this product (displayed on the product page
+// as an upsell: "also available in a bundle — save N%").
+async function findBundleOffer(productId: string) {
+  const item = await db.bundleItem.findFirst({
+    where: { productId, bundle: { active: true } },
+    orderBy: { bundle: { createdAt: "desc" } },
+    include: { bundle: { include: { items: { select: { id: true } } } } },
+  });
+  return item
+    ? {
+        id: item.bundle.id,
+        title: item.bundle.title,
+        discountPct: item.bundle.discountPct,
+        productCount: item.bundle.items.length,
+      }
+    : null;
+}
+
 // GET /api/products/[id] — product detail
 export async function GET(req: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
@@ -22,7 +40,7 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
     const auth = req.headers.get("x-user-id");
     if (auth) hasAccess = await hasActiveAccess(auth, id);
 
-    return Response.json({ product: serializeProductDetail(product, hasAccess) });
+    return Response.json({ product: serializeProductDetail(product, hasAccess, await findBundleOffer(id)) });
   } catch (e) {
     return errorResponse(e);
   }
@@ -47,6 +65,9 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
     if (typeof body.featured === "boolean") patch.featured = body.featured;
     if (typeof body.discordRoleName === "string") patch.discordRoleName = body.discordRoleName || null;
     if (typeof body.telegramChannel === "string") patch.telegramChannel = body.telegramChannel || null;
+    if (typeof body.refundPolicy === "string" && ["REVOKE", "KEEP_ACCESS"].includes(body.refundPolicy)) {
+      patch.refundPolicy = body.refundPolicy;
+    }
     if (Array.isArray(body.accessType)) {
       patch.accessType = body.accessType.filter((s: unknown) => typeof s === "string" && s).join(",") || "LINK";
     }
@@ -70,7 +91,7 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
           },
         })
       : null;
-    return Response.json({ product: withExtras ? serializeProductDetail(withExtras, hasAccess) : null });
+    return Response.json({ product: withExtras ? serializeProductDetail(withExtras, hasAccess, await findBundleOffer(id)) : null });
   } catch (e) {
     return errorResponse(e);
   }

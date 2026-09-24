@@ -1,9 +1,12 @@
 import { db } from "@/lib/db";
 import { errorResponse, requireUser } from "@/lib/session";
 import { notificationTarget } from "@/lib/notifications";
+import { getClockState } from "@/lib/clock";
 import type { NotificationDTO } from "@/lib/types";
 
-// GET /api/notifications — the signed-in user's notification feed + unread count
+// GET /api/notifications — the signed-in user's notification feed + unread
+// count. Also returns the platform clock so every open tab re-anchors its
+// relative times after a time-machine advance (30s poll keeps them in sync).
 export async function GET(req: Request) {
   try {
     const user = await requireUser(req);
@@ -24,7 +27,8 @@ export async function GET(req: Request) {
       createdAt: n.createdAt.toISOString(),
       target: notificationTarget(n.type, { productId: n.productId }),
     }));
-    return Response.json({ notifications: data, unread });
+    const clock = await getClockState();
+    return Response.json({ notifications: data, unread, clock });
   } catch (e) {
     return errorResponse(e);
   }

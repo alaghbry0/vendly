@@ -12,12 +12,15 @@
 // GET /api/billing/tick (WorkerRun rows).
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { motion } from "framer-motion";
+import { AnimatePresence, motion } from "framer-motion";
 import {
   Activity,
   Ban,
   CircleAlert,
   Cog,
+  ChevronDown,
+  Dices,
+  Handshake,
   History,
   Loader2,
   Pause,
@@ -26,6 +29,7 @@ import {
   ReceiptText,
   Server,
   Sparkles,
+  TriangleAlert,
   Zap,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -34,6 +38,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { useToast } from "@/hooks/use-toast";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import { usePlatformNowMs } from "@/lib/use-now";
 
 const WORKER_PORT = 3040;
 
@@ -72,12 +77,42 @@ const SOURCE_META: Record<string, { label: string; cls: string }> = {
   TIME_MACHINE: { label: "Time machine", cls: "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-400" },
 };
 
-function relTime(iso: string): string {
-  const diff = Date.now() - new Date(iso).getTime();
+/** Event-line taxonomy for the expanded run timeline — the icon + tone make
+ *  deferred renewals (transient processor issues that do NOT burn dunning)
+ *  visually distinct from hard failures and successes. */
+interface EventKind {
+  icon: typeof Zap;
+  cls: string;
+  label: string;
+}
+function classifyEvent(line: string): EventKind {
+  if (/deferred|Skipped/i.test(line))
+    return { icon: TriangleAlert, cls: "text-amber-600 dark:text-amber-400", label: "deferred" };
+  if (/failed|Dunning exhausted/i.test(line))
+    return { icon: CircleAlert, cls: "text-red-600 dark:text-red-400", label: "failed" };
+  if (/canceled/i.test(line))
+    return { icon: Ban, cls: "text-rose-600 dark:text-rose-400", label: "canceled" };
+  if (/Renewed|Trial converted/i.test(line))
+    return { icon: RefreshCw, cls: "text-emerald-600 dark:text-emerald-400", label: "processed" };
+  if (/settled|commission/i.test(line))
+    return { icon: Handshake, cls: "text-teal-600 dark:text-teal-400", label: "settled" };
+  if (/giveaway/i.test(line)) return { icon: Dices, cls: "text-violet-600 dark:text-violet-400", label: "giveaway" };
+  return { icon: Sparkles, cls: "text-muted-foreground", label: "event" };
+}
+
+// Relative time for run rows, anchored to the PLATFORM clock. Runs recorded
+// while the time machine was advanced carry future timestamps — after a
+// clock reset those must render as their (simulated) date, never "just now".
+function relTime(iso: string, nowMs: number): string {
+  const diff = nowMs - new Date(iso).getTime();
+  if (diff < 0) {
+    return `at ${new Date(iso).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}`;
+  }
   if (diff < 5_000) return "just now";
   if (diff < 60_000) return `${Math.round(diff / 1000)}s ago`;
   if (diff < 3_600_000) return `${Math.round(diff / 60_000)}m ago`;
-  return `${Math.round(diff / 3_600_000)}h ago`;
+  if (diff < 86_400_000) return `${Math.round(diff / 3_600_000)}h ago`;
+  return new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
 function countdown(iso: string): string {
@@ -95,8 +130,11 @@ export function WorkerPanel() {
   const [data, setData] = useState<TickData | null>(null);
   const [running, setRunning] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
   const [, setTickNow] = useState(0); // 1s re-render clock for countdowns
   const alive = useRef(true);
+  // Platform clock (simulated-offset-aware) — anchors run relative times.
+  const nowMs = usePlatformNowMs(1000);
 
   const poll = useCallback(async () => {
     try {
@@ -205,7 +243,7 @@ export function WorkerPanel() {
               {offline
                 ? "Start the worker service to resume automatic billing runs."
                 : status?.running
-                  ? `Every ${Math.round((status.tickMs || 60000) / 1000)}s · last tick ${status.lastTickAt ? relTime(status.lastTickAt) : "—"}`
+                  ? `Every ${Math.round((status.tickMs || 60000) / 1000)}s · last tick ${status.lastTickAt ? relTime(status.lastTickAt, nowMs) : "—"}`
                   : "Resume to keep the billing engine on schedule."}
             </p>
           </div>
@@ -276,20 +314,40 @@ export function WorkerPanel() {
           )}
         </div>
 
-        {/* Run history */}
+        {/* Run history — expandable: click a run to see its full event
+            timeline (renewals, defers, dunning, settlements). Deferred lines
+            are flagged amber: transient processor issues that do NOT burn
+            dunning attempts — the next run retries automatically. */}
         <div>
-          <p className="mb-3 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-            <History className="h-3.5 w-3.5" /> Recent runs
-          </p>
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+            <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+              <History className="h-3.5 w-3.5" /> Recent runs
+            </p>
+            {data && data.runs.length > 0 && (
+              <p className="text-[11px] tabular-nums text-muted-foreground">
+                {data.runs.length} run{data.runs.length === 1 ? "" : "s"} ·{" "}
+                {data.runs.reduce((s, r) => s + r.renewals + r.trialsConverted, 0)} processed ·{" "}
+                <span className="text-red-600 dark:text-red-400">
+                  {data.runs.reduce((s, r) => s + r.renewalsFailed, 0)} failed
+                </span>{" "}
+                ·{" "}
+                <span className="text-amber-600 dark:text-amber-400">
+                  {data.runs.reduce((s, r) => s + r.events.filter((e) => /deferred|Skipped/i.test(e)).length, 0)} deferred
+                </span>
+              </p>
+            )}
+          </div>
           {!data || data.runs.length === 0 ? (
             <div className="rounded-xl border border-dashed p-6 text-center text-sm text-muted-foreground">
               No runs recorded yet — the worker ticks every minute and history appears here.
             </div>
           ) : (
-            <ul className="max-h-80 space-y-2 overflow-y-auto pr-1" aria-label="Worker run history">
+            <ul className="max-h-[28rem] space-y-2 overflow-y-auto pr-1" aria-label="Worker run history">
               {data.runs.map((run, i) => {
                 const meta = SOURCE_META[run.source] || SOURCE_META.MANUAL;
                 const total = run.renewals + run.trialsConverted;
+                const defers = run.events.filter((e) => /deferred|Skipped/i.test(e)).length;
+                const expanded = expandedId === run.id;
                 return (
                   <motion.li
                     key={run.id}
@@ -297,55 +355,108 @@ export function WorkerPanel() {
                     animate={{ opacity: 1, y: 0 }}
                     transition={{ delay: i * 0.03 }}
                     className={cn(
-                      "flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-xl border px-3.5 py-2.5 text-sm",
-                      run.error ? "border-red-500/25 bg-red-500/[0.05]" : "bg-muted/30"
+                      "overflow-hidden rounded-xl border text-sm",
+                      run.error ? "border-red-500/25 bg-red-500/[0.05]" : "bg-muted/30",
+                      expanded && "border-primary/40 bg-muted/40"
                     )}
                   >
-                    <span className={cn("shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide", meta.cls)}>
-                      {meta.label}
-                    </span>
-                    <span className="tabular-nums text-xs text-muted-foreground" title={new Date(run.startedAt).toLocaleString()}>
-                      {relTime(run.startedAt)}
-                    </span>
-                    {run.error ? (
-                      <span className="flex min-w-0 items-center gap-1.5 text-xs text-red-600 dark:text-red-400">
-                        <CircleAlert className="h-3.5 w-3.5 shrink-0" />
-                        <span className="truncate">{run.error}</span>
+                    <button
+                      type="button"
+                      onClick={() => setExpandedId(expanded ? null : run.id)}
+                      aria-expanded={expanded}
+                      className="flex w-full flex-wrap items-center gap-x-3 gap-y-1.5 px-3.5 py-2.5 text-left transition-colors hover:bg-muted/60"
+                    >
+                      <span className={cn("shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide", meta.cls)}>
+                        {meta.label}
                       </span>
-                    ) : (
-                      <span className="flex flex-wrap items-center gap-2 text-xs">
-                        {total > 0 && (
-                          <span className="flex items-center gap-1 font-semibold text-emerald-700 dark:text-emerald-400">
-                            <RefreshCw className="h-3 w-3" /> {run.renewals + run.trialsConverted} processed
-                          </span>
-                        )}
-                        {run.invoicesCreated > 0 && (
-                          <span className="flex items-center gap-1 text-teal-700 dark:text-teal-400">
-                            <ReceiptText className="h-3 w-3" /> {run.invoicesCreated} invoices
-                          </span>
-                        )}
-                        {run.renewalsFailed > 0 && (
-                          <span className="flex items-center gap-1 text-red-600 dark:text-red-400">
-                            <Ban className="h-3 w-3" /> {run.renewalsFailed} failed
-                          </span>
-                        )}
-                        {run.canceled > 0 && (
-                          <span className="flex items-center gap-1 text-rose-600 dark:text-rose-400">
-                            <Ban className="h-3 w-3" /> {run.canceled} canceled
-                          </span>
-                        )}
-                        {total === 0 && run.invoicesCreated === 0 && run.renewalsFailed === 0 && run.canceled === 0 && (
-                          <span className="flex items-center gap-1 text-muted-foreground">
-                            <Sparkles className="h-3 w-3" /> nothing due · {run.durationMs}ms
-                          </span>
-                        )}
+                      <span className="tabular-nums text-xs text-muted-foreground" title={new Date(run.startedAt).toLocaleString()}>
+                        {relTime(run.startedAt, nowMs)}
                       </span>
-                    )}
+                      {run.error ? (
+                        <span className="flex min-w-0 flex-1 items-center gap-1.5 text-xs text-red-600 dark:text-red-400">
+                          <CircleAlert className="h-3.5 w-3.5 shrink-0" />
+                          <span className="truncate">{run.error}</span>
+                        </span>
+                      ) : (
+                        <span className="flex flex-wrap items-center gap-2 text-xs">
+                          {total > 0 && (
+                            <span className="flex items-center gap-1 font-semibold text-emerald-700 dark:text-emerald-400">
+                              <RefreshCw className="h-3 w-3" /> {total} processed
+                            </span>
+                          )}
+                          {run.invoicesCreated > 0 && (
+                            <span className="flex items-center gap-1 text-teal-700 dark:text-teal-400">
+                              <ReceiptText className="h-3 w-3" /> {run.invoicesCreated} invoices
+                            </span>
+                          )}
+                          {run.renewalsFailed > 0 && (
+                            <span className="flex items-center gap-1 text-red-600 dark:text-red-400">
+                              <Ban className="h-3 w-3" /> {run.renewalsFailed} failed
+                            </span>
+                          )}
+                          {run.canceled > 0 && (
+                            <span className="flex items-center gap-1 text-rose-600 dark:text-rose-400">
+                              <Ban className="h-3 w-3" /> {run.canceled} canceled
+                            </span>
+                          )}
+                          {defers > 0 && (
+                            <span className="flex items-center gap-1 rounded-full border border-amber-500/30 bg-amber-500/10 px-1.5 py-px text-[10px] font-semibold text-amber-700 dark:text-amber-400">
+                              <TriangleAlert className="h-3 w-3" /> {defers} deferred
+                            </span>
+                          )}
+                          {total === 0 && run.invoicesCreated === 0 && run.renewalsFailed === 0 && run.canceled === 0 && defers === 0 && (
+                            <span className="flex items-center gap-1 text-muted-foreground">
+                              <Sparkles className="h-3 w-3" /> nothing due · {run.durationMs}ms
+                            </span>
+                          )}
+                        </span>
+                      )}
+                      <span className="ml-auto flex items-center gap-1.5 text-[10px] font-medium text-muted-foreground">
+                        {run.events.length} event{run.events.length === 1 ? "" : "s"}
+                        <ChevronDown className={cn("h-3.5 w-3.5 transition-transform", expanded && "rotate-180")} />
+                      </span>
+                    </button>
+                    <AnimatePresence initial={false}>
+                      {expanded && (
+                        <motion.div
+                          initial={{ height: 0, opacity: 0 }}
+                          animate={{ height: "auto", opacity: 1 }}
+                          exit={{ height: 0, opacity: 0 }}
+                          transition={{ duration: 0.18 }}
+                          className="overflow-hidden border-t"
+                        >
+                          <div className="max-h-64 overflow-y-auto bg-background/60 px-3.5 py-2.5">
+                            {run.events.length === 0 ? (
+                              <p className="text-center text-xs text-muted-foreground">No event details recorded.</p>
+                            ) : (
+                              <ol className="space-y-1.5" aria-label="Run event timeline">
+                                {run.events.map((line, j) => {
+                                  const kind = classifyEvent(line);
+                                  return (
+                                    <li key={j} className="flex items-start gap-2 text-xs leading-relaxed">
+                                      <kind.icon className={cn("mt-0.5 h-3.5 w-3.5 shrink-0", kind.cls)} />
+                                      <span className="tabular-nums text-[10px] font-semibold uppercase tracking-wide text-muted-foreground/70">
+                                        {String(j + 1).padStart(2, "0")}
+                                      </span>
+                                      <span className="min-w-0 flex-1 break-words">{line}</span>
+                                    </li>
+                                  );
+                                })}
+                              </ol>
+                            )}
+                          </div>
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
                   </motion.li>
                 );
               })}
             </ul>
           )}
+          <p className="mt-2.5 text-[11px] leading-relaxed text-muted-foreground">
+            Deferred renewals are transient processor issues (Whop unreachable, charge still settling) — the engine
+            retries them on the next run without burning dunning attempts. Click a run for its event timeline.
+          </p>
         </div>
       </div>
     </div>

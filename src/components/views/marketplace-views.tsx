@@ -8,17 +8,18 @@ import { AnimatePresence, motion } from "framer-motion";
 import type { LucideIcon } from "lucide-react";
 import {
   ArrowLeft, ArrowRight, ArrowUpRight, BadgeCheck, Bitcoin, CalendarDays, Check, ChevronUp, CircleAlert,
-  CreditCard, ExternalLink, FileDown, Gift, Heart, Info, KeyRound, Loader2, Lock, Mail, Megaphone,
+  CreditCard, ExternalLink, FileDown, Gift, Heart, Info, KeyRound, Layers, Loader2, Lock, Mail, Megaphone,
   MessageCircleQuestion, MessageSquare, MessageSquarePlus,
-  MousePointerClick, PackageOpen, PenLine, RefreshCw, Search, SearchX, Send, ShieldCheck, ShoppingBag,
-  Sparkles, Star, Tag, Timer, Trophy, Users, Wallet, X,
+  MousePointerClick, PackageOpen, PenLine, Percent, RefreshCw, Search, SearchX, Send, ShieldCheck, ShoppingBag,
+  Sparkles, Star, Tag, Timer, TrendingDown, Trophy, Users, Wallet, X,
 } from "lucide-react";
 
 import { useAppStore } from "@/lib/store";
 import { api, ApiError } from "@/lib/api";
 import { WhopForm } from "@/components/views/whop-payment";
-import { CATEGORIES, type AffiliateLinkDTO, type AnswerDTO, type AssetDTO, type GiveawayDTO, type PlanDTO, type ProductCardDTO, type ProductDetailDTO, type PromoValidationDTO, type QuestionDTO } from "@/lib/types";
+import { CATEGORIES, type AffiliateLinkDTO, type AnswerDTO, type AssetDTO, type BundleDTO, type GiveawayDTO, type PlanDTO, type ProductCardDTO, type ProductDetailDTO, type PromoValidationDTO, type QuestionDTO } from "@/lib/types";
 import { COVER_THEMES, fmtBytes, fmtCompact, fmtDate, fmtMoney, timeAgo } from "@/lib/format";
+import { usePlatformNowMs } from "@/lib/use-now";
 import {
   CategoryIcon, CopyButton, EmptyState, GatewayBadge, ProductCover, ProviderBadge, SectionHeader,
   StatusBadge, UserAvatar,
@@ -70,6 +71,31 @@ interface CheckoutResultDTO {
   whopRef?: string;
   clientSecret?: string | null;
   whop?: { paymentId: string; amount: string; currency: string; card: string } | null;
+}
+
+// Bundle checkout receipts — POST /api/checkout/bundle, whop-confirm(bundleId)
+// and whop-status?bundleId=… all return this shape (Task 3-a).
+interface BundleReceiptItem {
+  productTitle: string;
+  planName: string;
+  subscriptionId: string;
+  invoiceId: string;
+  licenseKeyId: string | null;
+  amountCents: number;
+  interval: string;
+}
+
+interface BundleCheckoutResult {
+  status: string;
+  purchaseId?: string;
+  bundle: { id: string; title: string; discountPct: number };
+  subtotalCents: number;
+  discountCents: number;
+  totalCents: number;
+  gateway?: string;
+  whopRef?: string;
+  whop?: { paymentId: string; amount: string; currency: string; card: string } | null;
+  items: BundleReceiptItem[];
 }
 
 interface CheckoutReceipt {
@@ -1001,6 +1027,163 @@ function Stepper({ current }: { current: number }) {
 }
 
 // ---------------------------------------------------------------------------
+// Bundle offers — Discover cards + product-page hint (Task 3-b)
+// ---------------------------------------------------------------------------
+
+/** Stacked, slightly fanned product-cover tiles — the "hand of cards" motif
+ *  on every bundle cover. Purely decorative (aria-hidden). */
+function BundleCoverStack({ items }: { items: BundleDTO["items"] }) {
+  const n = items.length;
+  return (
+    <div className="flex items-end justify-center" aria-hidden>
+      {items.map((item, i) => {
+        const offset = i - (n - 1) / 2;
+        return (
+          <span
+            key={item.productId}
+            className={cn(
+              "relative flex h-[4.25rem] w-14 items-center justify-center rounded-xl bg-gradient-to-br shadow-lg shadow-black/25 ring-2 ring-white/70",
+              COVER_THEMES[item.coverTheme] || COVER_THEMES.emerald,
+              i > 0 && "-ml-4"
+            )}
+            style={{ transform: `rotate(${offset * 6}deg) translateY(${Math.abs(offset) * 4}px)`, zIndex: i }}
+          >
+            <CategoryIcon category={item.category} className="h-6 w-6 text-white/70" />
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
+/** Discover card for an active bundle — gradient cover with a fanned stack of
+ *  the included product covers, per-item struck→discounted pricing and a
+ *  single "Get the bundle" checkout CTA. */
+function BundleOfferCard({ bundle, index }: { bundle: BundleDTO; index: number }) {
+  const navigate = useAppStore((s) => s.navigate);
+  const interval = bundle.items[0]?.interval ?? "month";
+  const label = `Get ${bundle.title}`;
+
+  return (
+    <motion.article
+      initial={{ opacity: 0, y: 14 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.3, delay: Math.min(index * 0.06, 0.5), ease: "easeOut" }}
+      className="group relative h-full"
+    >
+      <div className="relative h-full transition-transform duration-200 group-hover:-translate-y-1">
+        <article className="flex h-full flex-col overflow-hidden rounded-2xl border bg-card text-left shadow-sm transition-shadow duration-200 group-hover:shadow-lg group-hover:shadow-emerald-500/5">
+          {/* Cover — bundle theme gradient + fanned product stack + SAVE badge */}
+          <div
+            className={cn("relative h-44 overflow-hidden bg-gradient-to-br", COVER_THEMES[bundle.coverTheme] || COVER_THEMES.emerald)}
+            role="img"
+            aria-label={`${bundle.title} cover`}
+          >
+            <div className="absolute inset-0 opacity-25 [background-image:radial-gradient(circle_at_20%_20%,white_1px,transparent_1px),radial-gradient(circle_at_80%_60%,white_1px,transparent_1px)] [background-size:24px_24px,32px_32px]" />
+            <div className="absolute inset-0 bg-gradient-to-t from-black/40 via-black/5 to-transparent" />
+            <span className="absolute left-3 top-3 inline-flex items-center gap-1 rounded-full bg-black/35 px-2.5 py-1 text-[11px] font-semibold text-white backdrop-blur-sm">
+              <Layers className="h-3 w-3" /> Bundle
+            </span>
+            <span className="absolute right-3 top-3 inline-flex items-center gap-1 rounded-full bg-emerald-500 px-2.5 py-1 text-[11px] font-extrabold uppercase tracking-wide text-white shadow-lg ring-2 ring-white/50">
+              <Percent className="h-3 w-3" strokeWidth={3} />
+              Save {bundle.discountPct}%
+            </span>
+            <BundleCoverStack items={bundle.items} />
+          </div>
+
+          {/* Body */}
+          <div className="flex flex-1 flex-col gap-3 p-5">
+            <div className="flex items-center gap-2">
+              <UserAvatar name={bundle.creatorName} color={avatarColorFor(bundle.creatorName ?? "Creator")} size="sm" />
+              <span className="min-w-0 truncate text-xs font-medium text-muted-foreground">{bundle.creatorName ?? "Creator"}</span>
+              <span className="ml-auto inline-flex shrink-0 items-center gap-1 rounded-full border border-emerald-500/25 bg-emerald-500/10 px-2 py-0.5 text-[11px] font-bold text-emerald-700 tabular-nums dark:text-emerald-400">
+                <TrendingDown className="h-3 w-3" />
+                −{bundle.discountPct}%
+              </span>
+            </div>
+            <div>
+              <h3 className="font-semibold tracking-tight">{bundle.title}</h3>
+              {bundle.description && <p className="mt-0.5 line-clamp-2 text-sm text-muted-foreground">{bundle.description}</p>}
+            </div>
+            <ul className="space-y-1.5 rounded-xl bg-muted/40 p-3">
+              {bundle.items.map((item) => (
+                <li key={item.productId} className="flex items-center gap-2 text-xs">
+                  <span
+                    aria-hidden
+                    className={cn("h-2.5 w-2.5 shrink-0 rounded-full bg-gradient-to-br", COVER_THEMES[item.coverTheme] || COVER_THEMES.emerald)}
+                  />
+                  <span className="min-w-0 flex-1 truncate">
+                    <span className="font-medium">{item.productTitle}</span>
+                    <span className="text-muted-foreground"> · {item.planName}</span>
+                  </span>
+                  <span className="flex shrink-0 items-baseline gap-1.5">
+                    <span className="text-[11px] text-muted-foreground line-through tabular-nums">{fmtMoney(item.priceCents)}</span>
+                    <span className="font-semibold text-emerald-600 tabular-nums dark:text-emerald-400">{fmtMoney(item.discountedCents)}</span>
+                  </span>
+                </li>
+              ))}
+            </ul>
+            <div className="mt-auto space-y-3 border-t pt-4">
+              <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5">
+                <p className="text-sm">
+                  <span className="text-xs font-medium text-muted-foreground">Total </span>
+                  <span className="text-lg font-bold tabular-nums">{fmtMoney(bundle.totalCents, { cents: true })}</span>
+                  <span className="text-xs text-muted-foreground">{intervalSuffix(interval)}</span>
+                </p>
+                <span className="inline-flex items-center gap-1 rounded-full border border-emerald-500/25 bg-emerald-500/10 px-2.5 py-1 text-[11px] font-semibold text-emerald-700 tabular-nums dark:text-emerald-400">
+                  <Sparkles className="h-3 w-3" />
+                  You save {fmtMoney(bundle.discountCents, { cents: true })}
+                </span>
+              </div>
+              <Button className="h-11 w-full font-semibold" onClick={() => navigate("checkout", { bundleId: bundle.id })} aria-label={label}>
+                Get the bundle
+                <ArrowRight className="h-4 w-4 transition-transform duration-200 group-hover:translate-x-0.5" />
+              </Button>
+            </div>
+          </div>
+        </article>
+      </div>
+    </motion.article>
+  );
+}
+
+/** "Available in a bundle" upsell card on the product detail page. */
+function BundleHintCard({ offer, productTitle }: { offer: NonNullable<ProductDetailDTO["bundleOffer"]>; productTitle: string }) {
+  const navigate = useAppStore((s) => s.navigate);
+  return (
+    <motion.section
+      initial={{ opacity: 0, y: 12 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ delay: 0.08, duration: 0.3 }}
+      className="card-shine group rounded-2xl border border-emerald-500/30 bg-gradient-to-br from-emerald-500/[0.08] via-transparent to-teal-500/[0.06] p-5 transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md hover:shadow-emerald-500/10 dark:border-emerald-500/25"
+      aria-label="Available in a bundle"
+    >
+      <div className="flex items-start gap-3">
+        <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-emerald-500 to-teal-600 text-white shadow-sm transition-transform duration-200 group-hover:scale-105">
+          <Layers className="h-5 w-5" />
+        </span>
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-semibold">Available in a bundle</p>
+          <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">
+            Save <span className="font-semibold text-emerald-600 dark:text-emerald-400">{offer.discountPct}%</span> on {productTitle} —{" "}
+            {offer.productCount} products, one checkout.
+          </p>
+        </div>
+      </div>
+      <Button
+        variant="outline"
+        className="mt-4 h-10 w-full gap-1.5 border-emerald-500/30 bg-card font-semibold text-emerald-700 transition-colors hover:border-emerald-500/50 hover:bg-emerald-500/10 hover:text-emerald-700 dark:text-emerald-400 dark:hover:text-emerald-400"
+        onClick={() => navigate("checkout", { bundleId: offer.id })}
+        aria-label={`View ${offer.title}`}
+      >
+        View bundle
+        <ArrowRight className="h-4 w-4 transition-transform duration-200 group-hover:translate-x-0.5" />
+      </Button>
+    </motion.section>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // DISCOVER VIEW
 // ---------------------------------------------------------------------------
 
@@ -1056,6 +1239,7 @@ function DiscoverView() {
   const [products, setProducts] = useState<ProductCardDTO[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [giveaways, setGiveaways] = useState<GiveawayDTO[] | null>(null);
+  const [bundles, setBundles] = useState<BundleDTO[] | null>(null);
 
   const gridRef = useRef<HTMLDivElement>(null);
   const howRef = useRef<HTMLDivElement>(null);
@@ -1105,6 +1289,22 @@ function DiscoverView() {
         if (!cancelled) setGiveaways(res.giveaways);
       } catch {
         if (!cancelled) setGiveaways([]); // section simply hides
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [nonce]);
+
+  // Bundle offers — public feed of active bundles (section hides when empty).
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await api<{ bundles: BundleDTO[] }>("/api/bundles");
+        if (!cancelled) setBundles(res.bundles);
+      } catch {
+        if (!cancelled) setBundles([]); // section simply hides
       }
     })();
     return () => {
@@ -1297,6 +1497,27 @@ function DiscoverView() {
                   saved={wishlistIds?.has(p.id) ?? false}
                   onToggleWishlist={toggleWishlist}
                 />
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Bundle offers — only without active filters */}
+        {!hasFilters && (bundles ?? []).length > 0 && !loading && (
+          <div className="mt-10">
+            <SectionHeader
+              title="Bundle offers"
+              description="Buy together and save"
+              action={
+                <span className="inline-flex items-center gap-1.5 rounded-full border bg-muted/60 px-3 py-1.5 text-xs font-semibold text-muted-foreground tabular-nums">
+                  <Layers className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
+                  {(bundles ?? []).length} {(bundles ?? []).length === 1 ? "bundle" : "bundles"}
+                </span>
+              }
+            />
+            <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3">
+              {(bundles ?? []).map((b, i) => (
+                <BundleOfferCard key={b.id} bundle={b} index={i} />
               ))}
             </div>
           </div>
@@ -1549,6 +1770,7 @@ function ReviewDialog({
 
 /** One answer inside a question's thread. Creator answers get the emerald treatment. */
 function AnswerRow({ answer }: { answer: AnswerDTO }) {
+  const nowMs = usePlatformNowMs();
   return (
     <div className={cn("border-l-2 pl-4", answer.isCreator ? "rounded-r-lg border-emerald-400/60 bg-emerald-500/[0.04] p-3 pl-4" : "border-border")}>
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5">
@@ -1562,7 +1784,7 @@ function AnswerRow({ answer }: { answer: AnswerDTO }) {
           </span>
         )}
         <span aria-hidden className="text-xs text-muted-foreground">·</span>
-        <span className="text-xs text-muted-foreground">{timeAgo(answer.createdAt)}</span>
+        <span className="text-xs text-muted-foreground">{timeAgo(answer.createdAt, nowMs)}</span>
       </div>
       <p className="mt-1.5 text-sm leading-relaxed text-muted-foreground">{answer.body}</p>
     </div>
@@ -1585,6 +1807,7 @@ function QuestionCard({
   onVote: (q: QuestionDTO) => void;
   onAnswer: (q: QuestionDTO, body: string) => Promise<boolean>;
 }) {
+  const nowMs = usePlatformNowMs();
   const { toast } = useToast();
   const [composing, setComposing] = useState(false);
   const [reply, setReply] = useState("");
@@ -1647,7 +1870,7 @@ function QuestionCard({
               <span className="text-xs font-semibold">{question.author.name}</span>
             </span>
             <span aria-hidden className="text-xs text-muted-foreground">·</span>
-            <span className="text-xs text-muted-foreground">{timeAgo(question.createdAt)}</span>
+            <span className="text-xs text-muted-foreground">{timeAgo(question.createdAt, nowMs)}</span>
             {question.status === "ANSWERED" ? (
               <span className="inline-flex items-center gap-1 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[11px] font-medium text-emerald-700 dark:text-emerald-400">
                 <BadgeCheck className="h-3 w-3" /> Answered
@@ -1945,6 +2168,7 @@ function DetailSkeleton() {
 
 function ProductDetailView() {
   const params = useAppStore((s) => s.params);
+  const nowMs = usePlatformNowMs();
   const navigate = useAppStore((s) => s.navigate);
   const nonce = useAppStore((s) => s.nonce);
   const { toast } = useToast();
@@ -2166,7 +2390,7 @@ function ProductDetailView() {
                       <UserAvatar name={r.authorName} color={avatarColorFor(r.authorName)} size="sm" />
                       <div className="min-w-0 flex-1">
                         <p className="truncate text-sm font-semibold">{r.authorName}</p>
-                        <p className="text-xs text-muted-foreground">{timeAgo(r.createdAt)}</p>
+                        <p className="text-xs text-muted-foreground">{timeAgo(r.createdAt, nowMs)}</p>
                       </div>
                       <Stars value={r.rating} />
                     </div>
@@ -2189,6 +2413,9 @@ function ProductDetailView() {
                 setProductGiveaway((prev) => (prev && prev.id === id ? { ...prev, myEntry: entries, entryCount: prev.entryCount + 1 } : prev))
               }
             />
+          )}
+          {product.bundleOffer && !product.hasAccess && (
+            <BundleHintCard offer={product.bundleOffer} productTitle={product.title} />
           )}
           <div className="rounded-3xl border bg-card p-5 shadow-sm md:p-6">
             {product.hasAccess ? (
@@ -2442,7 +2669,10 @@ function OrderSummary({
   className?: string;
 }) {
   const trial = !!plan && plan.trialDays > 0 && startTrial;
-  const firstCharge = trial && plan ? fmtDate(new Date(Date.now() + plan.trialDays * 86400000).toISOString()) : null;
+  // Platform clock — the trial end must match what the billing engine will
+  // actually do (a simulated +Nd clock shifts the first charge date too).
+  const nowMs = usePlatformNowMs();
+  const firstCharge = trial && plan ? fmtDate(new Date(nowMs + plan.trialDays * 86400000).toISOString()) : null;
   const discountCents = promo && plan ? Math.min(promo.discountCents, plan.priceCents) : 0;
   const totalCents = plan ? Math.max(0, plan.priceCents - discountCents) : 0;
 
@@ -3182,7 +3412,10 @@ function SuccessPanel({
   onPortal: () => void;
   onDiscover: () => void;
 }) {
-  const trialEnd = receipt.isTrial ? fmtDate(new Date(Date.now() + plan.trialDays * 86400000).toISOString()) : null;
+  // Platform clock — keep the displayed trial end in lock-step with the
+  // engine's simulated clock (never bare Date.now()).
+  const nowMs = usePlatformNowMs();
+  const trialEnd = receipt.isTrial ? fmtDate(new Date(nowMs + plan.trialDays * 86400000).toISOString()) : null;
   const discountCents = receipt.discountCents ?? 0;
   const chargedCents = Math.max(0, plan.priceCents - discountCents);
 
@@ -3324,6 +3557,9 @@ function CheckoutView() {
   }, [load, nonce]);
 
   const plans = product ? product.plans : EMPTY_PLANS;
+  // Platform clock — the trial first-charge hint must honor simulated time.
+  // (Declared with the other hooks, before any early return.)
+  const nowMs = usePlatformNowMs();
   const selectedPlan = useMemo(() => plans.find((p) => p.id === selectedPlanId) ?? null, [plans, selectedPlanId]);
 
   // If the plan id from params turns out invalid once loaded, fall back to plan selection.
@@ -3529,7 +3765,7 @@ function CheckoutView() {
                     <div>
                       <p className="text-sm font-medium">Start with a {selectedPlan.trialDays}-day free trial</p>
                       <p className="mt-0.5 text-xs text-muted-foreground">
-                        No charge today — first charge {fmtDate(new Date(Date.now() + selectedPlan.trialDays * 86400000).toISOString())}.
+                        No charge today — first charge {fmtDate(new Date(nowMs + selectedPlan.trialDays * 86400000).toISOString())}.
                       </p>
                     </div>
                     <Switch checked={startTrial} onCheckedChange={setStartTrial} aria-label="Toggle free trial" />
@@ -3576,12 +3812,746 @@ function CheckoutView() {
 }
 
 // ---------------------------------------------------------------------------
+// BUNDLE CHECKOUT VIEW (Task 3-b) — one payment for every bundled product
+// ---------------------------------------------------------------------------
+
+/** Right-rail summary: bundle header + per-item struck→discounted rows +
+ *  subtotal/discount/total math and a savings banner. No promo input — bundle
+ *  discounts can't be combined with promo codes. */
+function BundleOrderSummary({ bundle, className }: { bundle: BundleDTO; className?: string }) {
+  const interval = bundle.items[0]?.interval ?? "month";
+  return (
+    <aside className={cn("rounded-3xl border bg-card p-5 shadow-sm md:p-6", className)} aria-label="Bundle order summary">
+      <div className="flex items-center gap-3">
+        <div
+          role="img"
+          aria-label={`${bundle.title} cover`}
+          className={cn("relative flex h-14 w-20 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-gradient-to-br", COVER_THEMES[bundle.coverTheme] || COVER_THEMES.emerald)}
+        >
+          <span aria-hidden className="absolute inset-0 opacity-25 [background-image:radial-gradient(circle_at_20%_20%,white_1px,transparent_1px)] [background-size:24px_24px]" />
+          <Layers className="relative h-7 w-7 text-white/90" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-sm font-semibold">{bundle.title}</p>
+          <p className="truncate text-xs text-muted-foreground">by {bundle.creatorName ?? "Creator"}</p>
+        </div>
+        <span className="ml-auto inline-flex shrink-0 items-center gap-1 rounded-full border border-emerald-500/25 bg-emerald-500/10 px-2 py-1 text-[11px] font-bold text-emerald-700 tabular-nums dark:text-emerald-400">
+          <Percent className="h-3 w-3" strokeWidth={3} />
+          −{bundle.discountPct}%
+        </span>
+      </div>
+
+      <div className="my-4 border-t border-dashed" aria-hidden />
+
+      <ul className="space-y-3">
+        {bundle.items.map((item) => (
+          <li key={item.productId} className="flex items-start gap-2.5">
+            <span
+              aria-hidden
+              className={cn("mt-1.5 h-2.5 w-2.5 shrink-0 rounded-full bg-gradient-to-br", COVER_THEMES[item.coverTheme] || COVER_THEMES.emerald)}
+            />
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-sm font-medium">{item.productTitle}</p>
+              <p className="truncate text-xs text-muted-foreground">{item.planName} plan</p>
+            </div>
+            <span className="flex shrink-0 flex-col items-end leading-tight">
+              <span className="text-xs text-muted-foreground line-through tabular-nums">{fmtMoney(item.priceCents)}</span>
+              <span className="text-sm font-semibold text-emerald-600 tabular-nums dark:text-emerald-400">{fmtMoney(item.discountedCents)}</span>
+            </span>
+          </li>
+        ))}
+      </ul>
+
+      <div className="my-4 border-t border-dashed" aria-hidden />
+
+      <dl className="space-y-2.5 text-sm">
+        <div className="flex items-center justify-between gap-3">
+          <dt className="text-muted-foreground">Subtotal</dt>
+          <dd className="font-medium text-muted-foreground line-through tabular-nums">{fmtMoney(bundle.subtotalCents)}</dd>
+        </div>
+        <div className="flex items-center justify-between gap-3">
+          <dt className="flex min-w-0 items-center gap-1.5 text-muted-foreground">
+            <TrendingDown className="h-3.5 w-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" />
+            Bundle discount ({bundle.discountPct}%)
+          </dt>
+          <dd className="font-semibold text-emerald-600 tabular-nums dark:text-emerald-400">−{fmtMoney(bundle.discountCents)}</dd>
+        </div>
+        <div className="flex items-center justify-between gap-3">
+          <dt className="font-semibold">Total</dt>
+          <dd className="text-base font-bold tabular-nums">
+            {fmtMoney(bundle.totalCents, { cents: true })}
+            {intervalSuffix(interval)}
+          </dd>
+        </div>
+      </dl>
+
+      <div className="mt-4 flex items-center justify-center gap-2 rounded-xl border border-dashed border-emerald-500/40 bg-emerald-500/[0.07] px-3.5 py-2.5 dark:bg-emerald-500/10">
+        <Sparkles className="h-4 w-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
+        <p className="text-xs font-semibold text-emerald-700 tabular-nums dark:text-emerald-400">
+          You save {fmtMoney(bundle.discountCents, { cents: true })} every {interval === "year" ? "year" : "month"}
+        </p>
+      </div>
+
+      <p className="mt-3 flex items-start gap-2 text-xs leading-relaxed text-muted-foreground">
+        <Tag className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+        Promo codes can't be combined with bundle discounts.
+      </p>
+      <p className="mt-2.5 flex items-start gap-2 text-xs leading-relaxed text-muted-foreground">
+        <RefreshCw className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+        Every product renews at its discounted bundle price. Cancel anytime.
+      </p>
+
+      <div className="mt-4 flex flex-wrap items-center gap-1.5 border-t pt-4">
+        <GatewayBadge gateway="WHOP" />
+        <GatewayBadge gateway="STRIPE" />
+        <GatewayBadge gateway="PAYPAL" />
+      </div>
+    </aside>
+  );
+}
+
+// ------------------------------ Bundle Stripe form ------------------------------
+
+function BundleStripeForm({
+  bundle,
+  onComplete,
+  onApiError,
+  onFormError,
+}: {
+  bundle: BundleDTO;
+  onComplete: (gateway: GatewayKey, res: BundleCheckoutResult) => void;
+  onApiError: (e: unknown) => void;
+  onFormError: (msg: string) => void;
+}) {
+  const [number, setNumber] = useState("");
+  const [expMonth, setExpMonth] = useState("");
+  const [expYear, setExpYear] = useState("");
+  const [cvc, setCvc] = useState("");
+  const [saveMethod, setSaveMethod] = useState(true);
+  const [busy, setBusy] = useState(false);
+
+  const currentYear = new Date().getFullYear();
+  const years = Array.from({ length: 11 }, (_, i) => currentYear + i);
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    const digits = number.replace(/\s/g, "");
+    if (!/^\d{13,19}$/.test(digits)) {
+      onFormError("Enter a valid card number (13–19 digits).");
+      return;
+    }
+    if (!expMonth || !expYear) {
+      onFormError("Select the card expiry month and year.");
+      return;
+    }
+    if (!/^\d{3,4}$/.test(cvc)) {
+      onFormError("Enter the 3–4 digit security code on the back of your card.");
+      return;
+    }
+    onFormError("");
+    setBusy(true);
+    try {
+      const res = await api<BundleCheckoutResult>("/api/checkout/bundle", {
+        json: {
+          bundleId: bundle.id,
+          gateway: "STRIPE",
+          card: { number: digits, expMonth: Number(expMonth), expYear: Number(expYear), cvc },
+          saveMethod,
+        },
+      });
+      onComplete("STRIPE", res);
+    } catch (err) {
+      onApiError(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <form onSubmit={submit} className="space-y-4" noValidate>
+      <div className="space-y-1.5">
+        <Label htmlFor="bcc-number">Card number</Label>
+        <div className="relative">
+          <CreditCard className="absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            id="bcc-number"
+            inputMode="numeric"
+            autoComplete="cc-number"
+            value={number}
+            onChange={(e) => setNumber(e.target.value.replace(/\D/g, "").slice(0, 19).replace(/(\d{4})(?=\d)/g, "$1 "))}
+            placeholder="4242 4242 4242 4242"
+            className="h-11 pl-10 font-mono"
+          />
+        </div>
+      </div>
+      <div className="grid grid-cols-3 gap-3">
+        <div className="space-y-1.5">
+          <Label htmlFor="bcc-month">Exp. month</Label>
+          <Select value={expMonth} onValueChange={setExpMonth}>
+            <SelectTrigger id="bcc-month" className="h-11" aria-label="Expiry month">
+              <SelectValue placeholder="MM" />
+            </SelectTrigger>
+            <SelectContent>
+              {Array.from({ length: 12 }, (_, i) => i + 1).map((m) => (
+                <SelectItem key={m} value={String(m)}>
+                  {String(m).padStart(2, "0")}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="bcc-year">Exp. year</Label>
+          <Select value={expYear} onValueChange={setExpYear}>
+            <SelectTrigger id="bcc-year" className="h-11" aria-label="Expiry year">
+              <SelectValue placeholder="YYYY" />
+            </SelectTrigger>
+            <SelectContent>
+              {years.map((y) => (
+                <SelectItem key={y} value={String(y)}>
+                  {y}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="bcc-cvc">CVC</Label>
+          <div className="relative">
+            <Input
+              id="bcc-cvc"
+              inputMode="numeric"
+              autoComplete="cc-csc"
+              value={cvc}
+              onChange={(e) => setCvc(e.target.value.replace(/\D/g, "").slice(0, 4))}
+              placeholder="123"
+              className="h-11 pr-9 font-mono"
+            />
+            <Lock className="absolute right-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+          </div>
+        </div>
+      </div>
+      <div className="flex items-center justify-between gap-3 rounded-xl border bg-muted/30 px-4 py-3">
+        <div>
+          <Label htmlFor="bcc-save-card" className="text-sm font-medium">
+            Save card for renewals
+          </Label>
+          <p className="mt-0.5 text-xs text-muted-foreground">Charged automatically at each product's renewal.</p>
+        </div>
+        <Switch id="bcc-save-card" checked={saveMethod} onCheckedChange={setSaveMethod} aria-label="Save card for renewals" />
+      </div>
+      <p className="flex items-start gap-2 text-xs leading-relaxed text-muted-foreground">
+        <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+        <span>
+          Test cards: <code className="rounded bg-muted px-1 font-mono">4242 4242 4242 4242</code> succeeds ·{" "}
+          <code className="rounded bg-muted px-1 font-mono">4000 0000 0000 0002</code> declines
+        </span>
+      </p>
+      <Button type="submit" size="lg" className="h-12 w-full text-base tabular-nums" disabled={busy}>
+        {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Lock className="h-4 w-4" />}
+        Pay {fmtMoney(bundle.totalCents, { cents: true })} for the bundle
+      </Button>
+    </form>
+  );
+}
+
+// ------------------------------ Bundle PayPal form ------------------------------
+
+function BundlePayPalForm({
+  bundle,
+  onComplete,
+  onApiError,
+  onFormError,
+}: {
+  bundle: BundleDTO;
+  onComplete: (gateway: GatewayKey, res: BundleCheckoutResult) => void;
+  onApiError: (e: unknown) => void;
+  onFormError: (msg: string) => void;
+}) {
+  const user = useAppStore((s) => s.user);
+  const [email, setEmail] = useState(user?.email ?? "");
+  const [busy, setBusy] = useState(false);
+  const [redirecting, setRedirecting] = useState(false);
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    const v = email.trim();
+    if (!v || !v.includes("@")) {
+      onFormError("Enter a valid PayPal email address.");
+      return;
+    }
+    onFormError("");
+    setRedirecting(true);
+    await new Promise((r) => setTimeout(r, 1200)); // simulated PayPal redirect
+    setRedirecting(false);
+    setBusy(true);
+    try {
+      const res = await api<BundleCheckoutResult>("/api/checkout/bundle", {
+        json: { bundleId: bundle.id, gateway: "PAYPAL", paypalEmail: v, saveMethod: true },
+      });
+      onComplete("PAYPAL", res);
+    } catch (err) {
+      onApiError(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <form onSubmit={submit} noValidate>
+      <div className="overflow-hidden rounded-2xl border border-[#ffc439]/50">
+        <div className="flex items-center justify-center bg-[#ffc439] py-3">
+          <span className="text-xl font-black italic tracking-tight text-[#003087]">
+            Pay<span className="text-[#009cde]">Pal</span>
+          </span>
+        </div>
+        <div className="relative space-y-4 bg-card p-5">
+          <p className="text-sm text-muted-foreground">
+            Pay <span className="font-semibold tabular-nums text-foreground">{fmtMoney(bundle.totalCents, { cents: true })}</span> for the whole
+            bundle with your PayPal balance or a linked bank account.
+          </p>
+          <div className="space-y-1.5">
+            <Label htmlFor="bpp-email">PayPal email</Label>
+            <div className="relative">
+              <Mail className="absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                id="bpp-email"
+                type="email"
+                autoComplete="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="you@example.com"
+                className="h-11 pl-10"
+              />
+            </div>
+          </div>
+          <p className="flex items-start gap-2 text-xs leading-relaxed text-muted-foreground">
+            <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            You'll approve one billing agreement in PayPal (simulated) — every bundled product renews against it.
+          </p>
+          <Button
+            type="submit"
+            disabled={busy || redirecting}
+            className="h-12 w-full rounded-full bg-[#ffc439] text-base font-bold text-[#003087] shadow-none hover:bg-[#ffd24d]"
+          >
+            {busy || redirecting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Wallet className="h-4 w-4" />}
+            Continue with PayPal
+          </Button>
+          <AnimatePresence>
+            {redirecting && (
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                className="absolute inset-0 flex flex-col items-center justify-center gap-2.5 rounded-b-2xl bg-background/92 backdrop-blur-sm"
+                role="status"
+              >
+                <Loader2 className="h-6 w-6 animate-spin text-primary" />
+                <p className="text-sm font-semibold">Redirecting to PayPal…</p>
+                <p className="text-xs text-muted-foreground">connecting billing agreement…</p>
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </div>
+      </div>
+    </form>
+  );
+}
+
+// ------------------------------ Bundle payment panel ------------------------------
+
+function BundlePaymentPanel({
+  bundle,
+  onComplete,
+  onConflict,
+}: {
+  bundle: BundleDTO;
+  onComplete: (gateway: GatewayKey, res: BundleCheckoutResult) => void;
+  onConflict: () => void;
+}) {
+  const { toast } = useToast();
+  const [gateway, setGateway] = useState<GatewayKey>("WHOP");
+  const [banner, setBanner] = useState<string | null>(null);
+
+  function onFormError(msg: string) {
+    setBanner(msg || null);
+  }
+
+  function onApiError(e: unknown) {
+    const err = e as ApiError;
+    if (err.status === 409) {
+      toast({ title: "Already subscribed", description: err.message, variant: "destructive" });
+      onConflict();
+    } else if (err.status === 402) {
+      setBanner(err.message);
+      toast({ title: "Payment declined", description: err.message, variant: "destructive" });
+    } else {
+      setBanner(err.message || "Checkout failed — please try again.");
+      toast({ title: "Checkout failed", description: err.message, variant: "destructive" });
+    }
+  }
+
+  const triggerCls =
+    "h-auto min-h-11 flex-col gap-1 rounded-2xl border border-border bg-card px-2 py-3 text-foreground shadow-none data-[state=active]:border-primary data-[state=active]:bg-primary/5 data-[state=active]:shadow-sm dark:data-[state=active]:bg-primary/10";
+
+  return (
+    <div>
+      <Tabs
+        value={gateway}
+        onValueChange={(v) => {
+          setGateway(v as GatewayKey);
+          setBanner(null);
+        }}
+      >
+        <TabsList className="grid h-auto w-full grid-cols-2 gap-2 rounded-2xl bg-transparent p-0 sm:grid-cols-4" aria-label="Payment method">
+          <TabsTrigger
+            value="WHOP"
+            className="relative h-auto min-h-11 flex-col gap-1 rounded-2xl border border-emerald-500/30 bg-card px-2 py-3 text-foreground shadow-none data-[state=active]:border-emerald-500 data-[state=active]:bg-emerald-500/10 data-[state=active]:shadow-sm"
+          >
+            <span className="absolute right-1.5 top-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/15 px-1.5 py-px text-[9px] font-bold uppercase tracking-wide text-emerald-700 dark:text-emerald-400">
+              Real
+            </span>
+            <CreditCard className="h-5 w-5 text-emerald-600 dark:text-emerald-400" />
+            <span className="text-xs font-semibold">Card · Whop</span>
+            <span className="hidden text-[10px] font-normal text-muted-foreground sm:block">sandbox charge</span>
+          </TabsTrigger>
+          <TabsTrigger value="STRIPE" className={triggerCls}>
+            <CreditCard className="h-5 w-5" />
+            <span className="text-xs font-semibold">Card</span>
+            <span className="hidden text-[10px] font-normal text-muted-foreground sm:block">via Stripe</span>
+          </TabsTrigger>
+          <TabsTrigger value="PAYPAL" className={triggerCls}>
+            <Wallet className="h-5 w-5" />
+            <span className="text-xs font-semibold">PayPal</span>
+            <span className="hidden text-[10px] font-normal text-muted-foreground sm:block">billing agreement</span>
+          </TabsTrigger>
+          <TabsTrigger value="CRYPTO" className={cn(triggerCls, "opacity-50")} disabled>
+            <Bitcoin className="h-5 w-5" />
+            <span className="text-xs font-semibold">Crypto</span>
+            <span className="hidden text-[10px] font-normal text-muted-foreground sm:block">not available for bundles</span>
+          </TabsTrigger>
+        </TabsList>
+        <TabsContent value="WHOP" className="mt-5">
+          <WhopForm
+            bundle={{ id: bundle.id, itemCount: bundle.items.length }}
+            payAmountCents={bundle.totalCents}
+            payLabel={`Pay ${fmtMoney(bundle.totalCents, { cents: true })} for the bundle`}
+            onComplete={(res) => onComplete("WHOP", res as unknown as BundleCheckoutResult)}
+            onApiError={onApiError}
+          />
+        </TabsContent>
+        <TabsContent value="STRIPE" className="mt-5">
+          <BundleStripeForm bundle={bundle} onComplete={onComplete} onApiError={onApiError} onFormError={onFormError} />
+        </TabsContent>
+        <TabsContent value="PAYPAL" className="mt-5">
+          <BundlePayPalForm bundle={bundle} onComplete={onComplete} onApiError={onApiError} onFormError={onFormError} />
+        </TabsContent>
+      </Tabs>
+      <AnimatePresence>
+        {banner && (
+          <motion.div
+            role="alert"
+            initial={{ opacity: 0, y: -6 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.2 }}
+            className="mt-4 flex items-start gap-2.5 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-700 dark:text-red-400"
+          >
+            <CircleAlert className="mt-0.5 h-4 w-4 shrink-0" />
+            <span>{banner}</span>
+          </motion.div>
+        )}
+      </AnimatePresence>
+      <p className="mt-4 flex items-center justify-center gap-1.5 text-xs text-muted-foreground">
+        <ShieldCheck className="h-3.5 w-3.5 text-primary" />
+        Card payments run live in the Whop sandbox · PayPal simulated — {bundle.title}
+      </p>
+    </div>
+  );
+}
+
+// ------------------------------ Bundle success panel ------------------------------
+
+function BundleSuccessPanel({
+  bundle,
+  receipt,
+  onPortal,
+  onDiscover,
+}: {
+  bundle: BundleDTO;
+  receipt: BundleCheckoutResult;
+  onPortal: () => void;
+  onDiscover: () => void;
+}) {
+  const interval = bundle.items[0]?.interval ?? "month";
+  const gatewayLabel = GATEWAY_LABELS[receipt.gateway ?? ""] ?? "card";
+
+  const extras: { icon: LucideIcon; text: string }[] = [];
+  if (receipt.whop) {
+    extras.push({
+      icon: BadgeCheck,
+      text: `Whop payment ${receipt.whop.paymentId} · ${receipt.whop.card} · ${receipt.whop.currency} ${receipt.whop.amount} settled in the Whop sandbox.`,
+    });
+  }
+  extras.push({
+    icon: CreditCard,
+    text: `${fmtMoney(receipt.totalCents, { cents: true })} charged via ${gatewayLabel} — every product renews at its discounted bundle price.`,
+  });
+
+  return (
+    <div className="relative overflow-hidden rounded-3xl border bg-card p-6 text-center shadow-sm md:p-10">
+      <Confetti />
+      <motion.div
+        initial={{ scale: 0, rotate: -12 }}
+        animate={{ scale: 1, rotate: 0 }}
+        transition={{ type: "spring", stiffness: 260, damping: 16, delay: 0.1 }}
+        className="relative mx-auto flex h-20 w-20 items-center justify-center rounded-full bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
+      >
+        <Layers className="h-10 w-10" />
+        <motion.span
+          className="absolute inset-0 rounded-full border-2 border-emerald-500/40"
+          initial={{ scale: 1, opacity: 0.8 }}
+          animate={{ scale: 1.7, opacity: 0 }}
+          transition={{ duration: 0.9, delay: 0.35 }}
+        />
+      </motion.div>
+      <h2 className="mt-5 text-2xl font-extrabold tracking-tight">Bundle unlocked</h2>
+      <p className="mx-auto mt-1.5 max-w-md text-sm text-muted-foreground">
+        {receipt.bundle.title} — {receipt.items.length} products · {fmtMoney(receipt.totalCents, { cents: true })}
+        {intervalSuffix(interval)} (save {receipt.bundle.discountPct}%)
+      </p>
+      <ul className="mx-auto mt-6 max-w-md space-y-2 text-left">
+        {receipt.items.map((item, i) => (
+          <motion.li
+            key={item.subscriptionId || i}
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.35 + i * 0.12, duration: 0.3 }}
+            className="flex items-start gap-3 rounded-xl border bg-background/60 px-4 py-3 text-sm"
+          >
+            <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-emerald-500/12 text-emerald-600 dark:text-emerald-400">
+              <Check className="h-3.5 w-3.5" strokeWidth={3} />
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="block font-medium">{item.productTitle}</span>
+              <span className="block text-xs text-muted-foreground">
+                {item.planName} · <span className="tabular-nums">{fmtMoney(item.amountCents)}</span>
+                {intervalSuffix(item.interval)}
+                {item.licenseKeyId ? " · license key provisioned" : ""}
+              </span>
+            </span>
+          </motion.li>
+        ))}
+        {extras.map((extra, i) => (
+          <motion.li
+            key={`${extra.icon.name}-${i}`}
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.35 + (receipt.items.length + i) * 0.12, duration: 0.3 }}
+            className="flex items-start gap-3 rounded-xl border bg-background/60 px-4 py-3 text-sm"
+          >
+            <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary">
+              <extra.icon className="h-3.5 w-3.5" />
+            </span>
+            <span>{extra.text}</span>
+          </motion.li>
+        ))}
+      </ul>
+      <div className="mt-7 flex flex-col justify-center gap-2.5 sm:flex-row">
+        <Button size="lg" className="h-12 px-7" onClick={onPortal}>
+          Go to My Hub <ArrowRight className="h-4 w-4" />
+        </Button>
+        <Button size="lg" variant="outline" className="h-12 px-7" onClick={onDiscover}>
+          Back to Discover
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+// ------------------------------ Bundle checkout view ------------------------------
+
+function BundleCheckoutView() {
+  const params = useAppStore((s) => s.params);
+  const navigate = useAppStore((s) => s.navigate);
+  const refresh = useAppStore((s) => s.refresh);
+  const nonce = useAppStore((s) => s.nonce);
+  const user = useAppStore((s) => s.user);
+  const { toast } = useToast();
+
+  const [bundle, setBundle] = useState<BundleDTO | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [notFound, setNotFound] = useState(false);
+  const [done, setDone] = useState(false);
+  const [receipt, setReceipt] = useState<BundleCheckoutResult | null>(null);
+  const [conflictProduct, setConflictProduct] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    if (!params.bundleId) {
+      setNotFound(true);
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
+    setNotFound(false);
+    try {
+      const res = await api<{ bundle: BundleDTO }>(`/api/bundles/${params.bundleId}`);
+      setBundle(res.bundle);
+    } catch {
+      setBundle(null);
+      setNotFound(true);
+    } finally {
+      setLoading(false);
+    }
+  }, [params.bundleId]);
+
+  useEffect(() => {
+    void load();
+  }, [load, nonce]);
+
+  // Overlap guard — an active subscription on any bundled product blocks the
+  // bundle checkout (mirrors the server's 409 check, but with a friendly
+  // pre-flight state instead of a failed payment).
+  const checkOverlap = useCallback(async () => {
+    if (!bundle || !user) return;
+    try {
+      const res = await api<{ subscriptions: { status: string; product: { id: string; title: string } }[] }>("/api/subscriptions");
+      const live = res.subscriptions.filter((s) => ["ACTIVE", "TRIALING", "PAST_DUE", "PENDING"].includes(s.status));
+      const hit = live.find((s) => bundle.items.some((it) => it.productId === s.product.id));
+      if (hit) setConflictProduct(hit.product.title);
+    } catch {
+      // couldn't verify — the server's 409 guard still protects the payment
+    }
+  }, [bundle, user]);
+
+  useEffect(() => {
+    setConflictProduct(null);
+    void checkOverlap();
+  }, [checkOverlap, nonce]);
+
+  if (loading && !bundle) return <CheckoutSkeleton />;
+  if (notFound || !bundle) {
+    return (
+      <div className="container mx-auto max-w-2xl px-4 py-16">
+        <EmptyState
+          icon={PackageOpen}
+          title="Bundle not found"
+          description="This bundle may have been deactivated or the link is incorrect."
+          action={<Button onClick={() => navigate("discover")}>Back to Discover</Button>}
+        />
+      </div>
+    );
+  }
+  if (!done && conflictProduct) {
+    return (
+      <div className="container mx-auto max-w-2xl px-4 py-16">
+        <EmptyState
+          icon={BadgeCheck}
+          title={`You already have a subscription to ${conflictProduct}`}
+          description="Manage it from your hub, or come back when it expires to grab the bundle for the rest of the products."
+          action={<Button onClick={() => navigate("portal", { portalTab: "subscriptions" })}>Go to My Hub</Button>}
+        />
+      </div>
+    );
+  }
+
+  const interval = bundle.items[0]?.interval ?? "month";
+
+  const complete = (gateway: GatewayKey, res: BundleCheckoutResult) => {
+    setReceipt(res);
+    setDone(true);
+    refresh();
+    toast({
+      title: "Bundle unlocked",
+      description: `${res.bundle.title} · ${res.items.length} products · ${fmtMoney(res.totalCents, { cents: true })}${intervalSuffix(interval)}`,
+    });
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
+  return (
+    <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3, ease: "easeOut" }} className="container mx-auto max-w-7xl px-4 py-8">
+      <Button
+        variant="ghost"
+        size="sm"
+        className="-ml-2 mb-3 max-w-full gap-1.5 text-muted-foreground hover:text-foreground"
+        onClick={() => navigate("discover")}
+        aria-label="Back to Discover"
+      >
+        <ArrowLeft className="h-4 w-4 shrink-0" />
+        <span className="truncate">Back to Discover</span>
+      </Button>
+
+      <div className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
+        <div>
+          <h1 className="text-2xl font-extrabold tracking-tight md:text-3xl">Bundle checkout</h1>
+          <p className="mt-1 flex items-center gap-1.5 text-sm text-muted-foreground">
+            <ShieldCheck className="h-4 w-4 text-primary" />
+            {bundle.items.length} products · one payment · save {bundle.discountPct}%
+          </p>
+        </div>
+        <Stepper current={done ? 2 : 1} />
+      </div>
+
+      <div className="mt-8 grid gap-8 lg:grid-cols-[1fr_380px]">
+        <BundleOrderSummary bundle={bundle} className="h-fit lg:sticky lg:top-20 lg:order-2 lg:self-start" />
+
+        <div className="min-w-0 lg:order-1">
+          <AnimatePresence mode="wait">
+            {done && receipt ? (
+              <motion.div
+                key="done"
+                initial={{ opacity: 0, x: 24 }}
+                animate={{ opacity: 1, x: 0 }}
+                exit={{ opacity: 0, x: -24 }}
+                transition={{ duration: 0.22 }}
+              >
+                <BundleSuccessPanel
+                  bundle={bundle}
+                  receipt={receipt}
+                  onPortal={() => navigate("portal", { portalTab: "subscriptions" })}
+                  onDiscover={() => navigate("discover")}
+                />
+              </motion.div>
+            ) : (
+              <motion.div
+                key="payment"
+                initial={{ opacity: 0, x: 24 }}
+                animate={{ opacity: 1, x: 0 }}
+                exit={{ opacity: 0, x: -24 }}
+                transition={{ duration: 0.22 }}
+                className="rounded-3xl border bg-card p-5 shadow-sm md:p-6"
+              >
+                <div>
+                  <h2 className="text-lg font-bold">Payment</h2>
+                  <p className="mt-0.5 text-sm text-muted-foreground">
+                    {bundle.items.length} products ·{" "}
+                    <span className="line-through tabular-nums">{fmtMoney(bundle.subtotalCents)}</span>{" "}
+                    <span className="font-semibold text-emerald-600 tabular-nums dark:text-emerald-400">
+                      {fmtMoney(bundle.totalCents, { cents: true })}
+                      {intervalSuffix(interval)}
+                    </span>
+                  </p>
+                </div>
+                <div className="mt-5">
+                  <BundlePaymentPanel bundle={bundle} onComplete={complete} onConflict={() => void checkOverlap()} />
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </div>
+      </div>
+    </motion.div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Root view router
 // ---------------------------------------------------------------------------
 
 export function MarketplaceViews() {
   const view = useAppStore((s) => s.view);
+  const params = useAppStore((s) => s.params);
   if (view === "product") return <ProductDetailView />;
-  if (view === "checkout") return <CheckoutView />;
+  if (view === "checkout") return params.bundleId ? <BundleCheckoutView /> : <CheckoutView />;
   return <DiscoverView />;
 }

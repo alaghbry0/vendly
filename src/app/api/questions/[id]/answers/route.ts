@@ -1,4 +1,5 @@
 import { db } from "@/lib/db";
+import { getNow } from "@/lib/clock";
 import { errorResponse, HttpError, requireUser } from "@/lib/session";
 import { notify } from "@/lib/notifications";
 import { serializeAnswer } from "@/lib/serialize";
@@ -21,7 +22,8 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
 
     const isCreator = question.product.creatorId === user.id;
     const answer = await db.answer.create({
-      data: { questionId: id, authorId: user.id, body: text, isCreator },
+      // Platform-clock stamp for consistent relative times in simulated time.
+      data: { questionId: id, authorId: user.id, body: text, isCreator, createdAt: await getNow() },
       include: { author: { select: { id: true, name: true, email: true, avatarColor: true } } },
     });
 

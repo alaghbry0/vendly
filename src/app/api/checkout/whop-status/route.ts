@@ -1,9 +1,40 @@
 import { db } from "@/lib/db";
 import { errorResponse, HttpError, requireUser } from "@/lib/session";
 import { provisionSubscription } from "@/lib/billing";
-import { getWhopPayment, getWhopSetupIntent, classifyPayment } from "@/lib/whop";
+import {
+  assertBundlePurchasable,
+  bundleReceiptItems,
+  loadBundleForCheckout,
+  provisionBundle,
+} from "@/lib/bundles";
+import { getWhopPayment, getWhopSetupIntent, classifyPayment, whopSavedCardRef, type WhopPayment, type WhopSetupIntent } from "@/lib/whop";
+
+// Rebuilds bundle receipt line items from an existing purchase — one row per
+// provisioned subscription (latest invoice), used for idempotent status polls.
+async function bundleItemsFromPurchase(bundleId: string, userId: string) {
+  const subs = await db.subscription.findMany({
+    where: { bundleId, userId },
+    include: { plan: true, product: true, invoices: { orderBy: { createdAt: "desc" }, take: 1 } },
+  });
+  return subs.map((s) => ({
+    productTitle: s.product.title,
+    planName: s.plan.name,
+    subscriptionId: s.id,
+    invoiceId: s.invoices[0]?.id ?? "",
+    licenseKeyId: null,
+    amountCents: s.invoices[0]?.amountCents ?? 0,
+    interval: s.plan.interval,
+  }));
+}
+
+// Saved-card references (payt_/mber_) from a payment or setup intent.
+const whopRefs = (src: WhopPayment | WhopSetupIntent) => {
+  const refs = whopSavedCardRef(src);
+  return { whopPaymentMethodId: refs.paymentMethodId, whopMemberId: refs.memberId };
+};
 
 // GET /api/checkout/whop-status?ref=pay_…|sint_…&planId=…&promoCode=…&refCode=…
+//                    or ?ref=pay_…&bundleId=…  (bundle checkout polling)
 //
 // Polls a Whop payment/setup-intent after the buyer completed a pending step
 // (3DS). When the charge settles, the subscription is provisioned here and
@@ -14,6 +45,93 @@ export async function GET(req: Request) {
     const url = new URL(req.url);
     const ref = url.searchParams.get("ref") || "";
     const planId = url.searchParams.get("planId") || "";
+
+    // ------------------------------------------------------------------
+    // BUNDLE CHECKOUT POLLING — ?ref=pay_…&bundleId=…
+    // ------------------------------------------------------------------
+    const bundleIdParam = url.searchParams.get("bundleId");
+    if (bundleIdParam) {
+      if (!/^pay_/.test(ref)) throw new HttpError(400, "Missing or invalid Whop reference.");
+
+      // Idempotency: a settled bundle purchase for this whop ref returns the
+      // same receipt instead of provisioning twice.
+      const existingPurchase = await db.bundlePurchase.findFirst({
+        where: { whopRef: ref, userId: user.id },
+        include: { bundle: true },
+      });
+      if (existingPurchase) {
+        return Response.json({
+          status: "COMPLETED",
+          purchaseId: existingPurchase.id,
+          bundle: {
+            id: existingPurchase.bundleId,
+            title: existingPurchase.bundle.title,
+            discountPct: existingPurchase.bundle.discountPct,
+          },
+          subtotalCents: existingPurchase.subtotalCents,
+          discountCents: existingPurchase.discountCents,
+          totalCents: existingPurchase.totalCents,
+          items: await bundleItemsFromPurchase(existingPurchase.bundleId, user.id),
+          whopRef: ref,
+        });
+      }
+
+      const loaded = await loadBundleForCheckout(bundleIdParam);
+      await assertBundlePurchasable(user.id, loaded);
+
+      const payment = await getWhopPayment(ref);
+      const outcome = classifyPayment(payment);
+      if (outcome.kind === "failed") throw new HttpError(402, outcome.message);
+      if (outcome.kind === "pending") {
+        return Response.json(
+          { status: "PENDING", bundle: true, whopRef: ref, clientSecret: payment.client_secret },
+          { status: 202 }
+        );
+      }
+
+      const card = payment.payment_instrument?.card;
+      const pm = await db.paymentMethod.create({
+        data: {
+          userId: user.id,
+          type: "CARD",
+          gateway: "WHOP",
+          brand: card?.brand ? card.brand.charAt(0).toUpperCase() + card.brand.slice(1) : "Card",
+          last4: card?.last4 ?? null,
+          expMonth: card?.exp_month ?? null,
+          expYear: card?.exp_year ?? null,
+          // Saved-card references for REAL off-session renewals.
+          ...whopRefs(payment),
+        },
+      });
+      const { purchase, results } = await provisionBundle({
+        userId: user.id,
+        loaded,
+        gateway: "WHOP",
+        paymentMethodId: pm.id,
+        txnId: payment.id,
+        whopRef: payment.id,
+      });
+      return Response.json(
+        {
+          status: "COMPLETED",
+          purchaseId: purchase.id,
+          bundle: { id: loaded.bundle.id, title: loaded.bundle.title, discountPct: loaded.bundle.discountPct },
+          subtotalCents: loaded.subtotalCents,
+          discountCents: loaded.discountCents,
+          totalCents: loaded.totalCents,
+          items: bundleReceiptItems(loaded, results),
+          whopRef: payment.id,
+          whop: {
+            paymentId: payment.id,
+            amount: payment.total?.amount ?? (loaded.totalCents / 100).toFixed(2),
+            currency: (payment.total?.currency || "usd").toUpperCase(),
+            card: card ? `${card.brand} •••• ${card.last4}` : "Card",
+          },
+        },
+        { status: 201 }
+      );
+    }
+
     if (!/^(pay|sint)_/.test(ref)) throw new HttpError(400, "Missing or invalid Whop reference.");
     if (!planId) throw new HttpError(400, "Missing planId.");
 
@@ -102,6 +220,9 @@ export async function GET(req: Request) {
             last4: card?.last4 ?? null,
             expMonth: card?.exp_month ?? null,
             expYear: card?.exp_year ?? null,
+            // Setup intent card — keep the payt_/mber_ references for the
+            // real trial-conversion charge.
+            ...whopRefs(setup),
           },
         });
         const result = await provisionSubscription({
@@ -158,6 +279,8 @@ export async function GET(req: Request) {
         last4: card?.last4 ?? null,
         expMonth: card?.exp_month ?? null,
         expYear: card?.exp_year ?? null,
+        // Saved-card references for REAL off-session renewals.
+        ...whopRefs(payment),
       },
     });
     const result = await provisionSubscription({

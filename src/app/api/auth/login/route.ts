@@ -1,9 +1,13 @@
 import { db } from "@/lib/db";
 import { errorResponse, HttpError } from "@/lib/session";
+import { rateLimit } from "@/lib/rate-limit";
 
 // POST /api/auth/login { email } — demo login; creates the user if new
 export async function POST(req: Request) {
   try {
+    // IP-keyed brute-force guard (no user id yet at this point).
+    const limited = rateLimit({ req, bucket: "login", max: 20, windowMs: 60_000 });
+    if (limited) return limited;
     const body = await req.json().catch(() => ({}));
     const email = String(body.email || "").trim().toLowerCase();
     if (!email || !email.includes("@")) throw new HttpError(400, "A valid email is required.");

@@ -37,7 +37,17 @@ export interface WhopPayment {
   customer_email: string | null;
   total?: WhopMoney;
   payment_instrument?: { card?: WhopCardInfo | null } | null;
+  // Saved-card references (the sandbox API returns these as FLAT fields;
+  // the documented object shape is accepted too — see whopSavedRefs).
+  payment_method_id?: string | null; // payt_… — charge this off-session later
+  member_id?: string | null; // mber_… — the member the card belongs to
+  payment_method?: { id?: string; card?: WhopCardInfo | null } | null;
+  member?: { id?: string } | null;
   metadata?: Record<string, string> | null;
+  // Refund fields (present after POST /payments/{id}/refund)
+  refunded_amount?: WhopMoney | null;
+  refunded_at?: string | null;
+  refundable?: boolean;
 }
 
 export interface WhopSetupIntent {
@@ -49,6 +59,9 @@ export interface WhopSetupIntent {
     id?: string;
     card?: WhopCardInfo | null;
   } | null;
+  // The company member (mber_…) the saved card belongs to (flat or nested).
+  member_id?: string | null;
+  member?: { id?: string } | null;
 }
 
 class WhopApiError extends Error {
@@ -69,6 +82,8 @@ async function whopFetch<T>(path: string, init?: RequestInit): Promise<T> {
         "Content-Type": "application/json",
         ...(init?.headers || {}),
       },
+      // Never let a hung Whop call stall the billing engine or checkout.
+      signal: AbortSignal.timeout(20_000),
     });
   } catch {
     throw new WhopApiError(502, "Could not reach Whop — check your connection and try again.");
@@ -162,8 +177,73 @@ export function getWhopPayment(id: string): Promise<WhopPayment> {
   return whopFetch<WhopPayment>(`/payments/${encodeURIComponent(id)}`);
 }
 
+// Charges a card that was saved at checkout (setupFutureUsage: off_session)
+// WITHOUT the buyer present — used by the recurring billing engine for
+// renewals and trial conversions. This creates a REAL Whop payment; the
+// returned payment settles asynchronously, so poll with waitForPayment.
+//
+//   POST /payments { account_id, member_id, payment_method_id, plan }
+//
+// The inline find-or-create plan reuses the checkout's plan identifiers, so
+// Whop's dashboard shows the charge against the same product/plan.
+export function chargeWhopSavedMethod(opts: {
+  memberId: string; // mber_… (stored on the PaymentMethod row)
+  paymentMethodId: string; // payt_… (stored on the PaymentMethod row)
+  plan: WhopInlinePlanInput;
+  metadata?: Record<string, string>;
+}): Promise<WhopPayment> {
+  return whopFetch<WhopPayment>("/payments", {
+    method: "POST",
+    body: JSON.stringify({
+      account_id: WHOP_BUSINESS_ID,
+      member_id: opts.memberId,
+      payment_method_id: opts.paymentMethodId,
+      plan: inlinePlan(opts.plan),
+      metadata: { source: "vendly-renewal", ...opts.metadata },
+    }),
+  });
+}
+
 export function getWhopSetupIntent(id: string): Promise<WhopSetupIntent> {
   return whopFetch<WhopSetupIntent>(`/setup_intents/${encodeURIComponent(id)}`);
+}
+
+// Refunds a Whop payment (full or partial). `amountDollars` (e.g. 4.50)
+// issues a PARTIAL refund via the API's `partial_amount` field — omit it for
+// a full refund. Returns the updated payment: full refunds carry substatus
+// "refunded"; partial refunds keep the paid substatus with refunded_amount
+// set to the cumulative refunded total. ALWAYS compare the returned
+// refunded_amount against what you asked for — if the processor refunded
+// MORE than requested, local state must follow the money.
+// Throws WhopApiError when the payment cannot be refunded (already fully
+// refunded / not refundable / amount exceeds the refundable balance).
+export function refundWhopPayment(id: string, reason?: string, amountDollars?: number): Promise<WhopPayment> {
+  return whopFetch<WhopPayment>(`/payments/${encodeURIComponent(id)}/refund`, {
+    method: "POST",
+    body: JSON.stringify({
+      reason: reason || "requested_by_customer",
+      ...(amountDollars != null ? { partial_amount: amountDollars } : {}),
+    }),
+  });
+}
+
+// Polls a setup intent for up to `timeoutMs` waiting for the card save to
+// finish (sandbox setup intents settle in a couple of seconds). Terminal
+// statuses return immediately; "processing" beyond the deadline returns the
+// last-seen state so the caller can fall back to client-side polling.
+export async function waitForSetupIntent(
+  id: string,
+  timeoutMs = 9000,
+  intervalMs = 1200
+): Promise<WhopSetupIntent> {
+  const deadline = Date.now() + timeoutMs;
+  let last: WhopSetupIntent | null = null;
+  while (Date.now() < deadline) {
+    last = await getWhopSetupIntent(id);
+    if (last.status !== "processing") return last;
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+  return last ?? (await getWhopSetupIntent(id));
 }
 
 // ---------------------------------------------------------------------------
@@ -209,3 +289,20 @@ export async function waitForPayment(
 }
 
 export { WhopApiError };
+
+// ---------------------------------------------------------------------------
+// Saved-card reference helpers — the API returns flat fields in practice
+// (payment_method_id / member_id) and nested objects in the documented
+// schema; accept both.
+// ---------------------------------------------------------------------------
+
+export function whopSavedCardRef(
+  src: WhopPayment | WhopSetupIntent
+): { paymentMethodId: string | null; memberId: string | null } {
+  const p = src as WhopPayment;
+  const s = src as WhopSetupIntent;
+  return {
+    paymentMethodId: p.payment_method_id ?? s.payment_method?.id ?? null,
+    memberId: p.member_id ?? s.member?.id ?? null,
+  };
+}

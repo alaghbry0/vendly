@@ -19,7 +19,7 @@ export async function GET(req: Request) {
 
     const products = await db.product.findMany({
       where: { id: { in: productIds } },
-      select: { id: true, title: true, coverTheme: true },
+      select: { id: true, title: true, coverTheme: true, refundPolicy: true },
     });
     const productMap = new Map(products.map((p) => [p.id, p]));
 
@@ -29,11 +29,19 @@ export async function GET(req: Request) {
       customer: { id: i.user.id, name: i.user.name || i.user.email, email: i.user.email, avatarColor: i.user.avatarColor },
       product: (() => {
         const p = i.productId ? productMap.get(i.productId) : undefined;
-        return { id: p?.id || "", title: p?.title || "—", coverTheme: p?.coverTheme || "emerald" };
+        return {
+          id: p?.id || "",
+          title: p?.title || "—",
+          coverTheme: p?.coverTheme || "emerald",
+          // The product's default full-refund access policy — pre-selects
+          // the choice in the refund dialog.
+          refundPolicy: p?.refundPolicy === "KEEP_ACCESS" ? "KEEP_ACCESS" : "REVOKE",
+        };
       })(),
       planName: i.subscription?.plan?.name || null,
       description: i.description,
       amountCents: i.amountCents,
+      refundedCents: i.refundedCents ?? 0,
       discountCents: i.discountCents ?? 0,
       promoCode: i.promoCode ?? null,
       status: i.status,

@@ -7,10 +7,14 @@ import type { ClockDTO, DemoUser, SessionUser, View } from "@/lib/types";
 export interface AppParams {
   productId?: string;
   planId?: string;
+  bundleId?: string;
   query?: string;
   category?: string;
   portalTab?: string;
   creatorTab?: string;
+  /** Deep-link filter for the Webhooks tab ingestion panel (e.g. "unmatched"
+   *  from the overview health card's "Review unmatched" CTA). */
+  ingestionOutcome?: string;
 }
 
 interface AppState {
@@ -20,6 +24,9 @@ interface AppState {
   view: View;
   params: AppParams;
   clock: ClockDTO;
+  /** Real-time ms at which `clock.now` was captured — lets the UI tick the
+   *  (possibly simulated) platform clock in lock-step with real time. */
+  clockFetchedAt: number;
   nonce: number; // bump to trigger data refetches
 
   bootstrap: () => Promise<void>;
@@ -33,6 +40,10 @@ interface AppState {
 
 const STORAGE_KEY = "vendly:userId";
 
+function applyClock(set: (s: Partial<AppState>) => void, clock: ClockDTO) {
+  set({ clock, clockFetchedAt: Date.now() });
+}
+
 export const useAppStore = create<AppState>((set, get) => ({
   hydrated: false,
   user: null,
@@ -40,6 +51,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   view: "discover",
   params: {},
   clock: { simulated: false, now: new Date().toISOString(), label: "Live" },
+  clockFetchedAt: Date.now(),
   nonce: 0,
 
   bootstrap: async () => {
@@ -49,7 +61,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       const storedId = typeof window !== "undefined" ? localStorage.getItem(STORAGE_KEY) : null;
       const user = data.users.find((u) => u.id === storedId) || data.users.find((u) => u.email === "alex@demo.io") || data.users[0] || null;
       if (user && typeof window !== "undefined") localStorage.setItem(STORAGE_KEY, user.id);
-      set({ users: data.users, user, clock: data.clock, hydrated: true });
+      set({ users: data.users, user, hydrated: true });
+      applyClock(set, data.clock);
     } catch {
       set({ hydrated: true });
     }
@@ -77,7 +90,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     try {
       const res = await fetch("/api/bootstrap");
       const data = (await res.json()) as { users: DemoUser[]; clock: ClockDTO };
-      set({ users: data.users, clock: data.clock, hydrated: true });
+      set({ users: data.users, hydrated: true });
+      applyClock(set, data.clock);
     } catch {
       // keep the already-set session even if the refresh fails
     }
@@ -85,7 +99,7 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   setUser: (user) => set({ user }),
 
-  setClock: (clock) => set({ clock }),
+  setClock: (clock) => applyClock(set, clock),
 
   refresh: () => set({ nonce: get().nonce + 1 }),
 }));

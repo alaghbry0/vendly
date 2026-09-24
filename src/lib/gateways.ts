@@ -91,19 +91,24 @@ export async function chargeCryptoWallet(walletAddress: string | undefined, _amo
   return { ok: true, txnId: id, gateway: "CRYPTO" };
 }
 
-// Charges a stored payment method (used by the recurring billing engine).
+// Charges a stored payment method (used by the recurring billing engine for
+// the SIMULATED gateways). Whop renewals do NOT go through here — they are
+// real off-session charges against the Whop API (see billing.ts →
+// chargeSubscription / whop.ts → chargeWhopSavedMethod).
 export async function chargeStoredMethod(
   gateway: string,
   pm: { brand?: string | null; last4?: string | null; email?: string | null; walletAddress?: string | null },
   amountCents: number
 ): Promise<ChargeResult> {
   if (gateway === "WHOP") {
-    // Renewals for Whop checkouts run on the simulated engine (the initial
-    // charge was real). Card saved at checkout is on file at Whop.
-    if (pm.last4 === "0002") {
-      return { ok: false, error: "Card declined by issuer (Whop sandbox).", txnId: txnId("pay"), gateway: "WHOP" };
-    }
-    return { ok: true, txnId: txnId("pay"), gateway: "WHOP" };
+    // Defensive: the engine routes WHOP through the real Whop path before it
+    // ever reaches here. If it does, refuse loudly instead of faking success.
+    return {
+      ok: false,
+      error: "Whop renewals must run through the real Whop API — no saved card reference on file.",
+      txnId: txnId("pay"),
+      gateway: "WHOP",
+    };
   }
   if (gateway === "STRIPE") {
     // Cards ending 0002 always decline -> powers dunning demos

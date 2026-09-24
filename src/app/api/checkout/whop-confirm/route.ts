@@ -1,6 +1,12 @@
 import { db } from "@/lib/db";
 import { errorResponse, HttpError, requireUser } from "@/lib/session";
 import { provisionSubscription } from "@/lib/billing";
+import {
+  assertBundlePurchasable,
+  bundleReceiptItems,
+  loadBundleForCheckout,
+  provisionBundle,
+} from "@/lib/bundles";
 import { validatePromoForPlan } from "@/lib/promos";
 import { resolveReferral } from "@/lib/affiliates";
 import {
@@ -9,8 +15,13 @@ import {
   createWhopPayment,
   createWhopSetupIntent,
   waitForPayment,
+  waitForSetupIntent,
+  whopSavedCardRef,
   type WhopCardInfo,
+  type WhopPayment,
+  type WhopSetupIntent,
 } from "@/lib/whop";
+import { rateLimit } from "@/lib/rate-limit";
 
 // POST /api/checkout/whop-confirm — confirms a Whop Elements checkout.
 //
@@ -28,11 +39,118 @@ import {
 export async function POST(req: Request) {
   try {
     const user = await requireUser(req);
+    const limited = rateLimit({ req, bucket: "whop-confirm", userId: user.id, max: 10, windowMs: 60_000 });
+    if (limited) return limited;
     const body = await req.json().catch(() => ({}));
 
     const planId = String(body.planId || "");
     const confirmationToken = String(body.confirmationToken || "");
     if (!/^ctok_/.test(confirmationToken)) throw new HttpError(400, "Missing or invalid confirmation token.");
+
+    const cardMeta = (card: WhopCardInfo | null | undefined) => ({
+      brand: card?.brand ? card.brand.charAt(0).toUpperCase() + card.brand.slice(1) : "Card",
+      last4: card?.last4 ?? null,
+      expMonth: card?.exp_month ?? null,
+      expYear: card?.exp_year ?? null,
+    });
+
+    const returnUrl =
+      req.headers.get("origin")?.startsWith("http") && !req.headers.get("origin")!.includes("localhost")
+        ? `${req.headers.get("origin")}/`
+        : "https://vendly.example/checkout";
+
+    // Saved-card references (payt_/mber_) from a payment or setup intent —
+    // what the billing engine charges off-session on renewal.
+    const whopRefs = (src: WhopPayment | WhopSetupIntent) => {
+      const refs = whopSavedCardRef(src);
+      return { whopPaymentMethodId: refs.paymentMethodId, whopMemberId: refs.memberId };
+    };
+
+    // ------------------------------------------------------------------
+    // BUNDLE CHECKOUT — one real Whop payment for every product in the
+    // bundle. Body carries { bundleId, confirmationToken } instead of planId.
+    // ------------------------------------------------------------------
+    if (body.bundleId) {
+      const loaded = await loadBundleForCheckout(String(body.bundleId));
+      await assertBundlePurchasable(user.id, loaded); // 409 before charging
+      if (loaded.totalCents < 100) {
+        throw new HttpError(400, "Whop card payments must be at least $1.00 — pick another payment method for this bundle.");
+      }
+      let payment;
+      try {
+        payment = await createWhopPayment({
+          confirmationToken,
+          email: user.email,
+          plan: {
+            productTitle: loaded.bundle.title,
+            productSlug: `bundle-${loaded.bundle.slug}`,
+            planName: `${loaded.items.length}-product bundle`,
+            amountDollars: loaded.totalCents / 100,
+            currency: "usd",
+          },
+          returnUrl,
+          metadata: { bundleId: loaded.bundle.id, userId: user.id },
+        });
+      } catch (e) {
+        if (e instanceof WhopApiError) throw new HttpError(e.status >= 500 ? 502 : 402, e.message);
+        throw e;
+      }
+
+      const outcome = await waitForPayment(payment.id);
+      if (outcome.kind === "failed") throw new HttpError(402, outcome.message);
+
+      if (outcome.kind === "pending") {
+        return Response.json(
+          { status: "PENDING_ACTION", kind: "payment", bundle: true, whopRef: payment.id, clientSecret: outcome.clientSecret },
+          { status: 202 }
+        );
+      }
+
+      const card = cardMeta(outcome.payment.payment_instrument?.card);
+      const pm = await db.paymentMethod.create({
+        data: {
+          userId: user.id,
+          type: "CARD",
+          gateway: "WHOP",
+          brand: card.brand,
+          last4: card.last4,
+          expMonth: card.expMonth,
+          expYear: card.expYear,
+          // Saved-card references for REAL off-session renewals:
+          // the element mounts with setupFutureUsage "off_session", so the
+          // tokenized method (payt_…) + member (mber_…) come back on the
+          // payment and are what future charges use.
+          ...whopRefs(outcome.payment),
+        },
+      });
+      const { results } = await provisionBundle({
+        userId: user.id,
+        loaded,
+        gateway: "WHOP",
+        paymentMethodId: pm.id,
+        txnId: outcome.payment.id,
+        whopRef: outcome.payment.id,
+      });
+      return Response.json(
+        {
+          status: "COMPLETED",
+          bundle: { id: loaded.bundle.id, title: loaded.bundle.title, discountPct: loaded.bundle.discountPct },
+          subtotalCents: loaded.subtotalCents,
+          discountCents: loaded.discountCents,
+          totalCents: loaded.totalCents,
+          items: bundleReceiptItems(loaded, results),
+          whopRef: outcome.payment.id,
+          whop: {
+            paymentId: outcome.payment.id,
+            amount: outcome.payment.total?.amount ?? (loaded.totalCents / 100).toFixed(2),
+            currency: (outcome.payment.total?.currency || "usd").toUpperCase(),
+            card: `${card.brand} •••• ${card.last4 ?? "----"}`,
+          },
+        },
+        { status: 201 }
+      );
+    }
+
     const plan = await db.plan.findUnique({ where: { id: planId }, include: { product: true } });
     if (!plan || !plan.active) throw new HttpError(404, "Plan not found.");
     if (plan.product.status !== "ACTIVE") throw new HttpError(400, "This product is not accepting new members.");
@@ -74,27 +192,20 @@ export async function POST(req: Request) {
       }
     }
 
-    const cardMeta = (card: WhopCardInfo | null | undefined) => ({
-      brand: card?.brand ? card.brand.charAt(0).toUpperCase() + card.brand.slice(1) : "Card",
-      last4: card?.last4 ?? null,
-      expMonth: card?.exp_month ?? null,
-      expYear: card?.exp_year ?? null,
-    });
-
-    const returnUrl =
-      req.headers.get("origin")?.startsWith("http") && !req.headers.get("origin")!.includes("localhost")
-        ? `${req.headers.get("origin")}/`
-        : "https://vendly.example/checkout";
-
     // ------------------------------------------------------------------
     // TRIAL — save + validate the card via a Whop setup intent, no charge.
     // ------------------------------------------------------------------
     if (startTrial) {
       if (existingSub) throw new HttpError(409, "You already have a subscription to this product — manage it from your portal.");
-      const setup = await createWhopSetupIntent({
+      const created = await createWhopSetupIntent({
         confirmationToken,
         metadata: { planId: plan.id, userId: user.id, trial: "1" },
       });
+      // Sandbox setup intents settle in a couple of seconds — wait briefly
+      // server-side so the common case completes synchronously (mirrors the
+      // payment path's waitForPayment). "processing" past the deadline falls
+      // back to client-side polling via whop-status.
+      const setup = await waitForSetupIntent(created.id);
       if (setup.status === "succeeded") {
         const card = cardMeta(setup.payment_method?.card);
         const pm = await db.paymentMethod.create({
@@ -106,6 +217,9 @@ export async function POST(req: Request) {
             last4: card.last4,
             expMonth: card.expMonth,
             expYear: card.expYear,
+            // Setup intents store the card for later — keep the payt_/mber_
+            // references so the trial conversion charges the REAL card.
+            ...whopRefs(setup),
           },
         });
         const result = await provisionSubscription({
@@ -202,6 +316,8 @@ export async function POST(req: Request) {
         last4: card.last4,
         expMonth: card.expMonth,
         expYear: card.expYear,
+        // Saved-card references for REAL off-session renewals.
+        ...whopRefs(outcome.payment),
       },
     });
     const result = await provisionSubscription({

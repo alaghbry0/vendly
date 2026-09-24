@@ -41,6 +41,8 @@ model User {
   questions        Question[]
   answers          Answer[]
   questionVotes    QuestionVote[]
+  bundles          Bundle[]
+  bundlePurchases  BundlePurchase[]
 }
 
 // ============ Catalog ============
@@ -62,6 +64,10 @@ model Product {
   reviewCount  Int      @default(0)
   discordRoleName String?
   telegramChannel String?
+  // Default access policy for FULL refunds issued on this product's invoices:
+  // REVOKE       — cancel the membership and revoke roles/licenses immediately
+  // KEEP_ACCESS  — goodwill policy: buyer keeps access until currentPeriodEnd
+  refundPolicy String   @default("REVOKE") // REVOKE | KEEP_ACCESS
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
@@ -76,6 +82,52 @@ model Product {
   affiliateProgram AffiliateProgram?
   giveaways      Giveaway[]
   questions     Question[]
+  bundleItems   BundleItem[]
+}
+
+// ============ Bundles ============
+model Bundle {
+  id          String   @id @default(cuid())
+  creatorId   String
+  creator     User     @relation(fields: [creatorId], references: [id])
+  slug        String   @unique
+  title       String
+  description String?
+  discountPct Int      // 5-50 percent off each included plan
+  coverTheme  String   @default("emerald")
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  items     BundleItem[]
+  purchases BundlePurchase[]
+}
+
+model BundleItem {
+  id        String  @id @default(cuid())
+  bundleId  String
+  bundle    Bundle  @relation(fields: [bundleId], references: [id], onDelete: Cascade)
+  productId String
+  product   Product @relation(fields: [productId], references: [id])
+  planId    String  // the designated plan of this product included in the bundle
+  plan      Plan    @relation(fields: [planId], references: [id])
+  sortOrder Int     @default(0)
+
+  @@unique([bundleId, productId])
+}
+
+model BundlePurchase {
+  id            String   @id @default(cuid())
+  bundleId      String
+  bundle        Bundle   @relation(fields: [bundleId], references: [id])
+  userId        String
+  user          User     @relation(fields: [userId], references: [id])
+  subtotalCents Int
+  discountCents Int
+  totalCents    Int
+  gateway       String   // STRIPE | PAYPAL | WHOP
+  whopRef       String?  @unique // Whop payment id (pay_…) — idempotency key for whop bundle checkouts
+  createdAt     DateTime @default(now())
 }
 
 model Plan {
@@ -95,6 +147,7 @@ model Plan {
   createdAt   DateTime @default(now())
 
   subscriptions Subscription[]
+  bundleItems  BundleItem[]
 }
 
 // ============ Billing ============
@@ -116,9 +169,23 @@ model Subscription {
   canceledAt        DateTime?
   trialEndsAt       DateTime?
   dunningAttempts    Int       @default(0)
+  // A Whop off-session charge (pay_…) that was created but had not settled
+  // when the billing run ended (slow processing / 3DS). The next run checks
+  // this payment FIRST instead of creating another charge — double-charge
+  // protection for real renewals. The ref is parked on the row IMMEDIATELY
+  // after the charge is created (before settlement polling), so a crash
+  // between “charge created” and “charge settled” can never double-charge.
+  pendingWhopRef     String?
+  // Platform-clock moment the ref above was parked. A charge stuck in
+  // requires_action/processing for > 3 days is resolved as failed (buyer
+  // must update their card) instead of deferring the renewal forever.
+  pendingWhopRefAt   DateTime?
   promoCodeId        String?
   promoCyclesUsed    Int       @default(0) // how many invoices the promo discount has been applied to
   refLinkId          String?   // affiliate link that referred this subscription (attribution)
+  bundleId           String?   // bundle origin — renewals charge the discounted price persistently (snapshot, no relation)
+  bundleTitle        String?
+  bundleDiscountPct  Int?
   createdAt           DateTime  @default(now())
   updatedAt           DateTime  @updatedAt
 
@@ -139,6 +206,12 @@ model PaymentMethod {
   email         String?
   walletAddress String?
   chain         String?
+  // Whop saved-card references (Whop Elements checkouts): the tokenized
+  // payment method (payt_…) and the Whop member (mber_…) it belongs to.
+  // Both are required to charge the card off-session (renewals/trial
+  // conversion) through the real Whop API.
+  whopPaymentMethodId String?
+  whopMemberId        String?
   isDefault     Boolean  @default(false)
   createdAt     DateTime @default(now())
 
@@ -160,6 +233,7 @@ model Invoice {
   gateway        String?
   discountCents  Int       @default(0) // promo discount applied to this invoice
   promoCode      String?   // the code applied, for display
+  refundedCents  Int       @default(0) // cumulative refunded amount (partial refunds)
   periodStart    DateTime?
   periodEnd      DateTime?
   paidAt         DateTime?
@@ -277,6 +351,11 @@ model Review {
 model SystemClock {
   id          String    @id @default("main")
   simulatedNow DateTime?
+  // Real timestamp at which `simulatedNow` was captured. The platform clock
+  // keeps ticking in lock-step with real time from that instant:
+  //   now = simulatedNow + (realNow - simulatedSetAt)
+  // so a +30d jump stays exactly 30d ahead instead of freezing.
+  simulatedSetAt DateTime?
   label       String    @default("Live")
   updatedAt   DateTime  @updatedAt
 }
@@ -472,6 +551,66 @@ model QuestionVote {
   @@unique([questionId, userId])
 }
 
+// ============ System integrity primitives ============
+
+// Immutable audit trail for money-moving and lifecycle events — every charge,
+// renewal, decline, refund, cancel and webhook reconciliation lands here with
+// the platform clock timestamp, the actor and the amounts involved. The
+// creator studio surfaces this as a read-only "Audit log" feed.
+model AuditLog {
+  id             String   @id @default(cuid())
+  at             DateTime // platform clock (getNow()), not wall time
+  actorId        String   @default("system") // user id | "system" | "worker" | "whop"
+  action         String // charge.succeeded | charge.failed | refund.created | subscription.canceled | trial.converted | comp.renewal | webhook.reconciled | rate.limited | …
+  gateway        String?
+  amountCents    Int      @default(0)
+  invoiceId      String?
+  subscriptionId String?
+  whopRef        String?  // pay_… when the event ran through Whop
+  detail         String   @default("{}") // JSON: error messages, reasons, actors…
+  createdAt      DateTime @default(now())
+
+  @@index([at])
+  @@index([action])
+}
+
+// Whop webhook ingestion dedupe — every accepted webhook event id is recorded
+// exactly once (unique constraint); replays are acknowledged but skipped.
+// `outcome` tracks what reconciliation did with the event so the creator
+// studio can surface it (received → reconciled | noop | unmatched | no-rule |
+// | error) and `outcomeDetail` carries a human note; unmatched/error rows can
+// be re-reconciled manually once the missing invoice has landed.
+model WhopEvent {
+  id            String   @id @default(cuid())
+  eventId       String   @unique // Whop's event id (evt_…)
+  type          String // payment.succeeded | payment.failed | …
+  at            DateTime // platform clock when ingested
+  payload       String   @default("{}")
+  processed     Boolean  @default(true)
+  outcome       String   @default("received") // received | reconciled | noop | unmatched | no-rule | error
+  outcomeDetail String   @default("")
+  createdAt     DateTime @default(now())
+}
+
+// Monotonic counters — minted with a single atomic UPDATE (SQLite serializes
+// writers), so concurrent checkouts and billing-engine runs can never mint
+// the same value. Currently used for invoice numbers (id: "invoice").
+model Counter {
+  id    String @id
+  value Int    @default(0)
+}
+
+// Advisory DB locks — cross-process mutual exclusion for critical sections
+// that must never overlap (the billing engine run, per-user checkout
+// provisioning). Acquire = atomic UPDATE with a staleness cutoff; a lock held
+// past its TTL is considered abandoned (crashed holder) and can be taken over.
+model AdvisoryLock {
+  name      String    @id
+  lockedAt  DateTime?
+  owner     String    @default("")
+  updatedAt DateTime  @updatedAt
+}
+
 // Durable history of recurring-worker billing runs. The worker mini-service
 // ticks on a schedule and fires POST /api/billing/tick, which runs the billing
 // engine and records a row here. The time machine also records its runs.
@@ -479,6 +618,11 @@ model WorkerRun {
   id               String   @id @default(cuid())
   source           String   @default("WORKER") // WORKER | MANUAL | TIME_MACHINE
   startedAt        DateTime @default(now())
+  // Real wall-clock moment the row was written. `startedAt` follows the
+  // (possibly simulated) platform clock, so ordering/trimming by it breaks
+  // after a clock reset — future-dated runs would monopolize the history and
+  // evict fresh live runs. Ordering and retention use THIS column instead.
+  recordedAt       DateTime @default(now())
   durationMs       Int      @default(0)
   renewals         Int      @default(0)
   renewalsFailed   Int      @default(0)

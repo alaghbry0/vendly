@@ -1,4 +1,5 @@
 import { db } from "@/lib/db";
+import { getNow } from "@/lib/clock";
 import { errorResponse, getSessionUser, HttpError, requireUser } from "@/lib/session";
 import { notify } from "@/lib/notifications";
 import { QUESTION_INCLUDE, serializeQuestion } from "@/lib/serialize";
@@ -48,7 +49,8 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     }
 
     const question = await db.question.create({
-      data: { productId: id, authorId: user.id, body: text },
+      // Platform-clock stamp for consistent relative times in simulated time.
+      data: { productId: id, authorId: user.id, body: text, createdAt: await getNow() },
       include: QUESTION_INCLUDE,
     });
 
