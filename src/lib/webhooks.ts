@@ -1,10 +1,12 @@
 import { db } from "@/lib/db";
 import { signPayload } from "@/lib/licenses";
+import { getNow } from "@/lib/clock";
 
 // Event-driven access management: every meaningful subscription event is
 // fanned out to the creator's webhook endpoints (Discord bot, Telegram bot,
 // generic HTTP). Delivery is simulated: endpoints whose URL contains "fail"
 // or "500" return a 500 to demonstrate retries/failures.
+// Timestamps use the platform clock so simulated time stays consistent.
 
 export interface WebhookPayload {
   id: string;
@@ -22,10 +24,11 @@ export async function dispatchEvent(
     where: { creatorId, isActive: true },
   });
 
+  const now = await getNow();
   const payload: WebhookPayload = {
     id: `evt_${Math.random().toString(36).slice(2, 12)}`,
     type: eventType,
-    created: new Date().toISOString(),
+    created: now.toISOString(),
     data,
   };
   const body = JSON.stringify(payload, null, 2);
@@ -55,7 +58,8 @@ export async function dispatchEvent(
         attempts: 1,
         responseCode,
         signature: signPayload(ep.secret, body),
-        deliveredAt: fails ? null : new Date(),
+        createdAt: now,
+        deliveredAt: fails ? null : now,
       },
     });
     dispatched++;
@@ -94,7 +98,7 @@ export async function grantAccess(
           provider,
           role,
           status: "SYNCED",
-          grantedAt: new Date(),
+          grantedAt: await getNow(),
         },
       });
     }
@@ -117,7 +121,7 @@ export async function revokeAccess(userId: string, productId: string): Promise<v
   for (const g of grants) {
     await db.accessGrant.update({
       where: { id: g.id },
-      data: { status: "REVOKED", revokedAt: new Date() },
+      data: { status: "REVOKED", revokedAt: await getNow() },
     });
   }
   if (grants.length > 0) {

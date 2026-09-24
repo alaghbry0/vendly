@@ -51,6 +51,18 @@ export interface WhopCheckoutResult {
   clientSecret?: string | null;
   kind?: "payment" | "setup";
   whop?: { paymentId: string; amount: string; currency: string; card: string } | null;
+  // Bundle checkouts (whop-confirm with bundleId) return the bundle receipt shape.
+  bundle?: boolean;
+  purchaseId?: string;
+  items?: { productTitle: string; planName: string; subscriptionId: string; invoiceId: string; licenseKeyId: string | null; amountCents: number; interval: string }[];
+}
+
+/** When set, the form charges a BUNDLE total instead of a plan (Task 3-b):
+ *  the confirm POST sends { bundleId, confirmationToken } and the 3DS poll
+ *  appends &bundleId=… — no trial, no promo, no planId. */
+export interface WhopBundleTarget {
+  id: string;
+  itemCount: number;
 }
 
 const COUNTRIES: { code: string; name: string }[] = [
@@ -81,17 +93,23 @@ export function WhopForm({
   trialDays,
   promoCode,
   refCode,
+  bundle,
+  payLabel,
   onComplete,
   onApiError,
 }: {
-  planId: string;
-  planName: string;
-  currency: string;
+  planId?: string;
+  planName?: string;
+  currency?: string;
   payAmountCents: number;
-  startTrial: boolean;
-  trialDays: number;
-  promoCode: string | null;
-  refCode: string | null;
+  startTrial?: boolean;
+  trialDays?: number;
+  promoCode?: string | null;
+  refCode?: string | null;
+  /** Charge this bundle instead of a plan (bundle checkouts never trial). */
+  bundle?: WhopBundleTarget;
+  /** Overrides the idle pay-button label (defaults to "Pay $X with card"). */
+  payLabel?: string;
   onComplete: (res: WhopCheckoutResult) => void;
   onApiError: (e: unknown) => void;
 }) {
@@ -169,6 +187,8 @@ export function WhopForm({
         trialDays={trialDays}
         promoCode={promoCode}
         refCode={refCode}
+        bundle={bundle}
+        payLabel={payLabel}
         onComplete={onComplete}
         onApiError={onApiError}
       />
@@ -181,13 +201,15 @@ export function WhopForm({
 // ---------------------------------------------------------------------------
 
 function PaymentsBoundary(props: {
-  planId: string;
-  currency: string;
+  planId?: string;
+  currency?: string;
   payAmountCents: number;
-  startTrial: boolean;
-  trialDays: number;
-  promoCode: string | null;
-  refCode: string | null;
+  startTrial?: boolean;
+  trialDays?: number;
+  promoCode?: string | null;
+  refCode?: string | null;
+  bundle?: WhopBundleTarget;
+  payLabel?: string;
   onComplete: (res: WhopCheckoutResult) => void;
   onApiError: (e: unknown) => void;
 }) {
@@ -252,41 +274,52 @@ function PaymentsBoundary(props: {
 
       setBusy("confirm");
       try {
-        const res = await api<WhopCheckoutResult>("/api/checkout/whop-confirm", {
-          json: {
-            planId: props.planId,
-            confirmationToken: ctok,
-            startTrial: props.startTrial,
-            promoCode: props.promoCode ?? undefined,
-            refCode: props.refCode ?? undefined,
-          },
-        });
+        const res = await api<WhopCheckoutResult>(
+          "/api/checkout/whop-confirm",
+          props.bundle
+            ? { json: { bundleId: props.bundle.id, confirmationToken: ctok } }
+            : {
+                json: {
+                  planId: props.planId,
+                  confirmationToken: ctok,
+                  startTrial: props.startTrial,
+                  promoCode: props.promoCode ?? undefined,
+                  refCode: props.refCode ?? undefined,
+                },
+              }
+        );
         if (res.status === "COMPLETED") {
           props.onComplete(res);
           return;
         }
-        if (res.status === "PENDING_ACTION" && res.clientSecret && whop) {
-          // 3DS / bank step — Whop drives the dialog, then we poll the result.
+        if (res.status === "PENDING_ACTION" && res.whopRef) {
+          // 3DS / bank step (clientSecret present) or a charge/setup that is
+          // still processing at Whop (no secret) — either way, Whop drives the
+          // dialog when possible, then we poll the backend for the outcome.
           setBusy("action");
-          setStatusNote("Confirming with your bank…");
-          try {
-            await whop.payments.handleNextAction({
-              clientSecret: res.clientSecret,
-              returnUrl: window.location.href,
-            });
-          } catch {
-            /* dialog dismissed — poll anyway, the payment may still settle */
+          setStatusNote(res.clientSecret ? "Confirming with your bank…" : "Confirming your card…");
+          if (res.clientSecret && whop) {
+            try {
+              await whop.payments.handleNextAction({
+                clientSecret: res.clientSecret,
+                returnUrl: window.location.href,
+              });
+            } catch {
+              /* dialog dismissed — poll anyway, the payment may still settle */
+            }
           }
           // Poll the backend until the payment settles (max ~40s).
-          const ref = res.whopRef || "";
+          const ref = res.whopRef;
           const deadline = Date.now() + 40_000;
           while (Date.now() < deadline) {
             await new Promise((r) => setTimeout(r, 2200));
             try {
               const poll = await api<WhopCheckoutResult>(
-                `/api/checkout/whop-status?ref=${encodeURIComponent(ref)}&planId=${props.planId}` +
-                  `${props.promoCode ? `&promoCode=${encodeURIComponent(props.promoCode)}` : ""}` +
-                  `${props.refCode ? `&refCode=${encodeURIComponent(props.refCode)}` : ""}`
+                props.bundle
+                  ? `/api/checkout/whop-status?ref=${encodeURIComponent(ref)}&bundleId=${props.bundle.id}`
+                  : `/api/checkout/whop-status?ref=${encodeURIComponent(ref)}&planId=${props.planId}` +
+                      `${props.promoCode ? `&promoCode=${encodeURIComponent(props.promoCode)}` : ""}` +
+                      `${props.refCode ? `&refCode=${encodeURIComponent(props.refCode)}` : ""}`
               );
               if (poll.status === "COMPLETED") {
                 if (mounted.current) props.onComplete(poll);
@@ -314,35 +347,75 @@ function PaymentsBoundary(props: {
   const accountId = process.env.NEXT_PUBLIC_WHOP_BUSINESS_ID || "biz_6Keq0VvsuY0pR6";
   const returnUrl = typeof window === "undefined" ? undefined : window.location.href;
   // The options are a discriminated union: setup mode saves the card without
-  // charging (trial), payment mode charges the inline amount.
-  const paymentsOptions = props.startTrial
+  // charging (trial), payment mode charges the inline amount. BOTH modes ask
+  // Whop to save the card for off_session use — that's what makes renewals
+  // REAL later (the billing engine charges the saved payt_ card via the Whop
+  // API). Bundles always charge the bundle total — no trial, no promo.
+  const trialMode = !props.bundle && props.startTrial;
+
+  // FIX (SETUP_CHARGE_CONFLICT): Whop's SDK merges update() options into the
+  // LIVE handle (hosted updateOptions does Object.assign), so toggling the
+  // trial switch payment → setup leaked the stale `amount` key into the setup
+  // mount and the controller rejected the whole charge state. Two defenses:
+  //   1. `key` on <Payments> — a mode flip recreates the handle from scratch
+  //      with pristine options instead of updating in place.
+  //   2. Explicit `plan/amount: undefined` in the setup options (the SDK's own
+  //      setup type declares them `?: undefined`) — this overwrites any value
+  //      that could still leak through an in-place update path.
+  const paymentsOptions = trialMode
     ? {
         accountId,
         mode: "setup" as const,
-        currency: props.currency.toLowerCase(),
+        currency: (props.currency || "usd").toLowerCase(),
+        plan: undefined,
+        amount: undefined,
         setupFutureUsage: "off_session" as const,
         returnUrl,
       }
     : {
         accountId,
         mode: "payment" as const,
-        currency: props.currency.toLowerCase(),
+        currency: (props.currency || "usd").toLowerCase(),
         amount: props.payAmountCents,
+        setupFutureUsage: "off_session" as const,
         returnUrl,
       };
 
+  // A mode flip remounts the card iframe — reset the local completeness
+  // trackers so the pay button can't fire on a stale "card complete" flag.
+  useEffect(() => {
+    setCardComplete(false);
+  }, [trialMode]);
+
+  // Live mount-mode chip — the trial toggle switches this element between a
+  // setup mount (card saved, nothing charged) and a payment mount (inline
+  // charge today). Surfacing the active mode here keeps the buyer oriented
+  // after a flip, because the secure card form reloads on the switch.
+  const modeChip = trialMode ? (
+    <span className="inline-flex items-center gap-1 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-px text-[10px] font-bold uppercase tracking-wide text-emerald-700 dark:text-emerald-400">
+      <ShieldCheck className="h-3 w-3" /> Setup · $0.00 today
+    </span>
+  ) : (
+    <span className="inline-flex items-center gap-1 rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-px text-[10px] font-bold uppercase tracking-wide text-amber-700 dark:text-amber-400">
+      <Zap className="h-3 w-3" /> Charge · ${(props.payAmountCents / 100).toFixed(2)} today
+    </span>
+  );
+
   return (
-    <Payments {...paymentsOptions}>
-      {/* Header — real payments badge */}
+    <Payments key={trialMode ? "setup" : "payment"} {...paymentsOptions}>
+      {/* Header — real payments badge + live mount-mode chip */}
       <div className="mb-4 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-emerald-500/25 bg-emerald-500/[0.06] px-3.5 py-2.5 dark:bg-emerald-500/10">
         <p className="flex items-center gap-2 text-xs font-semibold text-emerald-700 dark:text-emerald-400">
           <Zap className="h-3.5 w-3.5" />
-          Real card payment · Whop sandbox
+          Real card payment · Whop sandbox{props.bundle ? ` · ${props.bundle.itemCount}-product bundle` : ""}
         </p>
-        <p className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
-          <ShieldCheck className="h-3 w-3 text-emerald-600 dark:text-emerald-400" />
-          PCI-isolated fields by Whop
-        </p>
+        <div className="flex flex-wrap items-center gap-2">
+          {modeChip}
+          <p className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+            <ShieldCheck className="h-3 w-3 text-emerald-600 dark:text-emerald-400" />
+            PCI-isolated fields by Whop
+          </p>
+        </div>
       </div>
 
       <div className="space-y-4">
@@ -429,8 +502,10 @@ function PaymentsBoundary(props: {
         <WhopPayButton
           onPay={pay}
           payAmountCents={props.payAmountCents}
-          startTrial={props.startTrial}
+          startTrial={trialMode}
           trialDays={props.trialDays}
+          payLabel={props.payLabel}
+          bundleNote={!!props.bundle}
           disabled={!cardComplete || (!emailComplete && !email.includes("@"))}
           busy={busy}
           statusNote={statusNote}
@@ -494,14 +569,18 @@ function WhopPayButton({
   payAmountCents,
   startTrial,
   trialDays,
+  payLabel,
+  bundleNote,
   disabled,
   busy,
   statusNote,
 }: {
   onPay: (payments: ReturnType<typeof usePayments>, whop: ReturnType<typeof useWhop>) => void;
   payAmountCents: number;
-  startTrial: boolean;
-  trialDays: number;
+  startTrial?: boolean;
+  trialDays?: number;
+  payLabel?: string;
+  bundleNote?: boolean;
   disabled: boolean;
   busy: null | "token" | "confirm" | "action";
   statusNote: string | null;
@@ -527,13 +606,14 @@ function WhopPayButton({
         ) : (
           <>
             <Lock className="h-4 w-4" />
-            {startTrial ? `Start ${trialDays}-day free trial` : `Pay ${amount} with card`}
+            {startTrial && trialDays ? `Start ${trialDays}-day free trial` : payLabel || `Pay ${amount} with card`}
           </>
         )}
       </Button>
       <p className="mt-2.5 flex items-center justify-center gap-1.5 text-xs text-muted-foreground">
         <CreditCard className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
-        Charged via Whop Elements · {startTrial ? "card saved, nothing charged today" : "one-time charge for this period"}
+        Charged via Whop Elements ·{" "}
+        {startTrial ? "card saved, nothing charged today" : bundleNote ? "one charge for the whole bundle" : "one-time charge for this period"}
       </p>
     </div>
   );

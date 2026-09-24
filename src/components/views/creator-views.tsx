@@ -2,14 +2,15 @@
 
 // CREATOR ANALYTICS DASHBOARD — "Creator Studio".
 // Owned by Task 2-c. Rendered when store.view === "creator".
-// Internal tab system (synced from params.creatorTab): overview | products |
-// subscribers | orders | promos | affiliates | giveaways | questions | webhooks |
-// payouts | time (billing time machine). Promos + payouts tabs added by
-// Task 5-c; the affiliates tab + the product edit dialog with plans editor
-// by Task 8-b; the giveaways tab by Task 11-b; the Q&A inbox by Task 12-c.
+// Internal tab system (synced from params.creatorTab): overview | activity |
+// products | bundles | subscribers | orders | promos | affiliates | giveaways |
+// questions | webhooks | payouts | time (billing time machine). Promos +
+// payouts tabs added by Task 5-c; the affiliates tab + the product edit dialog
+// with plans editor by Task 8-b; the giveaways tab by Task 11-b; the Q&A inbox
+// by Task 12-c; the activity timeline by Task 3-c.
 
 import { useEffect, useMemo, useRef, useState, type ComponentProps, type FormEvent } from "react";
-import { AnimatePresence, motion, type Variants } from "framer-motion";
+import { AnimatePresence, motion, useReducedMotion, type Variants } from "framer-motion";
 import {
   Area,
   AreaChart,
@@ -29,13 +30,17 @@ import {
   YAxis,
 } from "recharts";
 import { useAppStore } from "@/lib/store";
-import { api } from "@/lib/api";
+import { api, ApiError } from "@/lib/api";
 import { WorkerPanel } from "@/components/views/worker-panel";
 import type {
+  ActivityDTO,
   AffiliateProgramDTO,
   AnalyticsDTO,
   AnswerDTO,
+  AuditEventDTO,
   BillingRunResult,
+  BundleDTO,
+  ClockDTO,
   CreatorQuestionDTO,
   GiveawayCreatorDTO,
   PayoutBalanceDTO,
@@ -48,10 +53,13 @@ import type {
   SessionUser,
   WebhookDeliveryDTO,
   WebhookEndpointDTO,
+  WhopIngestionEventDTO,
 } from "@/lib/types";
 import { CATEGORIES, COVER_THEMES, WEBHOOK_EVENTS } from "@/lib/types";
 import { COVER_THEMES as COVER_GRADIENTS, fmtCompact, fmtDate, fmtDateTime, fmtMoney } from "@/lib/format";
+import { usePlatformNowMs } from "@/lib/use-now";
 import {
+  CategoryIcon,
   CopyButton,
   EmptyState,
   GatewayBadge,
@@ -91,6 +99,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Progress } from "@/components/ui/progress";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import {
@@ -120,6 +129,7 @@ import {
   CalendarClock,
   CalendarRange,
   Check,
+  CheckCheck,
   ChevronDown,
   ChevronRight,
   ChevronUp,
@@ -129,9 +139,11 @@ import {
   CreditCard,
   Dices,
   DollarSign,
+  Download,
   Eye,
   EyeOff,
   FastForward,
+  FileJson,
   FlaskConical,
   Gift,
   Handshake,
@@ -155,20 +167,24 @@ import {
   Percent,
   Play,
   Plus,
+  RadioTower,
   Receipt,
   ReceiptText,
   RefreshCw,
   Repeat,
   Rocket,
   RotateCcw,
+  ScrollText,
   Search,
   Send,
+  Server,
   ShieldCheck,
   Sparkles,
   Star,
   Store,
   Tag,
   Terminal,
+  Ticket,
   Timer,
   Trash2,
   TrendingDown,
@@ -192,9 +208,12 @@ import {
 
 type CreatorTab =
   | "overview"
+  | "activity"
   | "products"
+  | "bundles"
   | "subscribers"
   | "orders"
+  | "audit"
   | "promos"
   | "affiliates"
   | "giveaways"
@@ -205,9 +224,12 @@ type CreatorTab =
 
 const CREATOR_TABS: { key: CreatorTab; label: string; icon: LucideIcon }[] = [
   { key: "overview", label: "Overview", icon: LayoutDashboard },
+  { key: "activity", label: "Activity", icon: Activity },
   { key: "products", label: "Products", icon: Package },
+  { key: "bundles", label: "Bundles", icon: Layers },
   { key: "subscribers", label: "Subscribers", icon: Users },
   { key: "orders", label: "Orders", icon: ReceiptText },
+  { key: "audit", label: "Audit", icon: ScrollText },
   { key: "promos", label: "Promos", icon: Tag },
   { key: "affiliates", label: "Affiliates", icon: Megaphone },
   { key: "giveaways", label: "Giveaways", icon: Gift },
@@ -390,7 +412,9 @@ function useCreatorFetch<T>(load: () => Promise<T>) {
 }
 
 function useSimNow(): string {
-  return useAppStore((s) => s.clock.now);
+  // Ticking platform clock (simulated offset advances with real time).
+  const nowMs = usePlatformNowMs();
+  return new Date(nowMs).toISOString();
 }
 
 // ============================================================================
@@ -640,9 +664,12 @@ export function CreatorViews() {
               transition={{ duration: 0.22, ease: "easeOut" }}
             >
               {tab === "overview" && <OverviewTab user={user} />}
+              {tab === "activity" && <ActivityTab />}
               {tab === "products" && <ProductsTab user={user} />}
+              {tab === "bundles" && <BundlesTab user={user} />}
               {tab === "subscribers" && <SubscribersTab />}
               {tab === "orders" && <OrdersTab />}
+              {tab === "audit" && <AuditTab />}
               {tab === "promos" && <PromosTab user={user} />}
               {tab === "affiliates" && <AffiliatesTab user={user} />}
               {tab === "giveaways" && <GiveawaysTab user={user} />}
@@ -719,6 +746,17 @@ function TableSkeleton({ rows = 6, label = "Loading" }: { rows?: number; label?:
 function OverviewTab({ user }: { user: SessionUser }) {
   const { data: analytics, error, loading } = useCreatorFetch(() =>
     api<{ analytics: AnalyticsDTO }>("/api/analytics").then((r) => r.analytics)
+  );
+  // Latest 5 timeline events for the compact "Recent activity" card.
+  const { data: recentActivities } = useCreatorFetch(() =>
+    api<{ activities: ActivityDTO[] }>("/api/creator/activity?limit=5").then((r) => r.activities)
+  );
+  // Whop → Vendly ingestion feed for the operations-health card (soft-fail:
+  // the overview must render even if the ingestion surface hiccups).
+  const { data: whopEvents } = useCreatorFetch(() =>
+    api<{ events: WhopIngestionEventDTO[] }>("/api/webhooks/whop/events")
+      .then((r) => r.events)
+      .catch(() => [] as WhopIngestionEventDTO[])
   );
   const [createOpen, setCreateOpen] = useState(false);
 
@@ -833,6 +871,12 @@ function OverviewTab({ user }: { user: SessionUser }) {
           />
         </motion.div>
       </motion.div>
+
+      {/* ---------- Billing engine health (operations strip) ---------- */}
+      <EngineHealthCard />
+
+      {/* ---------- Webhook ingestion health (operations strip) ---------- */}
+      <IngestionHealthCard events={whopEvents ?? []} />
 
       {/* ---------- Charts ---------- */}
       <div className="grid gap-4 sm:gap-5 xl:grid-cols-2">
@@ -1021,6 +1065,9 @@ function OverviewTab({ user }: { user: SessionUser }) {
       {/* ---------- Revenue forecast (full width) ---------- */}
       <ForecastPanel analytics={analytics} />
 
+      {/* ---------- Upcoming renewals (engine schedule) ---------- */}
+      <UpcomingRenewalsCard />
+
       {/* ---------- Top products + activity ---------- */}
       <div className="grid gap-4 sm:gap-5 lg:grid-cols-5">
         <Panel className="overflow-hidden lg:col-span-3">
@@ -1067,9 +1114,667 @@ function OverviewTab({ user }: { user: SessionUser }) {
           </table>
         </Panel>
 
-        <RecentActivity activity={analytics.recentActivity} />
+        <RecentActivityCard activities={recentActivities ?? []} />
       </div>
     </div>
+  );
+}
+
+// ------------------------------ Webhook ingestion health ------------------------------
+
+/** Outcome segments for the ingestion health bar (order matters visually). */
+const INGESTION_SEGMENTS = [
+  { key: "reconciled", outcomes: ["reconciled", "noop"], cls: "bg-emerald-500", label: "Reconciled" },
+  { key: "received", outcomes: ["received"], cls: "bg-teal-500", label: "Received" },
+  { key: "unmatched", outcomes: ["unmatched"], cls: "bg-amber-500", label: "Unmatched" },
+  { key: "error", outcomes: ["error"], cls: "bg-red-500", label: "Errors" },
+  { key: "no-rule", outcomes: ["no-rule"], cls: "bg-zinc-400 dark:bg-zinc-600", label: "Recorded" },
+] as const;
+
+/** Compact operations strip for the Overview tab: surfaces the Whop → Vendly
+ *  ingestion feed health (reconciliation outcomes) with a direct path to the
+ *  manual review workflow. Attention state (unmatched/errors) is impossible to
+ *  miss — amber border, pulsing dot and a primary CTA. */
+function IngestionHealthCard({ events }: { events: WhopIngestionEventDTO[] }) {
+  const navigate = useAppStore((s) => s.navigate);
+  const nowMs = usePlatformNowMs(60_000);
+  const nowIso = useMemo(() => new Date(nowMs).toISOString(), [nowMs]);
+
+  const total = events.length;
+  const byOutcome = (o: string) => events.filter((e) => e.outcome === o).length;
+  const settled = byOutcome("reconciled") + byOutcome("noop");
+  const unmatched = byOutcome("unmatched");
+  const errors = byOutcome("error");
+  const noRule = byOutcome("no-rule");
+  const received = byOutcome("received");
+  const attention = total > 0 && (unmatched > 0 || errors > 0);
+  const idle = total === 0;
+  // Feed comes newest-first from the API.
+  const lastAt = events[0]?.at ?? null;
+
+  return (
+    <motion.div variants={fadeUp} initial="hidden" animate="show">
+      <Panel
+        className={cn(
+          "overflow-hidden transition-colors",
+          attention && "border-amber-500/45 shadow-[0_1px_14px_-4px_rgb(245_158_11/0.25)]"
+        )}
+        role="region"
+        aria-label="Webhook ingestion health"
+      >
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-3 px-4 py-3.5 sm:px-5">
+          {/* Identity block */}
+          <div className="flex min-w-0 flex-1 items-center gap-3.5">
+            <span
+              className={cn(
+                "relative flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border",
+                attention
+                  ? "border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400"
+                  : "border-teal-500/30 bg-teal-500/10 text-teal-600 dark:text-teal-400"
+              )}
+            >
+              <RadioTower className="h-5 w-5" />
+              {attention && (
+                <span className="absolute -right-1 -top-1 flex h-3 w-3" aria-hidden="true">
+                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-amber-400 opacity-60" />
+                  <span className="relative inline-flex h-3 w-3 rounded-full border-2 border-card bg-amber-500" />
+                </span>
+              )}
+            </span>
+            <div className="min-w-0">
+              <h2 className="flex items-center gap-2 text-sm font-bold">
+                Webhook ingestion health
+                {idle ? (
+                  <span className="rounded-full border bg-muted px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                    idle
+                  </span>
+                ) : attention ? (
+                  <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-700 dark:text-amber-400">
+                    needs review
+                  </span>
+                ) : (
+                  <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-700 dark:text-emerald-400">
+                    all clear
+                  </span>
+                )}
+              </h2>
+              <p className="mt-0.5 truncate text-xs text-muted-foreground">
+                {idle
+                  ? "Whop → Vendly event feed — no events ingested yet"
+                  : `${total} event${total === 1 ? "" : "s"} · ${settled} auto-reconciled${
+                      lastAt ? ` · last ${relTime(lastAt, nowIso)}` : ""
+                    }`}
+              </p>
+            </div>
+          </div>
+
+          {/* Outcome chips */}
+          {!idle && (
+            <div className="flex flex-wrap items-center gap-1.5" aria-label="Ingestion outcome counts">
+              <span className="inline-flex items-center gap-1 rounded-full border border-emerald-500/25 bg-emerald-500/10 px-2.5 py-1 text-[11px] font-semibold tabular-nums text-emerald-700 dark:text-emerald-400">
+                <CheckCheck className="h-3 w-3" /> {settled}
+              </span>
+              {received > 0 && (
+                <span className="inline-flex items-center gap-1 rounded-full border border-teal-500/25 bg-teal-500/10 px-2.5 py-1 text-[11px] font-semibold tabular-nums text-teal-700 dark:text-teal-400">
+                  {received} pending
+                </span>
+              )}
+              {unmatched > 0 && (
+                <span className="inline-flex items-center gap-1 rounded-full border border-amber-500/30 bg-amber-500/10 px-2.5 py-1 text-[11px] font-semibold tabular-nums text-amber-700 dark:text-amber-400">
+                  <TriangleAlert className="h-3 w-3" /> {unmatched} unmatched
+                </span>
+              )}
+              {errors > 0 && (
+                <span className="inline-flex items-center gap-1 rounded-full border border-red-500/30 bg-red-500/10 px-2.5 py-1 text-[11px] font-semibold tabular-nums text-red-700 dark:text-red-400">
+                  {errors} error{errors === 1 ? "" : "s"}
+                </span>
+              )}
+              {noRule > 0 && (
+                <span className="inline-flex items-center gap-1 rounded-full border bg-muted px-2.5 py-1 text-[11px] font-semibold tabular-nums text-muted-foreground">
+                  {noRule} recorded
+                </span>
+              )}
+            </div>
+          )}
+
+          {/* CTA — deep-links straight into the pre-filtered ingestion list
+              when there's something to review (R22: chip → filtered list). */}
+          <Button
+            variant={attention ? "default" : "outline"}
+            size="sm"
+            className="h-8 gap-1.5 rounded-full px-3.5 text-xs font-semibold transition-transform hover:-translate-y-px"
+            onClick={() =>
+              navigate("creator", {
+                creatorTab: "webhooks",
+                ...(attention && unmatched > 0 ? { ingestionOutcome: "unmatched" } : {}),
+              })
+            }
+          >
+            {attention ? "Review unmatched" : idle ? "Set up ingestion" : "Open Webhooks"}
+            <ArrowRight className="h-3.5 w-3.5" />
+          </Button>
+        </div>
+
+        {/* Segmented outcome bar (proportional, tooltip per segment) */}
+        {!idle && total > 0 && (
+          <div
+            className="flex h-1.5 gap-px border-t bg-muted/70"
+            role="img"
+            aria-label={`Outcome breakdown: ${settled} reconciled, ${unmatched} unmatched, ${errors} errors, ${noRule} recorded`}
+          >
+            {INGESTION_SEGMENTS.map((seg) => {
+              const n = seg.outcomes.reduce((s, o) => s + byOutcome(o), 0);
+              if (n === 0) return null;
+              const pct = Math.max(2, Math.round((n / total) * 100));
+              return (
+                <div
+                  key={seg.key}
+                  className={cn("h-full transition-all duration-500", seg.cls)}
+                  style={{ width: `${pct}%` }}
+                  title={`${seg.label}: ${n}`}
+                />
+              );
+            })}
+          </div>
+        )}
+
+        {/* Attention explainer strip */}
+        {attention && (
+          <div className="border-t border-amber-500/25 bg-amber-500/[0.07] px-4 py-2.5 sm:px-5">
+            <p className="flex items-start gap-2 text-xs leading-relaxed text-amber-700 dark:text-amber-400">
+              <TriangleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              <span>
+                {unmatched > 0 && (
+                  <>
+                    <strong>
+                      {unmatched} payment{unmatched === 1 ? "" : "s"}
+                    </strong>{" "}
+                    without a matching local invoice
+                    {errors > 0 ? " and " : " — "}
+                  </>
+                )}
+                {errors > 0 && (
+                  <>
+                    <strong>
+                      {errors} reconciliation error{errors === 1 ? "" : "s"}
+                    </strong>{" "}
+                    — retryable from the Webhooks tab
+                  </>
+                )}
+                {unmatched > 0 && errors === 0 && "re-reconcile once the record lands, or review it manually."}
+              </span>
+            </p>
+          </div>
+        )}
+
+        {/* Idle explainer strip */}
+        {idle && (
+          <div className="border-t bg-muted/30 px-4 py-2.5 sm:px-5">
+            <p className="text-xs leading-relaxed text-muted-foreground">
+              Payments Whop delivers to{" "}
+              <span className="font-mono text-[11px] text-foreground/80">/api/webhooks/whop</span> are signature-verified
+              and reconciled against your invoices in real time — late settlements flip invoices to paid and dashboard
+              refunds are mirrored automatically.
+            </p>
+          </div>
+        )}
+      </Panel>
+    </motion.div>
+  );
+}
+
+// ------------------------------ Upcoming renewals ------------------------------
+
+interface RenewalLine {
+  productId: string;
+  productTitle: string;
+  coverTheme: string;
+  planName: string;
+  interval: string;
+  status: string;
+  count: number;
+  amountCents: number;
+}
+
+interface RenewalsData {
+  now: string;
+  days: number;
+  totalCents: number;
+  groups: { date: string; amountCents: number; items: RenewalLine[] }[];
+  overdue: { count: number; amountCents: number };
+}
+
+/** "YYYY-MM-DD" (UTC-derived platform day) → "Today" | "Tomorrow" | "Mon, Sep 30". */
+function renewalDayLabel(dateStr: string, nowMs: number): string {
+  const d = new Date(`${dateStr}T00:00:00Z`);
+  const today = new Date(nowMs);
+  const todayKey = today.toISOString().slice(0, 10);
+  const tomorrowKey = new Date(today.getTime() + 86400000).toISOString().slice(0, 10);
+  if (dateStr === todayKey) return "Today";
+  if (dateStr === tomorrowKey) return "Tomorrow";
+  return d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric", timeZone: "UTC" });
+}
+
+/** Upcoming-renewal schedule for the creator's products: what the billing
+ *  engine will charge in the next N days, grouped by platform-clock day, with
+ *  the dunning risk (PAST_DUE right now) surfaced alongside. */
+function UpcomingRenewalsCard() {
+  const navigate = useAppStore((s) => s.navigate);
+  const [days, setDays] = useState(14);
+  const [data, setData] = useState<RenewalsData | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const nowMs = usePlatformNowMs(60_000);
+
+  useEffect(() => {
+    let alive = true;
+    api<RenewalsData>(`/api/creator/renewals?days=${days}`)
+      .then((d) => {
+        if (!alive) return;
+        setData(d);
+        setError(null);
+      })
+      .catch((e) => {
+        if (alive) setError(e instanceof Error ? e.message : "Forecast unavailable.");
+      });
+    return () => {
+      alive = false;
+    };
+  }, [days]);
+
+  const groups = data?.groups ?? [];
+  const maxDayCents = groups.reduce((m, g) => Math.max(m, g.amountCents), 0);
+  const totalRenewals = groups.reduce((s, g) => s + g.items.reduce((x, i) => x + i.count, 0), 0);
+  const overdue = data?.overdue ?? { count: 0, amountCents: 0 };
+
+  return (
+    <motion.div variants={fadeUp} initial="hidden" animate="show">
+      <Panel className="overflow-hidden" role="region" aria-label="Upcoming renewals">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b p-5 pb-4">
+          <div className="min-w-0">
+            <h2 className="flex items-center gap-2 text-sm font-bold">
+              <CalendarClock className="h-4 w-4 text-primary" />
+              Upcoming renewals
+            </h2>
+            <p className="mt-0.5 text-xs text-muted-foreground">
+              {error ? (
+                <span className="text-red-600 dark:text-red-400">{error}</span>
+              ) : !data ? (
+                "Loading the engine's renewal schedule…"
+              ) : groups.length === 0 ? (
+                `No renewals scheduled in the next ${days} days`
+              ) : (
+                <>
+                  <strong className="text-foreground">{fmtMoney(data.totalCents)}</strong> expected from{" "}
+                  {totalRenewals} renewal{totalRenewals === 1 ? "" : "s"} · next {days} days
+                </>
+              )}
+            </p>
+          </div>
+          <div className="flex gap-1.5 rounded-full border bg-card p-1" role="group" aria-label="Forecast window">
+            {([7, 14, 30] as const).map((d) => (
+              <button
+                key={d}
+                onClick={() => setDays(d)}
+                aria-pressed={days === d}
+                className={cn(
+                  "h-7 rounded-full px-3 text-[11px] font-semibold transition-colors",
+                  days === d ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"
+                )}
+              >
+                {d}d
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Dunning risk strip — revenue overdue RIGHT NOW */}
+        {overdue.count > 0 && (
+          <div className="border-b border-red-500/25 bg-red-500/[0.06] px-5 py-2.5">
+            <p className="flex items-start gap-2 text-xs leading-relaxed text-red-700 dark:text-red-400">
+              <TriangleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              <span>
+                <strong>
+                  {overdue.count} payment{overdue.count === 1 ? "" : "s"} overdue
+                </strong>{" "}
+                ({fmtMoney(overdue.amountCents)}) — dunning is retrying automatically; access revokes after 3 failed
+                attempts.
+              </span>
+            </p>
+          </div>
+        )}
+
+        {groups.length === 0 ? (
+          <div className="px-5 py-7 text-center">
+            <p className="text-sm font-medium">Nothing due in the window</p>
+            <p className="mx-auto mt-1 max-w-sm text-xs leading-relaxed text-muted-foreground">
+              Renewals land here as members&apos; periods approach — the worker processes them automatically on the
+              platform clock.
+            </p>
+          </div>
+        ) : (
+          <ul className={cn("divide-y", SCROLL_THIN, "max-h-80 overflow-y-auto")} aria-label="Renewals by day">
+            {groups.map((g) => (
+              <li key={g.date} className="px-5 py-3.5">
+                <div className="flex items-baseline justify-between gap-3">
+                  <p className="text-xs font-bold">{renewalDayLabel(g.date, nowMs)}</p>
+                  <p className="text-xs font-semibold tabular-nums text-muted-foreground">{fmtMoney(g.amountCents)}</p>
+                </div>
+                {/* Proportional volume bar for the day */}
+                <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-muted" aria-hidden="true">
+                  <div
+                    className="h-full rounded-full bg-gradient-to-r from-primary/70 to-primary transition-all duration-500"
+                    style={{ width: `${maxDayCents > 0 ? Math.max(4, Math.round((g.amountCents / maxDayCents) * 100)) : 0}%` }}
+                  />
+                </div>
+                <ul className="mt-2 space-y-1.5">
+                  {g.items.map((it, i) => (
+                    <li key={i} className="flex min-w-0 flex-wrap items-center gap-x-2.5 gap-y-1 text-xs">
+                      <span className="flex min-w-0 items-center gap-2">
+                        <ProductCover
+                          theme={it.coverTheme}
+                          category="OTHER"
+                          title={it.productTitle}
+                          className="h-6 w-9 shrink-0 rounded-md"
+                          iconClassName="h-7 w-7"
+                        />
+                        <span className="max-w-44 truncate font-medium">{it.productTitle}</span>
+                      </span>
+                      <span className="truncate text-muted-foreground">
+                        {it.planName} · {it.interval === "year" ? "yr" : "mo"}
+                      </span>
+                      {it.status === "TRIALING" && (
+                        <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-1.5 py-px text-[10px] font-semibold text-amber-700 dark:text-amber-400">
+                          trial converts
+                        </span>
+                      )}
+                      <span className="ml-auto flex shrink-0 items-center gap-2.5">
+                        <span className="tabular-nums text-muted-foreground">×{it.count}</span>
+                        <span className="font-semibold tabular-nums">{fmtMoney(it.amountCents)}</span>
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </li>
+            ))}
+          </ul>
+        )}
+
+        <div className="flex flex-wrap items-center justify-between gap-2 border-t bg-muted/30 px-5 py-3">
+          <p className="text-[11px] leading-relaxed text-muted-foreground">
+            Expected charges on the platform clock — bundle discounts applied; recurring promos settle at renewal time.
+          </p>
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-7 gap-1.5 rounded-full px-3 text-[11px] font-semibold"
+            onClick={() => navigate("creator", { creatorTab: "subscribers" })}
+          >
+            View subscribers <ArrowRight className="h-3 w-3" />
+          </Button>
+        </div>
+      </Panel>
+    </motion.div>
+  );
+}
+
+// ------------------------------ Engine health ------------------------------
+
+/** Minimal worker-service status (fetched through the gateway, soft-fail). */
+interface WorkerStatusLite {
+  running: boolean;
+  tickMs: number;
+  nextTickAt: string | null;
+}
+
+/** Durable engine run row (GET /api/billing/tick). */
+interface TickRunLite {
+  id: string;
+  source: string;
+  startedAt: string;
+  durationMs: number;
+  renewals: number;
+  renewalsFailed: number;
+  canceled: number;
+  trialsConverted: number;
+  invoicesCreated: number;
+  events: string[];
+  error: string | null;
+}
+
+/**
+ * Billing-engine health strip for the Overview tab.
+ *
+ * Surfaces the recurring worker's LIVE state (running / paused / offline),
+ * the durability of recent engine runs (durable WorkerRun rows) and — most
+ * importantly — FAILURES: a misconfigured worker secret or a crashing engine
+ * shows up here in red instead of dying silently (the exact R22 incident:
+ * worker ticks 401'd for hours while the panel showed stale "ok" history).
+ */
+function EngineHealthCard() {
+  const navigate = useAppStore((s) => s.navigate);
+  const [worker, setWorker] = useState<WorkerStatusLite | null>(null);
+  const [offline, setOffline] = useState(false);
+  const [runs, setRuns] = useState<TickRunLite[]>([]);
+  const [nextDue, setNextDue] = useState<{ at: string; productTitle: string; planName: string } | null>(null);
+  const nowMs = usePlatformNowMs(10_000);
+  const nowIso = useMemo(() => new Date(nowMs).toISOString(), [nowMs]);
+
+  useEffect(() => {
+    let alive = true;
+    async function poll() {
+      // Worker liveness — plain fetch through the gateway (soft-fail).
+      try {
+        const res = await fetch(`/status?XTransformPort=3040`, { cache: "no-store" });
+        const s = (await res.json()) as WorkerStatusLite;
+        if (alive) {
+          setWorker(s);
+          setOffline(false);
+        }
+      } catch {
+        if (alive) setOffline(true);
+      }
+      // Durable run history (creator-scoped session).
+      try {
+        const d = await api<{ runs: TickRunLite[]; nextDue: { at: string; productTitle: string; planName: string } | null }>(
+          "/api/billing/tick"
+        );
+        if (alive) {
+          setRuns(d.runs);
+          setNextDue(d.nextDue);
+        }
+      } catch {
+        /* history is best-effort */
+      }
+    }
+    void poll();
+    const t = setInterval(() => void poll(), 10_000);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, []);
+
+  const lastRun = runs[0] ?? null; // newest first
+  const lastError = lastRun?.error ?? null;
+  const failing = !!lastError;
+  const paused = !offline && worker !== null && !worker.running;
+  const processed = runs.reduce((s, r) => s + r.renewals + r.trialsConverted, 0);
+  const failedCharges = runs.reduce((s, r) => s + r.renewalsFailed, 0);
+  const defers = runs.reduce((s, r) => s + r.events.filter((e) => /deferred|Skipped/i.test(e)).length, 0);
+
+  const state =
+    offline ? ("offline" as const)
+    : failing ? ("failing" as const)
+    : paused ? ("paused" as const)
+    : ("clean" as const);
+
+  const tone = {
+    offline: {
+      bubble: "border-red-500/30 bg-red-500/10 text-red-600 dark:text-red-400",
+      badge: "border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-400",
+      label: "offline",
+    },
+    failing: {
+      bubble: "border-red-500/30 bg-red-500/10 text-red-600 dark:text-red-400",
+      badge: "border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-400",
+      label: "failing",
+    },
+    paused: {
+      bubble: "border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400",
+      badge: "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-400",
+      label: "paused",
+    },
+    clean: {
+      bubble: "border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400",
+      badge: "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400",
+      label: "running",
+    },
+  }[state];
+
+  const summary =
+    state === "offline"
+      ? "Worker service unreachable — automatic renewals are NOT running."
+      : state === "failing"
+        ? `Last engine run failed ${lastRun ? relTime(lastRun.startedAt, nowIso) : ""} — renewals are not being processed.`
+        : state === "paused"
+          ? `Paused · last run ${lastRun ? relTime(lastRun.startedAt, nowIso) : "—"}`
+          : `Ticking every ${Math.round((worker?.tickMs ?? 60000) / 1000)}s · last run ${
+              lastRun ? relTime(lastRun.startedAt, nowIso) : "—"
+            }${runs.length > 0 ? ` · ${processed} processed in last ${runs.length} runs` : ""}`;
+
+  return (
+    <motion.div variants={fadeUp} initial="hidden" animate="show">
+      <Panel
+        className={cn(
+          "overflow-hidden transition-colors",
+          (state === "failing" || state === "offline") &&
+            "border-red-500/45 shadow-[0_1px_14px_-4px_rgb(239_68_68/0.25)]",
+          state === "paused" && "border-amber-500/40"
+        )}
+        role="region"
+        aria-label="Billing engine health"
+      >
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-3 px-4 py-3.5 sm:px-5">
+          {/* Identity block */}
+          <div className="flex min-w-0 flex-1 items-center gap-3.5">
+            <span
+              className={cn(
+                "relative flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border",
+                tone.bubble
+              )}
+            >
+              <Server className="h-5 w-5" />
+              {(state === "failing" || state === "offline") && (
+                <span className="absolute -right-1 -top-1 flex h-3 w-3" aria-hidden="true">
+                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-red-400 opacity-60" />
+                  <span className="relative inline-flex h-3 w-3 rounded-full border-2 border-card bg-red-500" />
+                </span>
+              )}
+              {state === "clean" && (
+                <span className="absolute -right-1 -top-1 flex h-3 w-3" aria-hidden="true">
+                  <span className="relative inline-flex h-3 w-3 rounded-full border-2 border-card bg-emerald-500" />
+                </span>
+              )}
+            </span>
+            <div className="min-w-0">
+              <h2 className="flex items-center gap-2 text-sm font-bold">
+                Billing engine health
+                <span className={cn("rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide", tone.badge)}>
+                  {tone.label}
+                </span>
+              </h2>
+              <p className={cn("mt-0.5 truncate text-xs", (state === "failing" || state === "offline") ? "font-medium text-red-600 dark:text-red-400" : "text-muted-foreground")}>
+                {summary}
+              </p>
+            </div>
+          </div>
+
+          {/* Run chips */}
+          {runs.length > 0 && (
+            <div className="flex flex-wrap items-center gap-1.5" aria-label="Engine run counts">
+              <span className="inline-flex items-center gap-1 rounded-full border border-emerald-500/25 bg-emerald-500/10 px-2.5 py-1 text-[11px] font-semibold tabular-nums text-emerald-700 dark:text-emerald-400">
+                <RefreshCw className="h-3 w-3" /> {processed} processed
+              </span>
+              {failedCharges > 0 && (
+                <span className="inline-flex items-center gap-1 rounded-full border border-red-500/30 bg-red-500/10 px-2.5 py-1 text-[11px] font-semibold tabular-nums text-red-700 dark:text-red-400">
+                  <Ban className="h-3 w-3" /> {failedCharges} failed
+                </span>
+              )}
+              {defers > 0 && (
+                <span className="inline-flex items-center gap-1 rounded-full border border-amber-500/30 bg-amber-500/10 px-2.5 py-1 text-[11px] font-semibold tabular-nums text-amber-700 dark:text-amber-400">
+                  <TriangleAlert className="h-3 w-3" /> {defers} deferred
+                </span>
+              )}
+            </div>
+          )}
+
+          {/* CTA */}
+          <Button
+            variant={state === "failing" || state === "offline" ? "default" : "outline"}
+            size="sm"
+            className="h-8 gap-1.5 rounded-full px-3.5 text-xs font-semibold transition-transform hover:-translate-y-px"
+            onClick={() => navigate("creator", { creatorTab: "time" })}
+          >
+            {state === "failing" || state === "offline" ? "Review failure" : state === "paused" ? "Resume worker" : "Open worker"}
+            <ArrowRight className="h-3.5 w-3.5" />
+          </Button>
+        </div>
+
+        {/* Failure explainer strip — the exact error from the durable run row */}
+        {state === "failing" && lastError && (
+          <div className="border-t border-red-500/25 bg-red-500/[0.06] px-4 py-2.5 sm:px-5">
+            <p className="flex items-start gap-2 text-xs leading-relaxed text-red-700 dark:text-red-400">
+              <TriangleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              <span className="min-w-0 break-words">
+                <strong>Last run:</strong> {lastError}
+              </span>
+            </p>
+          </div>
+        )}
+
+        {/* Offline explainer strip */}
+        {state === "offline" && (
+          <div className="border-t border-red-500/25 bg-red-500/[0.06] px-4 py-2.5 sm:px-5">
+            <p className="flex items-start gap-2 text-xs leading-relaxed text-red-700 dark:text-red-400">
+              <TriangleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              <span>
+                The worker mini-service (port 3040) is not answering — start it with{" "}
+                <span className="font-mono text-[11px]">bun run dev</span> in{" "}
+                <span className="font-mono text-[11px]">mini-services/worker</span>. Renewals, dunning and settlements
+                only run while it ticks.
+              </span>
+            </p>
+          </div>
+        )}
+
+        {/* Paused explainer strip */}
+        {state === "paused" && (
+          <div className="border-t border-amber-500/25 bg-amber-500/[0.07] px-4 py-2.5 sm:px-5">
+            <p className="flex items-start gap-2 text-xs leading-relaxed text-amber-700 dark:text-amber-400">
+              <Pause className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              <span>
+                The worker is paused — renewals and dunning are on hold. Resume it from the Time machine tab to put
+                billing back on schedule.
+              </span>
+            </p>
+          </div>
+        )}
+
+        {/* Clean strip — next scheduled renewal (platform clock) */}
+        {state === "clean" && nextDue && (
+          <div className="border-t bg-muted/30 px-4 py-2.5 sm:px-5">
+            <p className="flex items-center gap-2 text-xs leading-relaxed text-muted-foreground">
+              <Activity className="h-3.5 w-3.5 shrink-0 text-teal-600 dark:text-teal-400" />
+              <span className="min-w-0 truncate">
+                Next scheduled renewal: <strong className="text-foreground">{nextDue.productTitle}</strong> ·{" "}
+                {nextDue.planName} ·{" "}
+                {new Date(nextDue.at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
+              </span>
+            </p>
+          </div>
+        )}
+      </Panel>
+    </motion.div>
   );
 }
 
@@ -1272,54 +1977,334 @@ function ForecastPanel({ analytics }: { analytics: AnalyticsDTO }) {
   );
 }
 
-function RecentActivity({ activity }: { activity: AnalyticsDTO["recentActivity"] }) {
-  const now = useSimNow();
+/** Compact overview card — the latest 5 timeline events, no bodies. */
+function RecentActivityCard({ activities }: { activities: ActivityDTO[] }) {
+  const navigate = useAppStore((s) => s.navigate);
+  const nowMs = useNowMs();
+  const now = useMemo(() => new Date(nowMs).toISOString(), [nowMs]);
+
   return (
     <Panel className="flex flex-col overflow-hidden lg:col-span-2">
-      <div className="border-b p-5 pb-4">
-        <h2 className="text-sm font-bold">Recent activity</h2>
-        <p className="mt-0.5 text-xs text-muted-foreground">Latest payments and subscriptions</p>
+      <div className="flex items-start justify-between gap-3 border-b p-5 pb-4">
+        <div>
+          <h2 className="text-sm font-bold">Recent activity</h2>
+          <p className="mt-0.5 text-xs text-muted-foreground">Sales, reviews, Q&amp;A, giveaways and payouts</p>
+        </div>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-8 shrink-0 gap-1 px-2.5 text-xs text-muted-foreground hover:text-foreground"
+          onClick={() => navigate("creator", { creatorTab: "activity" })}
+        >
+          View all <ArrowRight className="h-3.5 w-3.5" />
+        </Button>
       </div>
-      {activity.length === 0 ? (
+      {activities.length === 0 ? (
         <EmptyState
           icon={Activity}
           title="No activity yet"
-          description="Payments and new subscriptions will appear here."
+          description="New subscribers, reviews, questions and payouts will appear here."
           className="m-4 flex-1 border-0"
         />
       ) : (
-        <ul className={cn("max-h-80 divide-y overflow-y-auto", SCROLL_THIN)} aria-label="Recent activity">
-          {activity.map((a) => {
-            const meta = activityIcon(a.type);
-            const Icon = meta.icon;
-            return (
-              <li key={a.id} className="flex items-start gap-3 px-5 py-3">
-                <span className={cn("mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg", meta.cls)}>
-                  <Icon className="h-4 w-4" />
-                </span>
-                <div className="min-w-0 flex-1">
-                  <p className="text-[13px] leading-snug">{a.message}</p>
-                  <p className="mt-0.5 text-[11px] text-muted-foreground">{relTime(a.at, now)}</p>
-                </div>
-                {a.amountCents != null && (
-                  <span className="shrink-0 rounded-full bg-muted px-2 py-0.5 text-[11px] font-semibold tabular-nums text-muted-foreground">
-                    {fmtMoney(a.amountCents)}
-                  </span>
-                )}
-              </li>
-            );
-          })}
+        <ul className={cn("max-h-96 flex-1 divide-y overflow-y-auto", SCROLL_THIN)} aria-label="Recent activity">
+          {activities.map((a) => (
+            <li key={a.id} className="flex items-center gap-3 px-5 py-3">
+              <ActivityBubble type={a.type} size="sm" />
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-[13px] font-medium leading-snug">{a.title}</p>
+                <p className="mt-0.5 text-[11px] text-muted-foreground">{relTime(a.at, now)}</p>
+              </div>
+            </li>
+          ))}
         </ul>
       )}
     </Panel>
   );
 }
 
-function activityIcon(type: string): { icon: LucideIcon; cls: string } {
-  if (type === "invoice.paid") return { icon: DollarSign, cls: "bg-emerald-500/12 text-emerald-600 dark:text-emerald-400" };
-  if (type === "invoice.failed" || type === "invoice") return { icon: XCircle, cls: "bg-red-500/12 text-red-600 dark:text-red-400" };
-  if (type === "subscription.created") return { icon: UserPlus, cls: "bg-teal-500/12 text-teal-600 dark:text-teal-400" };
-  return { icon: Activity, cls: "bg-muted text-muted-foreground" };
+// ============================================================================
+// TAB: ACTIVITY — the creator timeline
+// ============================================================================
+
+type ActivityFilter = "ALL" | "sales" | "community";
+
+/** Timeline categories: money vs. community (client-side mapping). */
+const ACTIVITY_CATEGORY: Record<string, Exclude<ActivityFilter, "ALL">> = {
+  subscriber_new: "sales",
+  bundle_sold: "sales",
+  payout: "sales",
+  payment_failed: "sales",
+  review_new: "community",
+  question_new: "community",
+  question_answered: "community",
+  giveaway_entry: "community",
+};
+
+/** Type → icon + tint. Emerald-forward palette, no blue/indigo. */
+function activityMeta(type: string): { icon: LucideIcon; tint: string; text: string } {
+  switch (type) {
+    case "subscriber_new":
+      return { icon: UserPlus, tint: "bg-emerald-500/15", text: "text-emerald-600 dark:text-emerald-400" };
+    case "bundle_sold":
+      return { icon: Gift, tint: "bg-emerald-500/15", text: "text-emerald-600 dark:text-emerald-400" };
+    case "payment_failed":
+      return { icon: XCircle, tint: "bg-rose-500/15", text: "text-rose-600 dark:text-rose-400" };
+    case "payout":
+      return { icon: Banknote, tint: "bg-teal-500/15", text: "text-teal-600 dark:text-teal-400" };
+    case "review_new":
+      return { icon: Star, tint: "bg-amber-500/15", text: "text-amber-600 dark:text-amber-400" };
+    case "question_new":
+      return { icon: CircleHelp, tint: "bg-violet-500/15", text: "text-violet-600 dark:text-violet-400" };
+    case "question_answered":
+      return { icon: CheckCheck, tint: "bg-cyan-500/15", text: "text-cyan-600 dark:text-cyan-400" };
+    case "giveaway_entry":
+      return { icon: Ticket, tint: "bg-fuchsia-500/15", text: "text-fuchsia-600 dark:text-fuchsia-400" };
+    default:
+      return { icon: Activity, tint: "bg-muted", text: "text-muted-foreground" };
+  }
+}
+
+/**
+ * Timeline icon bubble. Opaque bg-card base so the left rail never shows
+ * through, with the type tint + colored icon layered on top.
+ */
+function ActivityBubble({ type, size = "md" }: { type: string; size?: "md" | "sm" }) {
+  const meta = activityMeta(type);
+  const Icon = meta.icon;
+  return (
+    <span
+      className={cn(
+        "relative flex shrink-0 items-center justify-center rounded-full border bg-card shadow-sm",
+        size === "md" ? "h-9 w-9" : "h-8 w-8"
+      )}
+    >
+      <span className={cn("absolute inset-0 rounded-full", meta.tint)} aria-hidden />
+      <Icon className={cn("relative", size === "md" ? "h-4 w-4" : "h-3.5 w-3.5", meta.text)} />
+    </span>
+  );
+}
+
+/** Day-group heading: "Today" / "Yesterday" / "Sep 12" (DST-safe). */
+function dayGroupLabel(iso: string, nowMs: number): string {
+  const d = new Date(iso);
+  const now = new Date(nowMs);
+  const day = (x: Date) => Date.UTC(x.getFullYear(), x.getMonth(), x.getDate());
+  const diff = Math.round((day(now) - day(d)) / 86_400_000);
+  if (diff <= 0) return "Today";
+  if (diff === 1) return "Yesterday";
+  return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
+
+function ActivityTab() {
+  const navigate = useAppStore((s) => s.navigate);
+  const nowMs = useNowMs();
+  const now = useMemo(() => new Date(nowMs).toISOString(), [nowMs]);
+  const reduceMotion = useReducedMotion();
+
+  const { data, error, loading } = useCreatorFetch(() =>
+    api<{ activities: ActivityDTO[] }>("/api/creator/activity?limit=60").then((r) => r.activities)
+  );
+  const [filter, setFilter] = useState<ActivityFilter>("ALL");
+
+  const counts = useMemo(() => {
+    const c = { ALL: 0, sales: 0, community: 0 };
+    for (const a of data ?? []) {
+      c.ALL += 1;
+      const cat = ACTIVITY_CATEGORY[a.type];
+      if (cat) c[cat] += 1;
+    }
+    return c;
+  }, [data]);
+
+  const filtered = useMemo(
+    () => (data ?? []).filter((a) => filter === "ALL" || ACTIVITY_CATEGORY[a.type] === filter),
+    [data, filter]
+  );
+
+  // Newest-first groups keyed by calendar day (labels computed against the
+  // sim-aware now anchor so the time machine stays coherent).
+  const groups = useMemo(() => {
+    const out: { key: string; label: string; items: ActivityDTO[] }[] = [];
+    for (const a of filtered) {
+      const label = dayGroupLabel(a.at, nowMs);
+      const last = out[out.length - 1];
+      if (last && last.label === label) last.items.push(a);
+      else out.push({ key: `${label}-${a.id}`, label, items: [a] });
+    }
+    return out;
+  }, [filtered, nowMs]);
+
+  const last7Count = useMemo(() => {
+    const cutoff = nowMs - 7 * 86_400_000;
+    return (data ?? []).filter((a) => new Date(a.at).getTime() >= cutoff).length;
+  }, [data, nowMs]);
+
+  if (loading) {
+    return (
+      <div className="space-y-6" aria-busy="true" aria-label="Loading activity">
+        <div className="flex items-center justify-between gap-4">
+          <Skeleton className="h-6 w-36" />
+          <Skeleton className="h-6 w-44 rounded-full" />
+        </div>
+        <Skeleton className="h-10 w-72 rounded-full" />
+        {[0, 1, 2].map((g) => (
+          <div key={g} className="space-y-5">
+            <Skeleton className="h-3 w-20" />
+            {[0, 1, 2].map((i) => (
+              <div key={i} className="flex gap-4">
+                <Skeleton className="h-9 w-9 shrink-0 rounded-full" />
+                <div className="flex-1 space-y-2 pt-1">
+                  <Skeleton className="h-4 w-3/4" />
+                  <Skeleton className="h-3 w-1/2" />
+                </div>
+              </div>
+            ))}
+          </div>
+        ))}
+      </div>
+    );
+  }
+  if (error || !data) return <LoadError message={error || "Activity feed unavailable."} />;
+
+  const FILTERS: { key: ActivityFilter; label: string }[] = [
+    { key: "ALL", label: "All" },
+    { key: "sales", label: "Sales" },
+    { key: "community", label: "Community" },
+  ];
+
+  return (
+    <div className="space-y-5">
+      <SectionHeader
+        title="Activity"
+        description="Everything happening across your products — sales, community and payouts."
+        action={
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge variant="outline" className="gap-1.5 bg-muted/50 py-1.5 pl-2.5 pr-3 text-xs font-medium">
+              <Activity className="h-3.5 w-3.5 text-primary" /> {data.length} events
+            </Badge>
+            <Badge variant="outline" className="gap-1.5 bg-muted/50 py-1.5 pl-2.5 pr-3 text-xs font-medium">
+              <CalendarClock className="h-3.5 w-3.5 text-primary" /> Last 7 days: {last7Count}
+            </Badge>
+          </div>
+        }
+      />
+
+      {data.length === 0 ? (
+        <EmptyState
+          icon={Activity}
+          title="No activity yet"
+          description="New subscribers, reviews, questions, giveaway entries and payouts will land here the moment they happen."
+        />
+      ) : (
+        <>
+          {/* Category filter chips */}
+          <div
+            className="flex gap-1.5 self-start rounded-full border bg-card p-1"
+            role="group"
+            aria-label="Filter activity by category"
+          >
+            {FILTERS.map((f) => (
+              <button
+                key={f.key}
+                onClick={() => setFilter(f.key)}
+                aria-pressed={filter === f.key}
+                className={cn(
+                  "flex h-10 items-center gap-1.5 rounded-full px-3.5 text-xs font-semibold transition-colors",
+                  filter === f.key
+                    ? f.key === "sales"
+                      ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400"
+                      : f.key === "community"
+                        ? "bg-violet-500/15 text-violet-700 dark:text-violet-400"
+                        : "bg-primary text-primary-foreground"
+                    : "text-muted-foreground hover:text-foreground"
+                )}
+              >
+                {f.label}
+                <span
+                  className={cn(
+                    "min-w-5 rounded-full px-1.5 text-center text-[10px] font-bold leading-4 tabular-nums",
+                    filter === f.key
+                      ? f.key === "ALL"
+                        ? "bg-primary-foreground/20 text-primary-foreground"
+                        : "bg-background/70 text-foreground"
+                      : "bg-muted text-muted-foreground"
+                  )}
+                >
+                  {counts[f.key]}
+                </span>
+              </button>
+            ))}
+          </div>
+
+          {filtered.length === 0 ? (
+            <EmptyState
+              icon={Search}
+              title={`No ${filter} activity yet`}
+              description="Try another category — sales and community events both land on this timeline."
+              action={
+                <Button variant="ghost" onClick={() => setFilter("ALL")}>
+                  <RotateCcw className="h-4 w-4" /> Reset filter
+                </Button>
+              }
+            />
+          ) : (
+            <div className="space-y-7" key={filter}>
+              {groups.map((g) => (
+                <section key={g.key} aria-label={`Activity from ${g.label}`}>
+                  <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                    {g.label}
+                    <span className="ml-2 font-normal normal-case tracking-normal text-muted-foreground/70">
+                      {g.items.length} {g.items.length === 1 ? "event" : "events"}
+                    </span>
+                  </h3>
+                  <ol className="relative">
+                    {/* Left rail connector */}
+                    <span
+                      className="absolute bottom-4 left-[17px] top-3 w-0.5 rounded-full bg-border"
+                      aria-hidden
+                    />
+                    {g.items.map((a, i) => (
+                      <motion.li
+                        key={a.id}
+                        className="relative flex gap-4 pb-6 last:pb-0"
+                        initial={reduceMotion ? false : { opacity: 0, y: 10 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        transition={
+                          reduceMotion
+                            ? { duration: 0 }
+                            : { delay: Math.min(i * 0.04, 0.4), duration: 0.28, ease: "easeOut" }
+                        }
+                      >
+                        <ActivityBubble type={a.type} />
+                        <div className="min-w-0 flex-1 pt-0.5">
+                          <p className="text-sm font-medium leading-snug">{a.title}</p>
+                          {a.body && <p className="mt-0.5 line-clamp-1 text-xs text-muted-foreground">{a.body}</p>}
+                          <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1">
+                            {a.productId && a.productTitle ? (
+                              <button
+                                onClick={() => navigate("product", { productId: a.productId! })}
+                                className="inline-flex max-w-[220px] items-center gap-1 rounded-full border bg-muted/50 px-2.5 py-0.5 text-[11px] font-medium text-muted-foreground transition-colors hover:border-primary/40 hover:bg-muted hover:text-foreground"
+                                aria-label={`Open ${a.productTitle}`}
+                              >
+                                <Package className="h-3 w-3 shrink-0" />
+                                <span className="truncate">{a.productTitle}</span>
+                              </button>
+                            ) : null}
+                            <span className="text-[11px] tabular-nums text-muted-foreground">{relTime(a.at, now)}</span>
+                          </div>
+                        </div>
+                      </motion.li>
+                    ))}
+                  </ol>
+                </section>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
 }
 
 // ============================================================================
@@ -1591,6 +2576,9 @@ function CreateProductDialog({
   const [accessType, setAccessType] = useState<string[]>(["DISCORD"]);
   const [discordRoleName, setDiscordRoleName] = useState("");
   const [telegramChannel, setTelegramChannel] = useState("");
+  // Full-refund default policy — pre-selects the Orders refund dialog for
+  // every refund of this product (creators can still override per refund).
+  const [refundPolicy, setRefundPolicy] = useState<"REVOKE" | "KEEP_ACCESS">("REVOKE");
   const [tiers, setTiers] = useState<TierDraft[]>([{ ...EMPTY_TIER }]);
   const [formError, setFormError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -1606,6 +2594,7 @@ function CreateProductDialog({
       setAccessType(["DISCORD"]);
       setDiscordRoleName("");
       setTelegramChannel("");
+      setRefundPolicy("REVOKE");
       setTiers([{ ...EMPTY_TIER }]);
       setFormError(null);
       setBusy(false);
@@ -1656,6 +2645,7 @@ function CreateProductDialog({
           description: description.trim(),
           category,
           accessType,
+          refundPolicy,
           discordRoleName: accessType.includes("DISCORD") ? discordRoleName.trim() : undefined,
           telegramChannel: accessType.includes("TELEGRAM") ? telegramChannel.trim() : undefined,
           plans,
@@ -1757,6 +2747,52 @@ function CreateProductDialog({
                   );
                 })}
               </div>
+            </fieldset>
+            <fieldset className="space-y-2">
+              <legend className="text-sm font-medium">Default refund policy</legend>
+              <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="Default refund policy">
+                {(
+                  [
+                    {
+                      key: "REVOKE" as const,
+                      label: "Close access",
+                      hint: "Refunds revoke access right away",
+                      icon: Ban,
+                      activeCls: "border-red-500/50 bg-red-500/[0.06]",
+                    },
+                    {
+                      key: "KEEP_ACCESS" as const,
+                      label: "Goodwill",
+                      hint: "Members finish the paid period",
+                      icon: CalendarClock,
+                      activeCls: "border-teal-500/50 bg-teal-500/[0.07]",
+                    },
+                  ]
+                ).map((opt) => {
+                  const on = refundPolicy === opt.key;
+                  return (
+                    <button
+                      key={opt.key}
+                      type="button"
+                      role="radio"
+                      aria-checked={on}
+                      onClick={() => setRefundPolicy(opt.key)}
+                      className={cn(
+                        "rounded-xl border p-2.5 text-left transition-colors",
+                        on ? cn(opt.activeCls, "shadow-sm") : "hover:bg-muted/50"
+                      )}
+                    >
+                      <span className="flex items-center gap-1.5 text-[13px] font-semibold">
+                        <opt.icon className="h-3.5 w-3.5" /> {opt.label}
+                      </span>
+                      <span className="mt-0.5 block text-[11px] leading-snug text-muted-foreground">{opt.hint}</span>
+                    </button>
+                  );
+                })}
+              </div>
+              <p className="text-[11px] leading-relaxed text-muted-foreground">
+                Pre-selects the Orders refund dialog — you can still choose per refund.
+              </p>
             </fieldset>
             <AnimatePresence initial={false}>
               {accessType.includes("DISCORD") && (
@@ -2003,6 +3039,10 @@ function EditProductDialog({
   const [accessType, setAccessType] = useState<string[]>([]);
   const [discordRoleName, setDiscordRoleName] = useState("");
   const [telegramChannel, setTelegramChannel] = useState("");
+  // Default access policy for full refunds on this product (pre-selects the
+  // choice in the Orders → refund dialog; the API also falls back to it when
+  // a refund request omits keepAccess).
+  const [refundPolicy, setRefundPolicy] = useState<"REVOKE" | "KEEP_ACCESS">("REVOKE");
   const [formError, setFormError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -2033,6 +3073,7 @@ function EditProductDialog({
         setAccessType(d.accessType);
         setDiscordRoleName(d.discordRoleName || "");
         setTelegramChannel(d.telegramChannel || "");
+        setRefundPolicy(d.refundPolicy === "KEEP_ACCESS" ? "KEEP_ACCESS" : "REVOKE");
       })
       .catch((e) => {
         if (alive) setLoadError(e instanceof Error ? e.message : "Couldn't load the product.");
@@ -2069,6 +3110,7 @@ function EditProductDialog({
           status,
           featured,
           accessType,
+          refundPolicy,
           // Sending an empty string clears the field server-side.
           discordRoleName: accessType.includes("DISCORD") ? discordRoleName.trim() : "",
           telegramChannel: accessType.includes("TELEGRAM") ? telegramChannel.trim() : "",
@@ -2236,6 +3278,57 @@ function EditProductDialog({
                     </span>
                     <Switch checked={featured} onCheckedChange={setFeatured} aria-label="Feature this product on the homepage" />
                   </label>
+                  {/* Default refund policy — pre-selects the access choice in the
+                      Orders refund dialog and is the API fallback for keepAccess. */}
+                  <fieldset className="space-y-2">
+                    <legend className="text-sm font-medium">Refund policy default</legend>
+                    <div role="radiogroup" aria-label="Refund policy default" className="grid gap-2 sm:grid-cols-2">
+                      {(
+                        [
+                          {
+                            key: "REVOKE" as const,
+                            label: "Close access immediately",
+                            hint: "Full refunds cancel the membership and revoke roles & license keys right away.",
+                            icon: Ban,
+                            activeCls: "border-red-500/50 bg-red-500/[0.06]",
+                          },
+                          {
+                            key: "KEEP_ACCESS" as const,
+                            label: "Goodwill · keep until period end",
+                            hint: "Full refunds let the buyer finish the period they paid for — the engine closes it at period end (no renewal).",
+                            icon: CalendarClock,
+                            activeCls: "border-teal-500/50 bg-teal-500/[0.07]",
+                          },
+                        ]
+                      ).map((opt) => {
+                        const on = refundPolicy === opt.key;
+                        return (
+                          <button
+                            key={opt.key}
+                            type="button"
+                            role="radio"
+                            aria-checked={on}
+                            onClick={() => setRefundPolicy(opt.key)}
+                            className={cn(
+                              "rounded-xl border p-3 text-left transition-colors",
+                              on ? cn(opt.activeCls, "shadow-sm") : "hover:bg-muted/50"
+                            )}
+                          >
+                            <span className="flex items-center gap-1.5 text-[13px] font-semibold">
+                              <opt.icon className="h-3.5 w-3.5" />
+                              {opt.label}
+                            </span>
+                            <span className="mt-0.5 block text-[11px] leading-snug text-muted-foreground">{opt.hint}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <p className="flex items-center gap-1.5 text-[10px] leading-relaxed text-muted-foreground">
+                      <Info className="h-3 w-3 shrink-0" />
+                      Applies when you refund from Orders — you can still override per refund. Partial refunds never
+                      affect access.
+                    </p>
+                  </fieldset>
                   <div className="space-y-1.5">
                     <Label htmlFor="ep-desc">Description</Label>
                     <Textarea id="ep-desc" value={description} onChange={(e) => setDescription(e.target.value)} rows={4} />
@@ -2724,6 +3817,863 @@ function AddTierForm({
 }
 
 // ============================================================================
+// TAB: BUNDLES — package products together at a discount (Task 3-b)
+// ============================================================================
+
+/** Stacked, slightly fanned cover tiles for a bundle card header. */
+function BundleStack({ items }: { items: BundleDTO["items"] }) {
+  const n = items.length;
+  return (
+    <div className="absolute inset-x-0 bottom-3 flex items-end justify-center" aria-hidden>
+      {items.map((item, i) => {
+        const offset = i - (n - 1) / 2;
+        return (
+          <span
+            key={item.productId}
+            className={cn(
+              "relative flex h-12 w-9 items-center justify-center rounded-lg bg-gradient-to-br shadow-md shadow-black/20 ring-2 ring-white/70",
+              COVER_GRADIENTS[item.coverTheme] || COVER_GRADIENTS.emerald,
+              i > 0 && "-ml-2.5"
+            )}
+            style={{ transform: `rotate(${offset * 6}deg) translateY(${Math.abs(offset) * 2.5}px)`, zIndex: i }}
+          >
+            <CategoryIcon category={item.category} className="h-4 w-4 text-white/70" />
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
+/** One creator bundle card — status pill, discount badge, item chips, stats, actions. */
+function CreatorBundleCard({
+  b,
+  busy,
+  onEdit,
+  onDelete,
+  onToggle,
+}: {
+  b: BundleDTO;
+  busy: boolean;
+  onEdit: (b: BundleDTO) => void;
+  onDelete: (b: BundleDTO) => void;
+  onToggle: (b: BundleDTO) => void;
+}) {
+  return (
+    <Panel className={cn("flex h-full flex-col overflow-hidden transition-shadow hover:shadow-md", !b.active && "opacity-80")}>
+      {/* Cover */}
+      <div
+        className={cn(
+          "relative h-28 overflow-hidden bg-gradient-to-br",
+          COVER_GRADIENTS[b.coverTheme] || COVER_GRADIENTS.emerald,
+          !b.active && "grayscale-[45%]"
+        )}
+      >
+        <div className="absolute inset-0 opacity-25 [background-image:radial-gradient(circle_at_20%_20%,white_1px,transparent_1px),radial-gradient(circle_at_80%_60%,white_1px,transparent_1px)] [background-size:24px_24px,32px_32px]" />
+        <div className="absolute inset-0 bg-gradient-to-t from-black/40 via-black/5 to-transparent" />
+        <div className="absolute left-3 top-3 flex flex-wrap gap-1.5">
+          <StatusBadge status={b.active ? "LIVE" : "PAUSED"} className="bg-card/90 backdrop-blur" />
+        </div>
+        <span className="absolute right-3 top-3 inline-flex items-center gap-1 rounded-full bg-emerald-500 px-2 py-1 text-[11px] font-extrabold uppercase tracking-wide text-white shadow-lg ring-2 ring-white/50">
+          <Percent className="h-3 w-3" strokeWidth={3} />
+          −{b.discountPct}%
+        </span>
+        <BundleStack items={b.items} />
+      </div>
+
+      <div className="flex flex-1 flex-col p-4 sm:p-5">
+        <div className="flex items-start justify-between gap-2">
+          <div className="min-w-0">
+            <h3 className="truncate font-semibold leading-tight">{b.title}</h3>
+            <p className="mt-0.5 text-xs text-muted-foreground">
+              {b.items.length} product{b.items.length === 1 ? "" : "s"} · created {fmtDate(b.createdAt)}
+            </p>
+          </div>
+          <div className="flex shrink-0 items-center gap-1">
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8"
+              onClick={() => onEdit(b)}
+              aria-label={`Edit ${b.title}`}
+              title="Edit bundle"
+            >
+              <PenLine className="h-4 w-4" />
+            </Button>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-8 w-8"
+                  aria-label={`Actions for ${b.title}`}
+                  disabled={busy}
+                >
+                  {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <MoreHorizontal className="h-4 w-4" />}
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-48">
+                <DropdownMenuItem onClick={() => onToggle(b)}>
+                  {b.active ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
+                  {b.active ? "Pause bundle" : "Activate bundle"}
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => onEdit(b)}>
+                  <PenLine className="h-4 w-4" /> Edit details
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => onDelete(b)} className="text-red-600 focus:text-red-600 dark:text-red-400 dark:focus:text-red-400">
+                  <Trash2 className="h-4 w-4" /> Delete bundle
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
+        </div>
+
+        {/* Item chips */}
+        <div className="mt-3 space-y-1.5 rounded-xl bg-muted/40 p-3">
+          {b.items.map((item) => (
+            <div key={item.productId} className="flex items-center gap-2 text-xs">
+              <span
+                aria-hidden
+                className={cn("h-2 w-2 shrink-0 rounded-full bg-gradient-to-br", COVER_GRADIENTS[item.coverTheme] || COVER_GRADIENTS.emerald)}
+              />
+              <span className="min-w-0 flex-1 truncate">
+                <span className="font-medium">{item.productTitle}</span>
+                <span className="text-muted-foreground"> · {item.planName}</span>
+              </span>
+              <span className="flex shrink-0 items-baseline gap-1.5">
+                <span className="text-[11px] text-muted-foreground line-through tabular-nums">{fmtMoney(item.priceCents)}</span>
+                <span className="font-semibold text-emerald-600 tabular-nums dark:text-emerald-400">{fmtMoney(item.discountedCents)}</span>
+              </span>
+            </div>
+          ))}
+          <div className="flex items-center justify-between border-t pt-1.5 text-xs">
+            <span className="text-muted-foreground">Bundle total</span>
+            <span className="font-bold tabular-nums">
+              {fmtMoney(b.totalCents)}/{b.items[0]?.interval === "year" ? "yr" : "mo"}
+            </span>
+          </div>
+        </div>
+
+        {/* Stats */}
+        <div className="mt-3 grid grid-cols-3 gap-2 text-center">
+          {[
+            { label: "Sold", value: String(b.salesCount), icon: ReceiptText },
+            { label: "Revenue", value: fmtMoney(b.revenueCents), icon: Banknote },
+            { label: "Members", value: String(b.membersCount), icon: Users },
+          ].map((s) => (
+            <div key={s.label} className="rounded-xl border bg-background/50 px-2 py-2.5">
+              <s.icon className="mx-auto h-3.5 w-3.5 text-muted-foreground" aria-hidden />
+              <p className="mt-1 text-sm font-bold leading-none tabular-nums">{s.value}</p>
+              <p className="mt-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">{s.label}</p>
+            </div>
+          ))}
+        </div>
+
+        {/* Quick activate/pause */}
+        <div className="mt-auto pt-3">
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-9 w-full gap-1.5"
+            disabled={busy}
+            onClick={() => onToggle(b)}
+          >
+            {busy ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : b.active ? (
+              <Pause className="h-3.5 w-3.5" />
+            ) : (
+              <Play className="h-3.5 w-3.5" />
+            )}
+            {b.active ? "Pause" : "Activate"}
+          </Button>
+        </div>
+      </div>
+    </Panel>
+  );
+}
+
+const BUNDLE_DISCOUNT_OPTIONS = [5, 10, 15, 20, 25, 30, 35, 40, 45, 50];
+
+/** Assemble a new bundle: metadata, product picker (checkbox + plan select per
+ *  product), cover theme and a live pricing preview with inline validation. */
+function CreateBundleDialog({
+  open,
+  onOpenChange,
+  products,
+  onCreated,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  products: ProductCardDTO[];
+  onCreated: () => void;
+}) {
+  const { toast } = useToast();
+  const [title, setTitle] = useState("");
+  const [description, setDescription] = useState("");
+  const [discountPct, setDiscountPct] = useState("15");
+  const [coverTheme, setCoverTheme] = useState<string>("emerald");
+  // productId -> chosen planId (presence in the map = included in the bundle).
+  const [selection, setSelection] = useState<Record<string, string>>({});
+  const [formError, setFormError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (open) {
+      setTitle("");
+      setDescription("");
+      setDiscountPct("15");
+      setCoverTheme("emerald");
+      setSelection({});
+      setFormError(null);
+      setBusy(false);
+    }
+  }, [open]);
+
+  const pct = Number(discountPct);
+  const activeProducts = useMemo(() => products.filter((p) => p.status === "ACTIVE" && p.plans.some((pl) => pl.active)), [products]);
+
+  // Chosen rows with their selected plan (defaults to the product's first active plan).
+  const chosen = useMemo(() => {
+    return activeProducts
+      .filter((p) => selection[p.id])
+      .map((p) => {
+        const plan = p.plans.find((pl) => pl.id === selection[p.id]) ?? p.plans.find((pl) => pl.active)!;
+        return { product: p, plan, discountedCents: Math.round((plan.priceCents * (100 - pct)) / 100) };
+      });
+  }, [activeProducts, selection, pct]);
+
+  const subtotalCents = chosen.reduce((s, c) => s + c.plan.priceCents, 0);
+  const totalCents = chosen.reduce((s, c) => s + c.discountedCents, 0);
+  const intervals = new Set(chosen.map((c) => c.plan.interval));
+  const mixedIntervals = intervals.size > 1;
+  const count = chosen.length;
+  const intervalLabel = chosen[0]?.plan.interval === "year" ? "yr" : "mo";
+
+  function toggleProduct(p: ProductCardDTO) {
+    setFormError(null);
+    setSelection((prev) => {
+      const next = { ...prev };
+      if (next[p.id]) {
+        delete next[p.id];
+      } else {
+        const firstActive = p.plans.find((pl) => pl.active);
+        if (firstActive) next[p.id] = firstActive.id;
+      }
+      return next;
+    });
+  }
+
+  async function submit(e: FormEvent) {
+    e.preventDefault();
+    const t = title.trim();
+    if (t.length < 3 || t.length > 80) return setFormError("Title must be 3–80 characters.");
+    if (count < 2 || count > 6) return setFormError("Pick between 2 and 6 products for the bundle.");
+    if (mixedIntervals) return setFormError("All plans in a bundle must share the same billing interval.");
+    setFormError(null);
+    setBusy(true);
+    try {
+      const res = await api<{ bundle: BundleDTO }>("/api/bundles", {
+        json: {
+          title: t,
+          ...(description.trim() ? { description: description.trim() } : {}),
+          discountPct: pct,
+          coverTheme,
+          items: chosen.map((c) => ({ productId: c.product.id, planId: c.plan.id })),
+        },
+      });
+      toast({
+        title: "Bundle is live!",
+        description: `${res.bundle.title} — ${count} products at ${pct}% off is now on Discover.`,
+      });
+      onCreated();
+      onOpenChange(false);
+    } catch (err) {
+      setFormError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-h-[88vh] overflow-y-auto sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>Create a bundle</DialogTitle>
+          <DialogDescription>
+            Package 2–6 of your active products at a 5–50% discount. Buyers check out once and get every product —
+            every renewal stays discounted.
+          </DialogDescription>
+        </DialogHeader>
+        <form id="create-bundle-form" onSubmit={(e) => void submit(e)} className="space-y-4">
+          <div className="space-y-1.5">
+            <Label htmlFor="bnd-title">Title</Label>
+            <Input
+              id="bnd-title"
+              value={title}
+              maxLength={80}
+              onChange={(e) => {
+                setTitle(e.target.value);
+                setFormError(null);
+              }}
+              placeholder="e.g. SaaS Starter Bundle"
+            />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="bnd-description">Description</Label>
+            <Textarea
+              id="bnd-description"
+              value={description}
+              rows={2}
+              maxLength={400}
+              onChange={(e) => {
+                setDescription(e.target.value);
+                setFormError(null);
+              }}
+              placeholder="What does the bundle unlock, and why buy together?"
+            />
+            <p className="text-[11px] text-muted-foreground">Optional · up to 400 characters.</p>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1.5">
+              <Label>Discount</Label>
+              <Select
+                value={discountPct}
+                onValueChange={(v) => {
+                  setDiscountPct(v);
+                  setFormError(null);
+                }}
+              >
+                <SelectTrigger aria-label="Bundle discount percent" className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {BUNDLE_DISCOUNT_OPTIONS.map((d) => (
+                    <SelectItem key={d} value={String(d)}>
+                      {d}% off
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1.5">
+              <Label>Cover theme</Label>
+              <Select value={coverTheme} onValueChange={(v) => setCoverTheme(v)}>
+                <SelectTrigger aria-label="Cover theme" className="w-full capitalize">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {COVER_THEMES.map((theme) => (
+                    <SelectItem key={theme} value={theme} className="capitalize">
+                      {theme}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+
+          {/* Product picker */}
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <Label>Products</Label>
+              <span
+                className={cn(
+                  "rounded-full border px-2 py-0.5 text-[11px] font-semibold tabular-nums",
+                  count >= 2 && count <= 6
+                    ? "border-emerald-500/25 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
+                    : "border-border bg-muted text-muted-foreground"
+                )}
+              >
+                {count}/6 selected
+              </span>
+            </div>
+            {activeProducts.length < 2 ? (
+              <p className="rounded-xl border border-dashed p-3 text-xs text-muted-foreground">
+                You need at least two active products to build a bundle. Create or resume listings first.
+              </p>
+            ) : (
+              <div className={cn("max-h-56 space-y-1.5 overflow-y-auto pr-1", SCROLL_THIN)} role="group" aria-label="Products to include">
+                {activeProducts.map((p) => {
+                  const checked = !!selection[p.id];
+                  const activePlans = p.plans.filter((pl) => pl.active);
+                  const planId = selection[p.id] ?? activePlans[0]?.id ?? "";
+                  const plan = activePlans.find((pl) => pl.id === planId);
+                  return (
+                    <div
+                      key={p.id}
+                      className={cn(
+                        "flex flex-wrap items-center gap-2 rounded-xl border p-2.5 transition-colors",
+                        checked ? "border-primary/40 bg-primary/[0.04]" : "bg-card hover:bg-muted/40"
+                      )}
+                    >
+                      <Checkbox
+                        id={`bnd-p-${p.id}`}
+                        checked={checked}
+                        onCheckedChange={() => toggleProduct(p)}
+                        aria-label={`Include ${p.title} in the bundle`}
+                      />
+                      <label htmlFor={`bnd-p-${p.id}`} className="min-w-0 flex-1 cursor-pointer truncate text-sm font-medium">
+                        {p.title}
+                      </label>
+                      <Select
+                        value={planId || "none"}
+                        onValueChange={(v) => {
+                          setSelection((prev) => ({ ...prev, [p.id]: v }));
+                          setFormError(null);
+                        }}
+                        disabled={!checked}
+                      >
+                        <SelectTrigger
+                          aria-label={`Plan for ${p.title}`}
+                          className="h-9 w-[130px] shrink-0 text-xs"
+                        >
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {activePlans.map((pl) => (
+                            <SelectItem key={pl.id} value={pl.id}>
+                              {pl.name} · {fmtMoney(pl.priceCents)}/{pl.interval === "year" ? "yr" : "mo"}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      {checked && plan && (
+                        <span className="w-16 shrink-0 text-right text-xs font-semibold text-emerald-600 tabular-nums dark:text-emerald-400">
+                          {fmtMoney(Math.round((plan.priceCents * (100 - pct)) / 100))}
+                        </span>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+            {mixedIntervals && (
+              <p className="flex items-start gap-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs font-medium text-amber-700 dark:text-amber-400">
+                <TriangleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                All plans in a bundle must share the same billing interval — pick only monthly or only yearly plans.
+              </p>
+            )}
+          </div>
+
+          {/* Live pricing preview */}
+          {count > 0 && (
+            <div className="rounded-xl border bg-muted/40 p-3">
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Live pricing preview</p>
+              <div className="mt-2 space-y-1">
+                {chosen.map((c) => (
+                  <div key={c.product.id} className="flex items-center justify-between gap-2 text-xs">
+                    <span className="min-w-0 truncate">
+                      <span className="font-medium">{c.product.title}</span>
+                      <span className="text-muted-foreground"> · {c.plan.name}</span>
+                    </span>
+                    <span className="flex shrink-0 items-baseline gap-1.5">
+                      <span className="text-[11px] text-muted-foreground line-through tabular-nums">{fmtMoney(c.plan.priceCents)}</span>
+                      <span className="font-semibold text-emerald-600 tabular-nums dark:text-emerald-400">{fmtMoney(c.discountedCents)}</span>
+                    </span>
+                  </div>
+                ))}
+              </div>
+              <div className="mt-2 space-y-1 border-t border-dashed pt-2 text-xs">
+                <div className="flex items-center justify-between">
+                  <span className="text-muted-foreground">Subtotal</span>
+                  <span className="font-medium tabular-nums">{fmtMoney(subtotalCents)}</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-muted-foreground">Bundle discount ({pct}%)</span>
+                  <span className="font-semibold text-emerald-600 tabular-nums dark:text-emerald-400">−{fmtMoney(subtotalCents - totalCents)}</span>
+                </div>
+                <div className="flex items-center justify-between text-sm">
+                  <span className="font-semibold">Buyer pays</span>
+                  <span className="font-bold tabular-nums">
+                    {fmtMoney(totalCents)}
+                    {count > 0 ? `/${intervalLabel}` : ""}
+                  </span>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {formError && (
+            <p className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs font-medium text-red-600 dark:text-red-400">
+              {formError}
+            </p>
+          )}
+        </form>
+        <DialogFooter className="gap-2 sm:gap-0">
+          <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>
+            Cancel
+          </Button>
+          <Button type="submit" form="create-bundle-form" disabled={busy}>
+            {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Layers className="h-4 w-4" />} Create bundle
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/** Edit bundle metadata — items are immutable by design (shown read-only). */
+function EditBundleDialog({
+  bundle,
+  onOpenChange,
+  onSaved,
+}: {
+  bundle: BundleDTO | null;
+  onOpenChange: (open: boolean) => void;
+  onSaved: () => void;
+}) {
+  const { toast } = useToast();
+  const [title, setTitle] = useState("");
+  const [description, setDescription] = useState("");
+  const [discountPct, setDiscountPct] = useState("15");
+  const [active, setActive] = useState(true);
+  const [formError, setFormError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (bundle) {
+      setTitle(bundle.title);
+      setDescription(bundle.description ?? "");
+      setDiscountPct(String(bundle.discountPct));
+      setActive(bundle.active);
+      setFormError(null);
+      setBusy(false);
+    }
+  }, [bundle]);
+
+  async function submit(e: FormEvent) {
+    e.preventDefault();
+    if (!bundle) return;
+    const t = title.trim();
+    if (t.length < 3 || t.length > 80) return setFormError("Title must be 3–80 characters.");
+    setFormError(null);
+    setBusy(true);
+    try {
+      const res = await api<{ bundle: BundleDTO }>(`/api/bundles/${bundle.id}`, {
+        method: "PATCH",
+        json: {
+          title: t,
+          description: description.trim() || null,
+          discountPct: Number(discountPct),
+          active,
+        },
+      });
+      toast({
+        title: "Bundle updated",
+        description: `${res.bundle.title} — ${res.bundle.discountPct}% off · ${res.bundle.active ? "live" : "paused"}.`,
+      });
+      onSaved();
+      onOpenChange(false);
+    } catch (err) {
+      setFormError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Dialog open={!!bundle} onOpenChange={onOpenChange}>
+      <DialogContent className="max-h-[88vh] overflow-y-auto sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Edit bundle</DialogTitle>
+          <DialogDescription>Update the offer's details. Included products and plans can't be changed after creation.</DialogDescription>
+        </DialogHeader>
+        <form id="edit-bundle-form" onSubmit={(e) => void submit(e)} className="space-y-4">
+          <div className="space-y-1.5">
+            <Label htmlFor="ebnd-title">Title</Label>
+            <Input
+              id="ebnd-title"
+              value={title}
+              maxLength={80}
+              onChange={(e) => {
+                setTitle(e.target.value);
+                setFormError(null);
+              }}
+            />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="ebnd-description">Description</Label>
+            <Textarea
+              id="ebnd-description"
+              value={description}
+              rows={2}
+              maxLength={400}
+              onChange={(e) => {
+                setDescription(e.target.value);
+                setFormError(null);
+              }}
+            />
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1.5">
+              <Label>Discount</Label>
+              <Select value={discountPct} onValueChange={(v) => setDiscountPct(v)}>
+                <SelectTrigger aria-label="Bundle discount percent" className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {BUNDLE_DISCOUNT_OPTIONS.map((d) => (
+                    <SelectItem key={d} value={String(d)}>
+                      {d}% off
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="flex items-end">
+              <div className="flex w-full items-center justify-between gap-3 rounded-xl border bg-muted/30 px-4 py-2.5">
+                <div>
+                  <Label htmlFor="ebnd-active" className="text-sm font-medium">
+                    Live on Discover
+                  </Label>
+                  <p className="mt-0.5 text-xs text-muted-foreground">{active ? "Buyers can check out." : "Hidden from the marketplace."}</p>
+                </div>
+                <Switch id="ebnd-active" checked={active} onCheckedChange={setActive} aria-label="Bundle live on Discover" />
+              </div>
+            </div>
+          </div>
+
+          {/* Read-only items */}
+          <div className="space-y-1.5 rounded-xl border bg-muted/40 p-3">
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Included products (read-only)</p>
+            {bundle?.items.map((item) => (
+              <div key={item.productId} className="flex items-center justify-between gap-2 text-xs">
+                <span className="min-w-0 truncate">
+                  <span className="font-medium">{item.productTitle}</span>
+                  <span className="text-muted-foreground"> · {item.planName}</span>
+                </span>
+                <span className="shrink-0 font-semibold text-emerald-600 tabular-nums dark:text-emerald-400">{fmtMoney(item.discountedCents)}</span>
+              </div>
+            ))}
+          </div>
+
+          {formError && (
+            <p className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs font-medium text-red-600 dark:text-red-400">
+              {formError}
+            </p>
+          )}
+        </form>
+        <DialogFooter className="gap-2 sm:gap-0">
+          <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>
+            Cancel
+          </Button>
+          <Button type="submit" form="edit-bundle-form" disabled={busy}>
+            {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />} Save changes
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function BundlesTab({ user }: { user: SessionUser }) {
+  const { toast } = useToast();
+  const refresh = useAppStore((s) => s.refresh);
+
+  // Own bundles (incl. paused, with real sales stats) + own products for the picker.
+  const { data, error, loading } = useCreatorFetch(async () => {
+    const [bundlesRes, productsRes] = await Promise.all([
+      api<{ bundles: BundleDTO[] }>("/api/bundles/creator"),
+      api<{ products: ProductCardDTO[] }>(`/api/products?creatorId=${user.id}`),
+    ]);
+    return { bundles: bundlesRes.bundles, products: productsRes.products };
+  });
+
+  const [createOpen, setCreateOpen] = useState(false);
+  const [editing, setEditing] = useState<BundleDTO | null>(null);
+  const [deleting, setDeleting] = useState<BundleDTO | null>(null);
+  const [deleteBlocked, setDeleteBlocked] = useState<string | null>(null);
+  const [busyId, setBusyId] = useState<string | null>(null);
+
+  async function toggleActive(b: BundleDTO) {
+    setBusyId(b.id);
+    try {
+      await api(`/api/bundles/${b.id}`, { method: "PATCH", json: { active: !b.active } });
+      toast({
+        title: b.active ? "Bundle paused" : "Bundle is live",
+        description: b.active
+          ? `${b.title} is hidden from the marketplace. Existing members keep access.`
+          : `${b.title} is back on Discover.`,
+      });
+      refresh();
+    } catch (e) {
+      toast({ title: "Couldn't update the bundle", description: (e as Error).message, variant: "destructive" });
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function deleteBundle() {
+    if (!deleting) return;
+    setBusyId(deleting.id);
+    try {
+      await api(`/api/bundles/${deleting.id}`, { method: "DELETE" });
+      toast({ title: "Bundle deleted", description: `${deleting.title} was removed. Past buyers keep their access.` });
+      setDeleting(null);
+      setDeleteBlocked(null);
+      refresh();
+    } catch (e) {
+      const err = e as ApiError;
+      if (err.status === 409) {
+        setDeleteBlocked(err.message); // keep the dialog open, offer deactivation
+      } else {
+        toast({ title: "Couldn't delete the bundle", description: err.message, variant: "destructive" });
+      }
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  if (loading) {
+    return (
+      <div className="space-y-5" aria-busy="true" aria-label="Loading bundles">
+        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          {[0, 1, 2, 3].map((i) => (
+            <Skeleton key={i} className="h-28 rounded-2xl" />
+          ))}
+        </div>
+        <div className="grid gap-5 md:grid-cols-2">
+          {[0, 1].map((i) => (
+            <Skeleton key={i} className="h-80 rounded-2xl" />
+          ))}
+        </div>
+      </div>
+    );
+  }
+  if (error || !data) return <LoadError message={error || "Bundles unavailable."} />;
+
+  const { bundles, products } = data;
+  const activeCount = bundles.filter((b) => b.active).length;
+  const totalSales = bundles.reduce((s, b) => s + b.salesCount, 0);
+  const totalRevenue = bundles.reduce((s, b) => s + b.revenueCents, 0);
+  const avgDiscount = bundles.length > 0 ? Math.round(bundles.reduce((s, b) => s + b.discountPct, 0) / bundles.length) : 0;
+
+  return (
+    <div className="space-y-5">
+      <SectionHeader
+        title="Bundles"
+        description="Package products together at a discount — one checkout, every product included."
+        action={
+          <Button onClick={() => setCreateOpen(true)}>
+            <Plus className="h-4 w-4" /> New bundle
+          </Button>
+        }
+      />
+
+      {bundles.length > 0 && (
+        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          <StatCard label="Active bundles" value={String(activeCount)} sub={`${bundles.length} total`} icon={Layers} />
+          <StatCard label="Bundle sales" value={String(totalSales)} sub="all-time checkouts" icon={ReceiptText} />
+          <StatCard label="Bundle revenue" value={fmtMoney(totalRevenue)} sub="discounted totals" icon={Banknote} />
+          <StatCard label="Avg discount" value={`${avgDiscount}%`} sub="across all bundles" icon={Percent} />
+        </div>
+      )}
+
+      {bundles.length === 0 ? (
+        <EmptyState
+          icon={Layers}
+          title="Bundle your products"
+          description="Pick 2–6 of your active products, set a 5–50% discount and sell them as one package — buyers love a deal, and every renewal stays discounted."
+          action={
+            <Button onClick={() => setCreateOpen(true)}>
+              <Plus className="h-4 w-4" /> Create your first bundle
+            </Button>
+          }
+        />
+      ) : (
+        <motion.div className="grid gap-5 md:grid-cols-2" variants={stagger} initial="hidden" animate="show">
+          {bundles.map((b) => (
+            <motion.div key={b.id} variants={fadeUp}>
+              <CreatorBundleCard
+                b={b}
+                busy={busyId === b.id}
+                onEdit={setEditing}
+                onDelete={(x) => {
+                  setDeleteBlocked(null);
+                  setDeleting(x);
+                }}
+                onToggle={(x) => void toggleActive(x)}
+              />
+            </motion.div>
+          ))}
+        </motion.div>
+      )}
+
+      <CreateBundleDialog
+        open={createOpen}
+        onOpenChange={setCreateOpen}
+        products={products}
+        onCreated={() => refresh()}
+      />
+      <EditBundleDialog bundle={editing} onOpenChange={(o) => !o && setEditing(null)} onSaved={() => refresh()} />
+
+      {/* Delete confirm — a 409 keeps the dialog open and offers deactivation */}
+      <AlertDialog
+        open={!!deleting}
+        onOpenChange={(o) => {
+          if (!o) {
+            setDeleting(null);
+            setDeleteBlocked(null);
+          }
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{deleteBlocked ? "This bundle has past purchases" : `Delete “${deleting?.title}”?`}</AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <span>
+                {deleteBlocked ? (
+                  <span className="font-medium text-amber-600 dark:text-amber-400">{deleteBlocked}</span>
+                ) : (
+                  <>
+                    The bundle is removed from Discover immediately. Past buyers keep their access and discounted
+                    renewals. This can't be undone.
+                  </>
+                )}
+              </span>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          {deleteBlocked && deleting && (
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-500/25 bg-amber-500/10 p-3">
+              <p className="text-xs text-muted-foreground">Pause it instead — buyers keep access but nobody new can purchase.</p>
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-9 shrink-0"
+                disabled={busyId === deleting.id}
+                onClick={() => {
+                  const b = deleting;
+                  setDeleting(null);
+                  setDeleteBlocked(null);
+                  if (b) void toggleActive(b);
+                }}
+              >
+                <Pause className="h-3.5 w-3.5" /> Deactivate bundle
+              </Button>
+            </div>
+          )}
+          <AlertDialogFooter>
+            <AlertDialogCancel>{deleteBlocked ? "Keep it" : "Cancel"}</AlertDialogCancel>
+            {!deleteBlocked && (
+              <AlertDialogAction
+                className="bg-red-600 text-white hover:bg-red-700"
+                onClick={(e) => {
+                  e.preventDefault(); // keep the dialog open while deleting
+                  void deleteBundle();
+                }}
+              >
+                <Trash2 className="h-4 w-4" /> Delete bundle
+              </AlertDialogAction>
+            )}
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </div>
+  );
+}
+
+// ============================================================================
 // TAB: SUBSCRIBERS (CRM)
 // ============================================================================
 
@@ -2987,10 +4937,11 @@ interface OrderRow {
   id: string;
   number: string;
   customer: { id: string; name: string | null; email: string; avatarColor: string };
-  product: { id: string; title: string; coverTheme: string };
+  product: { id: string; title: string; coverTheme: string; refundPolicy: "REVOKE" | "KEEP_ACCESS" };
   planName: string;
   description: string;
   amountCents: number;
+  refundedCents?: number;
   status: string;
   gateway: string;
   createdAt: string;
@@ -3000,12 +4951,77 @@ interface OrderRow {
 function OrdersTab() {
   const now = useSimNow();
   const { toast } = useToast();
+  const refresh = useAppStore((s) => s.refresh);
   const { data, error, loading } = useCreatorFetch(() =>
     api<{ orders: OrderRow[] }>("/api/creator/orders").then((r) => r.orders)
   );
   const [statusFilter, setStatusFilter] = useState("ALL");
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<OrderRow | null>(null);
+  const [refundOpen, setRefundOpen] = useState(false);
+  const [refunding, setRefunding] = useState(false);
+  // Partial-refund state: "full" | "partial" + the requested amount, plus
+  // the full-refund ACCESS POLICY (revoke now vs goodwill keep-until-period-end).
+  const [refundMode, setRefundMode] = useState<"full" | "partial">("full");
+  const [refundAmount, setRefundAmount] = useState("");
+  const [accessPolicy, setAccessPolicy] = useState<"revoke" | "keep">("revoke");
+
+  const remainingCents = selected
+    ? Math.max(0, selected.amountCents - (selected.refundedCents || 0))
+    : 0;
+  const parsedRefundCents = Math.round(Number(refundAmount || "0") * 100);
+  const partialValid =
+    refundMode === "full" ||
+    (Number.isFinite(parsedRefundCents) && parsedRefundCents >= 1 && parsedRefundCents <= remainingCents);
+
+  // REAL refund (full or partial) — calls POST /api/invoices/[id]/refund
+  // (creator-scoped; Whop-gateway invoices are refunded through the live
+  // Whop refund API with the amount passed through for partials).
+  const doRefund = async () => {
+    if (!selected || !partialValid) return;
+    setRefunding(true);
+    try {
+      const amountCents = refundMode === "full" ? undefined : parsedRefundCents;
+      const keepAccess = refundMode === "full" && accessPolicy === "keep";
+      const res = await api<{ ok: boolean; message: string; partial?: boolean }>(`/api/invoices/${selected.id}/refund`, {
+        method: "POST",
+        json: {
+          reason: "requested_by_customer",
+          ...(amountCents != null ? { amountCents } : {}),
+          ...(keepAccess ? { keepAccess: true } : {}),
+        },
+      });
+      toast({
+        title: res.partial ? "Partial refund issued" : "Refund issued",
+        description: res.message,
+      });
+      setSelected(null);
+      setRefundOpen(false);
+      setRefundMode("full");
+      setRefundAmount("");
+      setAccessPolicy("revoke");
+      refresh();
+    } catch (e) {
+      toast({
+        title: "Refund failed",
+        description: e instanceof Error ? e.message : "The refund could not be processed.",
+        variant: "destructive",
+      });
+    } finally {
+      setRefunding(false);
+    }
+  };
+
+  function openRefund(order: OrderRow) {
+    setSelected(order);
+    setRefundMode("full");
+    // Pre-select the product's configured full-refund policy (REVOKE by
+    // default, KEEP_ACCESS for goodwill-first products) — the creator can
+    // still override per refund.
+    setAccessPolicy(order.product.refundPolicy === "KEEP_ACCESS" ? "keep" : "revoke");
+    setRefundAmount(((order.amountCents - (order.refundedCents || 0)) / 100).toFixed(2));
+    setRefundOpen(true);
+  }
 
   const nowMs = useMemo(() => new Date(now).getTime(), [now]);
 
@@ -3051,7 +5067,7 @@ function OrdersTab() {
       {/* Filters */}
       <div className="flex flex-wrap items-center gap-3">
         <div className="flex gap-1.5 rounded-full border bg-card p-1" role="group" aria-label="Filter by status">
-          {(["ALL", "PAID", "FAILED"] as const).map((s) => (
+          {(["ALL", "PAID", "FAILED", "REFUNDED"] as const).map((s) => (
             <button
               key={s}
               onClick={() => setStatusFilter(s)}
@@ -3061,11 +5077,13 @@ function OrdersTab() {
                 statusFilter === s
                   ? s === "FAILED"
                     ? "bg-red-500/15 text-red-700 dark:text-red-400"
-                    : "bg-primary text-primary-foreground"
+                    : s === "REFUNDED"
+                      ? "bg-sky-500/15 text-sky-700 dark:text-sky-400"
+                      : "bg-primary text-primary-foreground"
                   : "text-muted-foreground hover:text-foreground"
               )}
             >
-              {s === "ALL" ? "All" : s === "PAID" ? "Paid" : "Failed"}
+              {s === "ALL" ? "All" : s === "PAID" ? "Paid" : s === "FAILED" ? "Failed" : "Refunded"}
             </button>
           ))}
         </div>
@@ -3127,7 +5145,14 @@ function OrdersTab() {
                     <TableCell>
                       <GatewayBadge gateway={o.gateway} />
                     </TableCell>
-                    <TableCell className="text-right font-semibold tabular-nums">{fmtMoney(o.amountCents)}</TableCell>
+                    <TableCell className="text-right">
+                      <p className="font-semibold tabular-nums">{fmtMoney(o.amountCents)}</p>
+                      {!!o.refundedCents && o.refundedCents > 0 && (
+                        <p className="text-[11px] font-medium text-sky-600 tabular-nums dark:text-sky-400">
+                          −{fmtMoney(o.refundedCents)} refunded
+                        </p>
+                      )}
+                    </TableCell>
                     <TableCell>
                       <StatusBadge status={o.status} />
                     </TableCell>
@@ -3188,6 +5213,19 @@ function OrdersTab() {
                     <dt className="text-muted-foreground">Paid</dt>
                     <dd className="tabular-nums">{selected.paidAt ? fmtDateTime(selected.paidAt) : "—"}</dd>
                   </div>
+                  {!!selected.refundedCents && selected.refundedCents > 0 && (
+                    <div className="flex items-center justify-between gap-4">
+                      <dt className="text-muted-foreground">Refunded</dt>
+                      <dd className="font-medium tabular-nums text-sky-600 dark:text-sky-400">
+                        {fmtMoney(selected.refundedCents)}
+                        {selected.status === "PAID" && (
+                          <span className="ml-1.5 text-xs font-normal text-muted-foreground">
+                            (partial · {fmtMoney(selected.amountCents - selected.refundedCents)} kept)
+                          </span>
+                        )}
+                      </dd>
+                    </div>
+                  )}
                   <div className="flex items-center justify-between gap-4 border-t pt-3">
                     <dt className="font-semibold">Total</dt>
                     <dd className="text-lg font-bold tabular-nums">{fmtMoney(selected.amountCents)}</dd>
@@ -3196,17 +5234,610 @@ function OrdersTab() {
               </div>
               <DialogFooter className="gap-2 sm:gap-0">
                 <CopyButton value={selected.number} label="Copy number" />
-                <Button
-                  variant="outline"
-                  onClick={() =>
-                    toast({
-                      title: "Refunds are simulated in this demo",
-                      description: "In production this would issue a prorated refund and fire invoice.refunded.",
-                    })
-                  }
+                {selected.status === "PAID" && selected.amountCents - (selected.refundedCents || 0) > 0 && (
+                  <Button
+                    variant="outline"
+                    className="text-red-600 hover:bg-red-500/10 hover:text-red-700 dark:text-red-400"
+                    onClick={() => openRefund(selected)}
+                  >
+                    <RotateCcw className="h-4 w-4" /> Refund
+                  </Button>
+                )}
+              </DialogFooter>
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Refund confirmation — destructive action with real money movement.
+          Full refunds cancel the membership; partial refunds keep it active. */}
+      <AlertDialog open={refundOpen} onOpenChange={setRefundOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Refund {selected?.number}?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {selected
+                ? `Money is returned to ${selected.customer.name || selected.customer.email}${selected.gateway === "WHOP" ? " through Whop" : " via the original payment method"}. Refunds cannot be undone.`
+                : ""}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          {selected && (
+            <div className="space-y-3">
+              {/* Full / Partial selector */}
+              <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="Refund type">
+                {(["full", "partial"] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    role="radio"
+                    aria-checked={refundMode === mode}
+                    onClick={() => setRefundMode(mode)}
+                    className={cn(
+                      "rounded-xl border p-3 text-left transition-colors",
+                      refundMode === mode
+                        ? "border-red-500/50 bg-red-500/[0.06] shadow-sm"
+                        : "hover:bg-muted/50"
+                    )}
+                  >
+                    <span className="flex items-center gap-1.5 text-sm font-semibold">
+                      {mode === "full" ? <Ban className="h-3.5 w-3.5" /> : <Percent className="h-3.5 w-3.5" />}
+                      {mode === "full" ? "Full refund" : "Partial refund"}
+                    </span>
+                    <span className="mt-0.5 block text-[11px] leading-snug text-muted-foreground">
+                      {mode === "full"
+                        ? "Returns the whole balance — you choose what happens to access."
+                        : "Keeps the membership and access active."}
+                    </span>
+                  </button>
+                ))}
+              </div>
+
+              {refundMode === "partial" ? (
+                <div className="space-y-2.5 rounded-xl border bg-muted/30 p-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <Label htmlFor="refund-amount" className="text-xs font-semibold">
+                      Amount to refund
+                    </Label>
+                    <span className="text-[11px] tabular-nums text-muted-foreground">
+                      max {fmtMoney(remainingCents)}
+                      {remainingCents < selected.amountCents &&
+                        ` of ${fmtMoney(selected.amountCents)} (−${fmtMoney(selected.refundedCents || 0)} already)`}
+                    </span>
+                  </div>
+                  <div className="relative">
+                    <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-sm font-semibold text-muted-foreground">$</span>
+                    <Input
+                      id="refund-amount"
+                      inputMode="decimal"
+                      value={refundAmount}
+                      onChange={(e) => setRefundAmount(e.target.value.replace(/[^\d.]/g, ""))}
+                      className="pl-7 font-semibold tabular-nums"
+                      aria-invalid={!partialValid}
+                    />
+                  </div>
+                  {/* Quick-amount chips */}
+                  <div className="flex flex-wrap gap-1.5">
+                    {[0.25, 0.5, 0.75, 1].map((pct) => {
+                      const cents = Math.max(1, Math.round(remainingCents * pct));
+                      return (
+                        <button
+                          key={pct}
+                          type="button"
+                          onClick={() => setRefundAmount((cents / 100).toFixed(2))}
+                          className={cn(
+                            "rounded-full border px-2.5 py-1 text-[11px] font-semibold tabular-nums transition-colors hover:bg-muted",
+                            parsedRefundCents === cents &&
+                              refundMode === "partial" &&
+                              "border-red-500/50 bg-red-500/10 text-red-700 dark:text-red-400"
+                          )}
+                        >
+                          {pct === 1 ? "All" : `${pct * 100}%`} · {(cents / 100).toFixed(2)}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  {!partialValid && (
+                    <p className="text-xs font-medium text-red-600 dark:text-red-400">
+                      Enter an amount between $0.01 and {fmtMoney(remainingCents)}.
+                    </p>
+                  )}
+                </div>
+              ) : (
+                <div className="space-y-2.5">
+                  <div className="flex items-start gap-2.5 rounded-xl border border-red-500/30 bg-red-500/[0.05] p-3 text-xs">
+                    <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0 text-red-600 dark:text-red-400" />
+                    <p className="leading-relaxed">
+                      <strong>{fmtMoney(remainingCents)}</strong> will be refunded
+                      {remainingCents < selected.amountCents &&
+                        ` (${fmtMoney(selected.refundedCents || 0)} was already refunded)`}
+                      . Refunds cannot be undone.
+                    </p>
+                  </div>
+                  {/* Access policy — what happens to the membership (full refunds only).
+                      The product's configured default is pre-selected and flagged. */}
+                  <div role="radiogroup" aria-label="Access policy" className="grid grid-cols-2 gap-2">
+                    {(["revoke", "keep"] as const).map((policy) => {
+                      const isProductDefault =
+                        (policy === "keep") === (selected.product.refundPolicy === "KEEP_ACCESS");
+                      return (
+                        <button
+                          key={policy}
+                          type="button"
+                          role="radio"
+                          aria-checked={accessPolicy === policy}
+                          onClick={() => setAccessPolicy(policy)}
+                          className={cn(
+                            "relative rounded-xl border p-3 text-left transition-colors",
+                            accessPolicy === policy
+                              ? policy === "revoke"
+                                ? "border-red-500/50 bg-red-500/[0.06] shadow-sm"
+                                : "border-teal-500/50 bg-teal-500/[0.07] shadow-sm"
+                              : "hover:bg-muted/50"
+                          )}
+                        >
+                          {isProductDefault && (
+                            <span className="absolute right-2.5 top-2.5 rounded-full border bg-muted px-1.5 py-px text-[9px] font-bold uppercase tracking-wide text-muted-foreground">
+                              default
+                            </span>
+                          )}
+                          <span className="flex items-center gap-1.5 text-sm font-semibold">
+                            {policy === "revoke" ? <Ban className="h-3.5 w-3.5" /> : <CalendarClock className="h-3.5 w-3.5" />}
+                            {policy === "revoke" ? "Close access now" : "Keep until period end"}
+                          </span>
+                          <span className="mt-0.5 block text-[11px] leading-snug text-muted-foreground">
+                            {policy === "revoke"
+                              ? "Membership canceled, roles and license keys revoked immediately."
+                              : "Goodwill refund — the buyer keeps access until the period runs out, then it ends naturally (no renewal)."}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <p className="flex items-center gap-1.5 text-[10px] leading-relaxed text-muted-foreground">
+                    <Info className="h-3 w-3 shrink-0" />
+                    Pre-selected from {selected.product.title}'s refund policy — change it under Products → Edit →
+                    Details to make it permanent.
+                  </p>
+                  {accessPolicy === "keep" && (
+                    <p className="flex items-start gap-2 rounded-lg border border-teal-500/30 bg-teal-500/[0.06] p-2.5 text-[11px] leading-relaxed text-teal-800 dark:text-teal-300">
+                      <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                      Money is still returned in full — the buyer just finishes the period they paid for. The billing engine closes the membership at period end.
+                    </p>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={refunding}>Keep the payment</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={refunding || !partialValid}
+              className="bg-red-600 text-white hover:bg-red-700"
+              onClick={(e) => {
+                e.preventDefault(); // keep the dialog open until the API resolves
+                void doRefund();
+              }}
+            >
+              {refunding
+                ? "Refunding…"
+                : `Refund ${refundMode === "full" ? fmtMoney(remainingCents) : partialValid ? fmtMoney(parsedRefundCents) : ""}`}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </div>
+  );
+}
+
+// ============================================================================
+// TAB: AUDIT — immutable money-event trail
+// ============================================================================
+
+/** Date-range presets for the audit trail (platform-clock anchored). */
+const AUDIT_RANGES = [
+  { key: "all", label: "All time", days: null },
+  { key: "90d", label: "90 days", days: 90 },
+  { key: "30d", label: "30 days", days: 30 },
+  { key: "7d", label: "7 days", days: 7 },
+] as const;
+type AuditRangeKey = (typeof AUDIT_RANGES)[number]["key"];
+
+function AuditTab() {
+  const { toast } = useToast();
+  const now = useSimNow();
+  const userId = useAppStore((s) => s.user?.id);
+  const nonce = useAppStore((s) => s.nonce);
+  const [range, setRange] = useState<AuditRangeKey>("all");
+  const [actionFilter, setActionFilter] = useState("ALL");
+  const [query, setQuery] = useState("");
+  const [selected, setSelected] = useState<AuditEventDTO | null>(null);
+  const [exporting, setExporting] = useState(false);
+  const [data, setData] = useState<AuditEventDTO[] | null>(null);
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Page size per fetch — "Load more" appends the next page of the SAME
+  // server-side scoping/filters, so the list can grow past the initial 200.
+  const PAGE_SIZE = 200;
+
+  // Server-side date scoping — the range (not just the client filter) drives
+  // the query so the export and the screen can never disagree.
+  const rangeDays = AUDIT_RANGES.find((r) => r.key === range)?.days ?? null;
+  const fromIso = rangeDays ? new Date(new Date(now).getTime() - rangeDays * 86400000).toISOString() : null;
+
+  useEffect(() => {
+    if (!userId) return;
+    let alive = true;
+    const params = new URLSearchParams();
+    if (actionFilter !== "ALL") params.set("action", actionFilter);
+    if (fromIso) params.set("from", fromIso);
+    api<{ events: AuditEventDTO[]; hasMore?: boolean }>(`/api/creator/audit?take=${PAGE_SIZE}${params.size ? `&${params}` : ""}`)
+      .then((r) => {
+        if (!alive) return;
+        setData(r.events);
+        setHasMore(!!r.hasMore);
+        setError(null);
+      })
+      .catch((e) => {
+        if (alive) setError(e instanceof Error ? e.message : "Audit trail unavailable.");
+      });
+    return () => {
+      alive = false;
+    };
+  }, [userId, nonce, actionFilter, fromIso]);
+
+  // Append-only next page: same filters, skip = rows already loaded. A page
+  // that returns zero new rows flips hasMore off (guard against a scan-window
+  // edge ever producing an endless button).
+  async function loadMore() {
+    if (!data || loadingMore) return;
+    setLoadingMore(true);
+    try {
+      const params = new URLSearchParams();
+      if (actionFilter !== "ALL") params.set("action", actionFilter);
+      if (fromIso) params.set("from", fromIso);
+      const r = await api<{ events: AuditEventDTO[]; hasMore?: boolean }>(
+        `/api/creator/audit?take=${PAGE_SIZE}&skip=${data.length}${params.size ? `&${params}` : ""}`
+      );
+      setData((prev) => (prev ? [...prev, ...r.events] : r.events));
+      setHasMore(!!r.hasMore && r.events.length > 0);
+    } catch (e) {
+      toast({ title: "Couldn't load more events", description: e instanceof Error ? e.message : "Try again.", variant: "destructive" });
+    } finally {
+      setLoadingMore(false);
+    }
+  }
+
+  // CSV export — same scoping + filters as the visible list (the server
+  // derives the file from the same shared query), downloaded as a blob.
+  async function exportCsv() {
+    if (!data || data.length === 0) return;
+    setExporting(true);
+    try {
+      const params = new URLSearchParams();
+      if (actionFilter !== "ALL") params.set("action", actionFilter);
+      if (fromIso) params.set("from", fromIso);
+      const res = await fetch(`/api/creator/audit/export${params.size ? `?${params}` : ""}`, {
+        headers: userId ? { "x-user-id": userId } : {},
+      });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(body.error || `Export failed (${res.status})`);
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `vendly-audit-${new Date(now).toISOString().slice(0, 10)}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      toast({
+        title: "Audit trail exported",
+        description: `${data.length} event${data.length === 1 ? "" : "s"} downloaded as CSV — scoped to your products${rangeDays ? ` · last ${rangeDays} days` : " · all time"}.`,
+      });
+    } catch (e) {
+      toast({ title: "Export failed", description: e instanceof Error ? e.message : "Try again.", variant: "destructive" });
+    } finally {
+      setExporting(false);
+    }
+  }
+
+  if (error) return <LoadError message={error} />;
+  if (!data) return <TableSkeleton rows={9} label="Audit trail" />;
+
+  const events = data;
+  const actions = [...new Set(events.map((e) => e.action))];
+  const succeededCents = events
+    .filter((e) => e.action === "charge.succeeded" || e.action === "checkout.charged")
+    .reduce((s, e) => s + e.amountCents, 0);
+  const refundedCents = events.filter((e) => e.action === "refund.created").reduce((s, e) => s + e.amountCents, 0);
+  const failedCharges = events.filter((e) => e.action === "charge.failed").length;
+  const failedRefunds = events.filter((e) => e.action === "refund.failed").length;
+
+  const q = query.trim().toLowerCase();
+  const filtered = events.filter((e) => {
+    if (!q) return true;
+    return (
+      (e.whopRef || "").toLowerCase().includes(q) ||
+      (e.invoiceNumber || "").toLowerCase().includes(q) ||
+      e.action.toLowerCase().includes(q) ||
+      (e.productTitle || "").toLowerCase().includes(q) ||
+      (e.actorLabel || "").toLowerCase().includes(q) ||
+      (e.buyer?.email || "").toLowerCase().includes(q)
+    );
+  });
+
+  return (
+    <div className="space-y-5">
+      <SectionHeader
+        title="Audit trail"
+        description="Every money event on your products — charges, refunds, cancels, webhooks — immutable and timestamped"
+      />
+
+      {/* Stats */}
+      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <StatCard label="Money moved" value={fmtMoney(succeededCents)} sub="successful charges" icon={CircleDollarSign} />
+        <StatCard
+          label="Refunded"
+          value={fmtMoney(refundedCents)}
+          sub={`${events.filter((e) => e.action === "refund.created").length} refunds issued`}
+          icon={RotateCcw}
+          className={refundedCents > 0 ? "border-sky-500/30" : undefined}
+        />
+        <StatCard
+          label="Failed charges"
+          value={String(failedCharges)}
+          sub={failedCharges > 0 ? "handled by dunning" : "all clear"}
+          icon={XCircle}
+          className={failedCharges > 0 ? "border-red-500/40 bg-red-500/[0.04]" : undefined}
+        />
+        <StatCard
+          label="Webhook events"
+          value={String(events.filter((e) => e.action.startsWith("webhook.")).length)}
+          sub={failedRefunds > 0 ? `${failedRefunds} refund failures` : "reconciliation + retries"}
+          icon={Webhook}
+        />
+      </div>
+
+      {/* Info banner */}
+      <div className="flex items-start gap-3 rounded-2xl border border-emerald-500/30 bg-emerald-500/[0.07] p-4">
+        <ShieldCheck className="mt-0.5 h-5 w-5 shrink-0 text-emerald-600 dark:text-emerald-400" />
+        <p className="text-sm leading-relaxed">
+          Rows are <strong>append-only</strong>: the billing engine, refund path and webhook receiver write one row per
+          money event on the platform clock. Use it to reconcile payouts against{" "}
+          <span className="font-mono text-xs">Whop → Payments</span> — every Whop-routed event carries its{" "}
+          <span className="font-mono text-xs">pay_…</span> reference.
+        </p>
+      </div>
+
+      {/* Filters: range + action + search + export */}
+      <div className="flex flex-wrap items-center gap-3">
+        <div className="flex gap-1.5 rounded-full border bg-card p-1" role="group" aria-label="Filter by date range">
+          {AUDIT_RANGES.map((r) => (
+            <button
+              key={r.key}
+              onClick={() => setRange(r.key)}
+              aria-pressed={range === r.key}
+              className={cn(
+                "h-8 rounded-full px-3.5 text-xs font-semibold transition-colors",
+                range === r.key ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"
+              )}
+            >
+              {r.label}
+            </button>
+          ))}
+        </div>
+        <Select value={actionFilter} onValueChange={setActionFilter}>
+          <SelectTrigger className="h-9 w-[210px]" aria-label="Filter by action">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="ALL">All actions</SelectItem>
+            {actions.map((a) => (
+              <SelectItem key={a} value={a} className="font-mono text-xs">
+                {auditActionMeta(a).label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <div className="relative min-w-0 flex-1 sm:max-w-xs">
+          <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search invoice, pay_ ref, product…"
+            className="h-9 rounded-full pl-9"
+            aria-label="Search audit trail"
+          />
+        </div>
+        <Button
+          variant="outline"
+          size="sm"
+          className="h-9 gap-1.5 rounded-full"
+          onClick={() => void exportCsv()}
+          disabled={exporting || filtered.length === 0}
+          title="Download the visible events as CSV (same filters)"
+        >
+          {exporting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+          Export CSV
+        </Button>
+        <span className="ml-auto text-xs tabular-nums text-muted-foreground">
+          {filtered.length} of {events.length} loaded{hasMore ? "+" : ""}
+        </span>
+      </div>
+
+      {events.length === 0 ? (
+        <EmptyState
+          icon={ScrollText}
+          title="No audit events in this range"
+          description="Money events land here as soon as you make your first sale — charges, refunds, dunning and webhook reconciliation. Try widening the date range."
+        />
+      ) : filtered.length === 0 ? (
+        <EmptyState icon={Search} title="No matching events" description="Try clearing the search or action filter." />
+      ) : (
+        <Panel className="overflow-hidden">
+          <div className={cn("max-h-[70vh] overflow-auto", SCROLL_THIN)}>
+            <table className="w-full min-w-[900px] text-sm">
+              <TableHeader className="sticky top-0 z-10 bg-card shadow-[0_1px_0_0_var(--border)]">
+                <TableRow className="hover:bg-transparent">
+                  <TableHead className="pl-5">Time</TableHead>
+                  <TableHead>Action</TableHead>
+                  <TableHead>Actor</TableHead>
+                  <TableHead>Product</TableHead>
+                  <TableHead className="text-right">Amount</TableHead>
+                  <TableHead>Invoice</TableHead>
+                  <TableHead className="pr-5">Whop ref</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {filtered.map((e) => {
+                  const meta = auditActionMeta(e.action);
+                  return (
+                    <TableRow key={e.id} className="cursor-pointer" onClick={() => setSelected(e)}>
+                      <TableCell className="pl-5 text-xs tabular-nums text-muted-foreground">
+                        <p>{relTime(e.at, now)}</p>
+                        <p className="text-[10px] opacity-70">{fmtDate(e.at)}</p>
+                      </TableCell>
+                      <TableCell>
+                        <span
+                          className={cn(
+                            "inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-semibold",
+                            meta.cls
+                          )}
+                        >
+                          {meta.label}
+                        </span>
+                      </TableCell>
+                      <TableCell>
+                        <span className="max-w-[120px] truncate text-[13px]" title={e.actorLabel}>
+                          {e.actorLabel}
+                        </span>
+                      </TableCell>
+                      <TableCell>
+                        <p className="max-w-[150px] truncate text-[13px]">{e.productTitle || "—"}</p>
+                        {e.buyer?.name && <p className="text-[11px] text-muted-foreground">to {e.buyer.name}</p>}
+                      </TableCell>
+                      <TableCell
+                        className={cn(
+                          "text-right font-semibold tabular-nums",
+                          e.amountCents > 0 ? "" : "text-muted-foreground/60"
+                        )}
+                      >
+                        {e.amountCents > 0 ? fmtMoney(e.amountCents) : "—"}
+                      </TableCell>
+                      <TableCell className="font-mono text-xs">{e.invoiceNumber || "—"}</TableCell>
+                      <TableCell className="pr-5">
+                        {e.whopRef ? (
+                          <span className="font-mono text-[11px] text-muted-foreground" title={e.whopRef}>
+                            {e.whopRef.length > 14 ? `${e.whopRef.slice(0, 8)}…${e.whopRef.slice(-4)}` : e.whopRef}
+                          </span>
+                        ) : (
+                          <span className="text-muted-foreground/50">—</span>
+                        )}
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
+              </TableBody>
+            </table>
+          </div>
+          {/* Load more — appends the next server page of the same scoping so
+              the trail is never silently truncated at the first 200 rows. */}
+          {hasMore && (
+            <div className="flex flex-wrap items-center justify-center gap-3 border-t px-5 py-4">
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-9 gap-1.5 rounded-full"
+                onClick={() => void loadMore()}
+                disabled={loadingMore}
+              >
+                {loadingMore ? <Loader2 className="h-4 w-4 animate-spin" /> : <ChevronDown className="h-4 w-4" />}
+                {loadingMore ? "Loading…" : `Load ${PAGE_SIZE} more`}
+              </Button>
+              <p className="text-[11px] leading-relaxed text-muted-foreground">
+                Older events continue below — the trail is append-only and never truncated silently.
+              </p>
+            </div>
+          )}
+        </Panel>
+      )}
+
+      {/* Event detail */}
+      <Dialog open={!!selected} onOpenChange={(o) => !o && setSelected(null)}>
+        <DialogContent className="max-h-[88vh] overflow-y-auto sm:max-w-xl">
+          {selected && (
+            <>
+              <DialogHeader>
+                <DialogTitle className="flex flex-wrap items-center gap-2.5">
+                  {auditActionMeta(selected.action).label}
+                  <span
+                    className={cn(
+                      "rounded-full border px-2 py-0.5 font-mono text-[10px] font-medium",
+                      auditActionMeta(selected.action).cls
+                    )}
+                  >
+                    {selected.action}
+                  </span>
+                </DialogTitle>
+                <DialogDescription>
+                  {fmtDateTime(selected.at)} · {selected.actorLabel}
+                  {selected.invoiceNumber && ` · ${selected.invoiceNumber}`}
+                </DialogDescription>
+              </DialogHeader>
+              <dl className="space-y-2.5 text-sm">
+                {selected.amountCents > 0 && (
+                  <div className="flex items-center justify-between gap-4">
+                    <dt className="text-muted-foreground">Amount</dt>
+                    <dd className="font-bold tabular-nums">{fmtMoney(selected.amountCents)}</dd>
+                  </div>
+                )}
+                {selected.productTitle && (
+                  <div className="flex items-center justify-between gap-4">
+                    <dt className="text-muted-foreground">Product</dt>
+                    <dd className="font-medium">{selected.productTitle}</dd>
+                  </div>
+                )}
+                {selected.buyer && (
+                  <div className="flex items-center justify-between gap-4">
+                    <dt className="text-muted-foreground">Buyer</dt>
+                    <dd className="text-right">
+                      {selected.buyer.name || "—"}
+                      <span className="block text-xs font-normal text-muted-foreground">{selected.buyer.email}</span>
+                    </dd>
+                  </div>
+                )}
+                {selected.gateway && (
+                  <div className="flex items-center justify-between gap-4">
+                    <dt className="text-muted-foreground">Gateway</dt>
+                    <dd>
+                      <GatewayBadge gateway={selected.gateway} />
+                    </dd>
+                  </div>
+                )}
+                {selected.whopRef && (
+                  <div className="flex items-center justify-between gap-4">
+                    <dt className="text-muted-foreground">Whop payment</dt>
+                    <dd className="flex items-center gap-1 font-mono text-xs">{selected.whopRef}</dd>
+                  </div>
+                )}
+              </dl>
+              <div>
+                <p className="mb-1.5 text-xs font-semibold text-muted-foreground">Event detail</p>
+                <pre
+                  className={cn(
+                    "max-h-60 overflow-auto rounded-xl border bg-zinc-950 p-4 font-mono text-xs leading-relaxed text-zinc-200",
+                    SCROLL_THIN
+                  )}
                 >
-                  <RotateCcw className="h-4 w-4" /> Refund (simulated)
-                </Button>
+                  {JSON.stringify(selected.detail, null, 2)}
+                </pre>
+              </div>
+              <DialogFooter>
+                <CopyButton value={selected.whopRef || selected.invoiceNumber || selected.action} label="Copy reference" />
               </DialogFooter>
             </>
           )}
@@ -3214,6 +5845,31 @@ function OrdersTab() {
       </Dialog>
     </div>
   );
+}
+
+/** Action → { label, tone, icon } for the audit badges. */
+const AUDIT_ACTION_META: Record<string, { label: string; cls: string }> = {
+  "checkout.charged": { label: "Checkout charged", cls: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/25" },
+  "trial.started": { label: "Trial started", cls: "bg-teal-500/10 text-teal-700 dark:text-teal-400 border-teal-500/25" },
+  "charge.succeeded": { label: "Charge succeeded", cls: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/25" },
+  "charge.failed": { label: "Charge failed", cls: "bg-red-500/10 text-red-700 dark:text-red-400 border-red-500/25" },
+  "charge.deferred": { label: "Charge deferred", cls: "bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/25" },
+  "comp.renewal": { label: "Comp renewal", cls: "bg-muted text-muted-foreground border-border" },
+  "trial.converted": { label: "Trial converted", cls: "bg-teal-500/10 text-teal-700 dark:text-teal-400 border-teal-500/25" },
+  "refund.created": { label: "Refund issued", cls: "bg-sky-500/10 text-sky-700 dark:text-sky-400 border-sky-500/25" },
+  "refund.failed": { label: "Refund failed", cls: "bg-red-500/10 text-red-700 dark:text-red-400 border-red-500/25" },
+  "subscription.cancelled": { label: "Subscription canceled", cls: "bg-zinc-500/10 text-zinc-600 dark:text-zinc-400 border-zinc-500/25" },
+  "subscription.canceled.dunning": { label: "Dunning cancel", cls: "bg-red-500/10 text-red-700 dark:text-red-400 border-red-500/25" },
+  "plan.changed": { label: "Plan changed", cls: "bg-violet-500/10 text-violet-700 dark:text-violet-400 border-violet-500/25" },
+  "webhook.reconciled": { label: "Webhook reconciled", cls: "bg-teal-500/10 text-teal-700 dark:text-teal-400 border-teal-500/25" },
+  "webhook.unmatched": { label: "Webhook unmatched", cls: "bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/25" },
+  "webhook.rejected": { label: "Webhook rejected", cls: "bg-red-500/10 text-red-700 dark:text-red-400 border-red-500/25" },
+  "webhook.retry": { label: "Webhook retried", cls: "bg-teal-500/10 text-teal-700 dark:text-teal-400 border-teal-500/25" },
+  "rate.limited": { label: "Rate limited", cls: "bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/25" },
+};
+
+function auditActionMeta(action: string) {
+  return AUDIT_ACTION_META[action] || { label: action, cls: "bg-muted text-muted-foreground border-border" };
 }
 
 // ============================================================================
@@ -4508,13 +7164,7 @@ function endsInLabel(endsAt: string, nowMs: number): string {
  * this tab's data anyway.
  */
 function useNowMs(): number {
-  const simNow = useSimNow();
-  const [tick, setTick] = useState(0);
-  useEffect(() => {
-    const t = setInterval(() => setTick((n) => n + 1), 30_000);
-    return () => clearInterval(t);
-  }, []);
-  return useMemo(() => Math.max(Date.now(), new Date(simNow).getTime()), [tick, simNow]);
+  return usePlatformNowMs();
 }
 
 function GiveawaysTab({ user }: { user: SessionUser }) {
@@ -5755,13 +8405,17 @@ function WebhooksTab() {
   const { toast } = useToast();
   const fallbackNow = useSimNow();
   const refresh = useAppStore((s) => s.refresh);
+  // Deep-link filter from the overview ingestion-health card (e.g. the
+  // "Review unmatched" CTA lands here with the list pre-filtered).
+  const ingestionOutcome = useAppStore((s) => s.params.ingestionOutcome);
 
   const { data, error, loading, setData } = useCreatorFetch(async () => {
-    const [epsRes, delsRes] = await Promise.all([
+    const [epsRes, delsRes, whopRes] = await Promise.all([
       api<{ endpoints: WebhookEndpointDTO[] }>("/api/webhooks/endpoints"),
       api<{ deliveries: WebhookDeliveryDTO[]; now: string }>("/api/webhooks/deliveries"),
+      api<{ events: WhopIngestionEventDTO[] }>("/api/webhooks/whop/events").catch(() => ({ events: [] as WhopIngestionEventDTO[] })),
     ]);
-    return { endpoints: epsRes.endpoints, deliveries: delsRes.deliveries, now: delsRes.now };
+    return { endpoints: epsRes.endpoints, deliveries: delsRes.deliveries, now: delsRes.now, whopEvents: whopRes.events };
   });
   // Compare delivery timestamps against the server's clock at fetch time —
   // the store clock snapshot goes stale the moment new deliveries land.
@@ -5772,6 +8426,29 @@ function WebhooksTab() {
   const [statusFilter, setStatusFilter] = useState("ALL");
   const [endpointFilter, setEndpointFilter] = useState("ALL");
   const [selectedDelivery, setSelectedDelivery] = useState<WebhookDeliveryDTO | null>(null);
+  const [retryingId, setRetryingId] = useState<string | null>(null);
+
+  // Manual retry / redelivery — re-attempts the HTTP delivery with the
+  // ORIGINAL payload (never re-fires the money event itself).
+  async function retryDelivery(d: WebhookDeliveryDTO) {
+    setRetryingId(d.id);
+    try {
+      const res = await api<{ ok: boolean; status: string; attempts: number; message: string }>(
+        `/api/webhooks/deliveries/${d.id}/retry`,
+        { method: "POST" }
+      );
+      toast({
+        title: res.status === "FAILED" ? "Retry failed" : "Delivery retried",
+        description: `${res.message} (${d.eventType} → ${d.endpoint.name})`,
+        variant: res.status === "FAILED" ? "destructive" : undefined,
+      });
+      refresh();
+    } catch (e) {
+      toast({ title: "Couldn't retry the delivery", description: (e as Error).message, variant: "destructive" });
+    } finally {
+      setRetryingId(null);
+    }
+  }
 
   async function toggleActive(ep: WebhookEndpointDTO, next: boolean) {
     // Optimistic flip; revert on failure.
@@ -5821,7 +8498,7 @@ function WebhooksTab() {
   }
   if (error || !data) return <LoadError message={error || "Webhooks unavailable."} />;
 
-  const { endpoints, deliveries } = data;
+  const { endpoints, deliveries, whopEvents } = data;
   const filteredDeliveries = deliveries.filter(
     (d) =>
       (statusFilter === "ALL" || d.status === statusFilter) &&
@@ -5877,7 +8554,7 @@ function WebhooksTab() {
               const ProviderIcon = provider.icon;
               const isRevealed = revealed.has(ep.id);
               return (
-                <motion.div key={ep.id} variants={fadeUp}>
+                <motion.div key={ep.id} variants={fadeUp} className="min-w-0">
                   <Panel className={cn("flex h-full flex-col p-5", !ep.isActive && "opacity-70")}>
                     <div className="flex items-start justify-between gap-3">
                       <div className="flex min-w-0 flex-wrap items-center gap-2">
@@ -6001,6 +8678,9 @@ function WebhooksTab() {
       {/* Send test event */}
       <TestEventCard endpoints={endpoints} onSent={() => refresh()} />
 
+      {/* Whop → Vendly ingestion (real-time reconciliation observability) */}
+      <WhopIngestionPanel events={whopEvents} now={now} onReconciled={() => refresh()} initialOutcome={ingestionOutcome} />
+
       {/* Delivery log */}
       <section aria-label="Delivery log">
         <div className="mb-3 flex flex-wrap items-end justify-between gap-3">
@@ -6054,7 +8734,8 @@ function WebhooksTab() {
                     <TableHead>Endpoint</TableHead>
                     <TableHead>Status</TableHead>
                     <TableHead>Response</TableHead>
-                    <TableHead className="pr-5 text-right">Attempts</TableHead>
+                    <TableHead>Attempts</TableHead>
+                    <TableHead className="pr-5 text-right">Actions</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -6084,7 +8765,32 @@ function WebhooksTab() {
                           {d.responseCode ?? "—"}
                         </span>
                       </TableCell>
-                      <TableCell className="pr-5 text-right font-mono text-xs tabular-nums">{d.attempts}</TableCell>
+                      <TableCell className="font-mono text-xs tabular-nums">{d.attempts}</TableCell>
+                      <TableCell className="pr-5 text-right">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          disabled={retryingId === d.id}
+                          className={cn(
+                            "h-7 gap-1 px-2 text-[11px] font-semibold",
+                            d.status === "FAILED"
+                              ? "text-amber-600 hover:bg-amber-500/10 hover:text-amber-700 dark:text-amber-400"
+                              : "text-muted-foreground hover:text-foreground"
+                          )}
+                          onClick={(ev) => {
+                            ev.stopPropagation(); // don't open the detail dialog
+                            void retryDelivery(d);
+                          }}
+                          aria-label={`${d.status === "FAILED" ? "Retry" : "Redeliver"} ${d.eventType} to ${d.endpoint.name}`}
+                        >
+                          {retryingId === d.id ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <RefreshCw className="h-3.5 w-3.5" />
+                          )}
+                          {d.status === "FAILED" ? "Retry" : "Resend"}
+                        </Button>
+                      </TableCell>
                     </TableRow>
                   ))}
                 </TableBody>
@@ -6109,6 +8815,8 @@ function WebhooksTab() {
                 <DialogDescription>
                   Sent to {selectedDelivery.endpoint.name} · {fmtDateTime(selectedDelivery.createdAt)} ·{" "}
                   {selectedDelivery.attempts} attempt{selectedDelivery.attempts === 1 ? "" : "s"}
+                  {selectedDelivery.responseCode != null &&
+                    ` · response ${selectedDelivery.responseCode}`}
                 </DialogDescription>
               </DialogHeader>
               <pre
@@ -6119,22 +8827,461 @@ function WebhooksTab() {
               >
                 {JSON.stringify(selectedDelivery.payload, null, 2)}
               </pre>
-              <div className="flex items-start gap-2.5 rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-3 text-xs">
-                <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
-                <p className="leading-relaxed">
-                  Signed with the endpoint's HMAC-SHA256 secret in the{" "}
-                  <code className="rounded bg-muted px-1 py-0.5 font-mono">X-Vendly-Signature</code> header — always verify
-                  the signature before trusting a payload.
-                </p>
-              </div>
-              <DialogFooter>
+              {selectedDelivery.status === "FAILED" ? (
+                <div className="flex items-start gap-2.5 rounded-xl border border-amber-500/30 bg-amber-500/[0.08] p-3 text-xs">
+                  <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
+                  <p className="leading-relaxed">
+                    The endpoint returned <strong className="font-mono">{selectedDelivery.responseCode ?? "an error"}</strong>{" "}
+                    — verify the URL is reachable from the public internet, then retry the delivery.
+                  </p>
+                </div>
+              ) : (
+                <div className="flex items-start gap-2.5 rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-3 text-xs">
+                  <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
+                  <p className="leading-relaxed">
+                    Signed with the endpoint's HMAC-SHA256 secret in the{" "}
+                    <code className="rounded bg-muted px-1 py-0.5 font-mono">X-Vendly-Signature</code> header — always verify
+                    the signature before trusting a payload.
+                  </p>
+                </div>
+              )}
+              <DialogFooter className="gap-2 sm:gap-0">
                 <CopyButton value={JSON.stringify(selectedDelivery.payload, null, 2)} label="Copy payload" />
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={retryingId === selectedDelivery.id}
+                  onClick={() => void retryDelivery(selectedDelivery)}
+                  className={cn(
+                    "gap-1.5",
+                    selectedDelivery.status === "FAILED"
+                      ? "border-amber-500/40 text-amber-700 hover:bg-amber-500/10 hover:text-amber-800 dark:text-amber-400"
+                      : "text-muted-foreground hover:text-foreground"
+                  )}
+                >
+                  {retryingId === selectedDelivery.id ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <RefreshCw className="h-3.5 w-3.5" />
+                  )}
+                  {selectedDelivery.status === "FAILED" ? "Retry delivery" : "Redeliver"}
+                </Button>
               </DialogFooter>
             </>
           )}
         </DialogContent>
       </Dialog>
     </div>
+  );
+}
+
+// ============================================================================
+// Whop → Vendly ingestion feed (WhopEvent rows + manual re-reconcile)
+// ============================================================================
+
+/** Ingestion outcome → { label, cls, hint } for the badges. */
+const WHOP_OUTCOME_META: Record<string, { label: string; cls: string; hint: string }> = {
+  reconciled: {
+    label: "Reconciled",
+    cls: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/25",
+    hint: "Matched a local record and was applied — late settlement, failure or dashboard refund.",
+  },
+  noop: {
+    label: "No-op",
+    cls: "bg-zinc-500/10 text-zinc-600 dark:text-zinc-400 border-zinc-500/25",
+    hint: "The record was already in the right state — nothing to change.",
+  },
+  unmatched: {
+    label: "Unmatched",
+    cls: "bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/25",
+    hint: "No local invoice for this payment ref yet — re-reconcile once it lands (or review manually).",
+  },
+  "no-rule": {
+    label: "Recorded",
+    cls: "bg-muted text-muted-foreground border-border",
+    hint: "Event type stored for observability — no reconciliation rule applies.",
+  },
+  error: {
+    label: "Error",
+    cls: "bg-red-500/10 text-red-700 dark:text-red-400 border-red-500/25",
+    hint: "Reconciliation threw — retrying is safe (redelivery would do the same).",
+  },
+  received: {
+    label: "Received",
+    cls: "bg-teal-500/10 text-teal-700 dark:text-teal-400 border-teal-500/25",
+    hint: "Ingested — reconciliation result pending.",
+  },
+};
+
+function whopOutcomeMeta(outcome: string) {
+  return WHOP_OUTCOME_META[outcome] || WHOP_OUTCOME_META["no-rule"];
+}
+
+function WhopIngestionPanel({
+  events,
+  now,
+  onReconciled,
+  initialOutcome,
+}: {
+  events: WhopIngestionEventDTO[];
+  now: string;
+  onReconciled: () => void;
+  /** Deep-link filter (e.g. "unmatched" from the overview health card). */
+  initialOutcome?: string;
+}) {
+  const { toast } = useToast();
+  const [selected, setSelected] = useState<WhopIngestionEventDTO | null>(null);
+  const [outcomeFilter, setOutcomeFilter] = useState(
+    initialOutcome && ["reconciled", "noop", "unmatched", "error", "no-rule"].includes(initialOutcome)
+      ? initialOutcome
+      : "ALL"
+  );
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+
+  // Deep-linked from the overview health card: scroll the panel into view and
+  // flash its border so the destination is obvious.
+  useEffect(() => {
+    if (!initialOutcome || !rootRef.current) return;
+    rootRef.current.scrollIntoView({ behavior: "smooth", block: "center" });
+    const el = rootRef.current;
+    el.classList.add("ring-2", "ring-primary/40", "ring-offset-2", "ring-offset-background", "transition-shadow");
+    const t = setTimeout(() => el.classList.remove("ring-2", "ring-primary/40", "ring-offset-2", "ring-offset-background"), 2400);
+    return () => {
+      clearTimeout(t);
+      el.classList.remove("ring-2", "ring-primary/40", "ring-offset-2", "ring-offset-background");
+    };
+  }, [initialOutcome]);
+
+  const retryable = (e: WhopIngestionEventDTO) =>
+    e.outcome === "unmatched" || e.outcome === "error" || e.outcome === "no-rule";
+
+  async function reReconcile(e: WhopIngestionEventDTO) {
+    setBusyId(e.id);
+    try {
+      const res = await api<{ ok: boolean; outcome: string; message: string }>(
+        `/api/webhooks/whop/events/${e.id}/reconcile`,
+        { method: "POST" }
+      );
+      toast({
+        title: res.outcome === "reconciled" ? "Event reconciled" : "Re-reconcile ran",
+        description: res.message,
+        variant: res.outcome === "error" ? "destructive" : undefined,
+      });
+      onReconciled();
+      if (selected?.id === e.id) setSelected(null);
+    } catch (err) {
+      toast({
+        title: "Re-reconcile failed",
+        description: err instanceof Error ? err.message : "Try again.",
+        variant: "destructive",
+      });
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  const counts = {
+    reconciled: events.filter((e) => e.outcome === "reconciled" || e.outcome === "noop").length,
+    unmatched: events.filter((e) => e.outcome === "unmatched").length,
+    errors: events.filter((e) => e.outcome === "error").length,
+  };
+  const filtered = events.filter((e) => outcomeFilter === "ALL" || e.outcome === outcomeFilter);
+
+  return (
+    <Panel className="overflow-hidden" ref={rootRef}>
+      <div className="flex flex-wrap items-start justify-between gap-3 p-5 pb-4">
+        <div className="min-w-0">
+          <h2 className="flex items-center gap-2 text-sm font-bold">
+            <RadioTower className="h-4 w-4 text-teal-600 dark:text-teal-400" />
+            Whop → Vendly ingestion
+          </h2>
+          <p className="mt-1 max-w-2xl text-xs leading-relaxed text-muted-foreground">
+            Events Whop delivers to <span className="font-mono text-[11px]">/api/webhooks/whop</span> (svix-signed,
+            deduped, replay-protected) are reconciled against your invoices in real time — late settlements flip
+            invoices to paid, dashboard refunds are mirrored, and anything that can&apos;t match a local record lands
+            here for review.
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="rounded-full border border-emerald-500/25 bg-emerald-500/10 px-2.5 py-1 text-[11px] font-semibold text-emerald-700 dark:text-emerald-400">
+            {counts.reconciled} reconciled
+          </span>
+          <span
+            className={cn(
+              "rounded-full border px-2.5 py-1 text-[11px] font-semibold",
+              counts.unmatched > 0
+                ? "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-400"
+                : "border-border bg-muted text-muted-foreground"
+            )}
+          >
+            {counts.unmatched} unmatched
+          </span>
+          {counts.errors > 0 && (
+            <span className="rounded-full border border-red-500/30 bg-red-500/10 px-2.5 py-1 text-[11px] font-semibold text-red-700 dark:text-red-400">
+              {counts.errors} errors
+            </span>
+          )}
+        </div>
+      </div>
+
+      {events.length === 0 ? (
+        <div className="border-t px-5 py-8 text-center">
+          <p className="text-sm font-medium">No Whop events ingested yet</p>
+          <p className="mx-auto mt-1 max-w-md text-xs leading-relaxed text-muted-foreground">
+            Once the platform runs at a public URL, register{" "}
+            <span className="font-mono text-[11px]">&lt;public-url&gt;/api/webhooks/whop</span> at Whop with the{" "}
+            <span className="font-mono text-[11px]">payment.succeeded</span> /{" "}
+            <span className="font-mono text-[11px]">payment.failed</span> triggers and set{" "}
+            <span className="font-mono text-[11px]">WHOP_WEBHOOK_SECRET</span>. The endpoint is live and
+            signature-verified — it just needs a reachable URL for Whop to deliver to.
+          </p>
+        </div>
+      ) : (
+        <>
+          <div className="flex flex-wrap items-center gap-2 border-t px-5 py-3">
+            <div className="flex gap-1.5 rounded-full border bg-card p-1" role="group" aria-label="Filter by outcome">
+              {(["ALL", "reconciled", "noop", "unmatched", "error", "no-rule"] as const).map((o) => {
+                const n = o === "ALL" ? events.length : events.filter((e) => e.outcome === o).length;
+                if (o !== "ALL" && n === 0) return null;
+                return (
+                  <button
+                    key={o}
+                    onClick={() => setOutcomeFilter(o)}
+                    aria-pressed={outcomeFilter === o}
+                    className={cn(
+                      "h-7 rounded-full px-2.5 text-[11px] font-semibold transition-colors",
+                      outcomeFilter === o
+                        ? "bg-primary text-primary-foreground"
+                        : "text-muted-foreground hover:text-foreground"
+                    )}
+                  >
+                    {o === "ALL" ? `All (${n})` : `${whopOutcomeMeta(o).label} (${n})`}
+                  </button>
+                );
+              })}
+            </div>
+            <span className="ml-auto text-[11px] tabular-nums text-muted-foreground">
+              newest first · platform clock
+            </span>
+          </div>
+          <div className={cn("max-h-80 overflow-auto", SCROLL_THIN)}>
+            <table className="w-full min-w-[760px] text-sm">
+              <TableHeader className="sticky top-0 z-10 bg-card shadow-[0_1px_0_0_var(--border)]">
+                <TableRow className="hover:bg-transparent">
+                  <TableHead className="pl-5">Received</TableHead>
+                  <TableHead>Event</TableHead>
+                  <TableHead>Payment</TableHead>
+                  <TableHead>Outcome</TableHead>
+                  <TableHead>Invoice</TableHead>
+                  <TableHead className="pr-5 text-right">Actions</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {filtered.map((e) => {
+                  const meta = whopOutcomeMeta(e.outcome);
+                  return (
+                    <TableRow key={e.id} className="cursor-pointer" onClick={() => setSelected(e)}>
+                      <TableCell className="pl-5 text-xs tabular-nums text-muted-foreground">
+                        <p>{relTime(e.at, now)}</p>
+                        <p className="text-[10px] opacity-70">{fmtDate(e.at)}</p>
+                      </TableCell>
+                      <TableCell className="font-mono text-xs">{e.type}</TableCell>
+                      <TableCell>
+                        {e.paymentId ? (
+                          <span className="font-mono text-[11px] text-muted-foreground" title={e.paymentId}>
+                            {e.paymentId.length > 14 ? `${e.paymentId.slice(0, 8)}…${e.paymentId.slice(-4)}` : e.paymentId}
+                            {e.amountCents != null && (
+                              <span className="ml-1.5 font-semibold tabular-nums text-foreground">
+                                {fmtMoney(e.amountCents)}
+                              </span>
+                            )}
+                          </span>
+                        ) : (
+                          <span className="text-muted-foreground/50">—</span>
+                        )}
+                      </TableCell>
+                      <TableCell>
+                        <span
+                          title={meta.hint}
+                          className={cn(
+                            "inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-semibold",
+                            meta.cls
+                          )}
+                        >
+                          {meta.label}
+                        </span>
+                      </TableCell>
+                      <TableCell>
+                        {e.invoiceNumber ? (
+                          <span className="font-mono text-xs">
+                            {e.invoiceNumber}
+                            {e.invoiceStatus && (
+                              <span className="ml-1.5 text-[10px] text-muted-foreground">{e.invoiceStatus}</span>
+                            )}
+                          </span>
+                        ) : e.outcome === "unmatched" ? (
+                          <span className="text-[11px] text-amber-600 dark:text-amber-400">needs review</span>
+                        ) : (
+                          <span className="text-muted-foreground/50">—</span>
+                        )}
+                      </TableCell>
+                      <TableCell className="pr-5">
+                        <div className="flex items-center justify-end gap-1.5">
+                          {retryable(e) && (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="h-7 gap-1 rounded-full px-2.5 text-[11px]"
+                              disabled={busyId === e.id}
+                              onClick={(ev) => {
+                                ev.stopPropagation();
+                                void reReconcile(e);
+                              }}
+                            >
+                              {busyId === e.id ? (
+                                <Loader2 className="h-3 w-3 animate-spin" />
+                              ) : (
+                                <RefreshCw className="h-3 w-3" />
+                              )}
+                              Re-reconcile
+                            </Button>
+                          )}
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-7 gap-1 rounded-full px-2.5 text-[11px]"
+                            onClick={(ev) => {
+                              ev.stopPropagation();
+                              setSelected(e);
+                            }}
+                          >
+                            <FileJson className="h-3 w-3" /> Inspect
+                          </Button>
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
+              </TableBody>
+            </table>
+          </div>
+        </>
+      )}
+
+      {/* Event detail */}
+      <Dialog open={!!selected} onOpenChange={(o) => !o && setSelected(null)}>
+        <DialogContent className="max-h-[88vh] overflow-y-auto sm:max-w-xl">
+          {selected && (
+            <>
+              <DialogHeader>
+                <DialogTitle className="flex flex-wrap items-center gap-2.5">
+                  <span className="font-mono text-sm">{selected.type}</span>
+                  <span
+                    className={cn(
+                      "rounded-full border px-2 py-0.5 text-[11px] font-semibold",
+                      whopOutcomeMeta(selected.outcome).cls
+                    )}
+                  >
+                    {whopOutcomeMeta(selected.outcome).label}
+                  </span>
+                </DialogTitle>
+                <DialogDescription>
+                  {fmtDateTime(selected.at)} · event <span className="font-mono text-[11px]">{selected.eventId}</span>
+                </DialogDescription>
+              </DialogHeader>
+              <p className="text-xs leading-relaxed text-muted-foreground">{whopOutcomeMeta(selected.outcome).hint}</p>
+              {selected.outcomeDetail && (
+                <div className="rounded-xl border bg-muted/30 p-3 text-xs">
+                  <p className="font-semibold text-muted-foreground">Reconciliation note</p>
+                  <p className="mt-1 leading-relaxed">{selected.outcomeDetail}</p>
+                </div>
+              )}
+              <dl className="space-y-2.5 text-sm">
+                {selected.paymentId && (
+                  <div className="flex items-center justify-between gap-4">
+                    <dt className="text-muted-foreground">Payment</dt>
+                    <dd className="font-mono text-xs">{selected.paymentId}</dd>
+                  </div>
+                )}
+                {selected.amountCents != null && (
+                  <div className="flex items-center justify-between gap-4">
+                    <dt className="text-muted-foreground">Amount</dt>
+                    <dd className="font-bold tabular-nums">{fmtMoney(selected.amountCents)}</dd>
+                  </div>
+                )}
+                {selected.invoiceNumber && (
+                  <div className="flex items-center justify-between gap-4">
+                    <dt className="text-muted-foreground">Invoice</dt>
+                    <dd className="font-mono text-xs">
+                      {selected.invoiceNumber}
+                      {selected.invoiceStatus && (
+                        <span className="ml-1.5 text-muted-foreground">({selected.invoiceStatus})</span>
+                      )}
+                    </dd>
+                  </div>
+                )}
+                {selected.productTitle && (
+                  <div className="flex items-center justify-between gap-4">
+                    <dt className="text-muted-foreground">Product</dt>
+                    <dd className="font-medium">{selected.productTitle}</dd>
+                  </div>
+                )}
+                {selected.buyer && (
+                  <div className="flex items-center justify-between gap-4">
+                    <dt className="text-muted-foreground">Buyer</dt>
+                    <dd className="text-right">
+                      {selected.buyer.name || "—"}
+                      <span className="block text-xs font-normal text-muted-foreground">{selected.buyer.email}</span>
+                    </dd>
+                  </div>
+                )}
+              </dl>
+              {selected.payload ? (
+                <div>
+                  <p className="mb-1.5 text-xs font-semibold text-muted-foreground">Raw payload</p>
+                  <pre
+                    className={cn(
+                      "max-h-60 overflow-auto rounded-xl border bg-zinc-950 p-4 font-mono text-xs leading-relaxed text-zinc-200",
+                      SCROLL_THIN
+                    )}
+                  >
+                    {(() => {
+                      try {
+                        return JSON.stringify(JSON.parse(selected.payload), null, 2);
+                      } catch {
+                        return selected.payload;
+                      }
+                    })()}
+                  </pre>
+                </div>
+              ) : (
+                <p className="flex items-start gap-2 rounded-xl border border-amber-500/30 bg-amber-500/[0.06] p-3 text-[11px] leading-relaxed text-amber-800 dark:text-amber-300">
+                  <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                  Unmatched platform event — the raw payload isn&apos;t shown because it can&apos;t be attributed to
+                  your products. Re-reconcile once the payment&apos;s invoice exists locally.
+                </p>
+              )}
+              <DialogFooter className="gap-2 sm:gap-0">
+                <CopyButton value={selected.paymentId || selected.eventId} label="Copy reference" />
+                {retryable(selected) && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="gap-1.5"
+                    disabled={busyId === selected.id}
+                    onClick={() => void reReconcile(selected)}
+                  >
+                    {busyId === selected.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+                    Re-reconcile
+                  </Button>
+                )}
+              </DialogFooter>
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
+    </Panel>
   );
 }
 
@@ -6822,7 +9969,8 @@ function TimeTab() {
     try {
       const res = await api<BillingRunResult>("/api/billing/advance", { json: { days } });
       setResult(res);
-      setClock({ simulated: true, now: res.newNow, label: `Simulated (+${res.advancedDays}d)` });
+      // Server truth: label tracks the cumulative offset (+30d stays +30d).
+      setClock(res.clock ?? { simulated: true, now: res.newNow, label: `Simulated (+${res.advancedDays}d)` });
       refresh();
       toast({
         title: `Time advanced by ${res.advancedDays} day${res.advancedDays === 1 ? "" : "s"}`,
@@ -6838,8 +9986,8 @@ function TimeTab() {
   async function runReset() {
     setResetting(true);
     try {
-      await api("/api/billing/reset", { json: {} });
-      setClock({ simulated: false, now: new Date().toISOString(), label: "Live" });
+      const res = await api<{ clock?: ClockDTO }>("/api/billing/reset", { json: {} });
+      setClock(res.clock ?? { simulated: false, now: new Date().toISOString(), label: "Live" });
       setResult(null);
       refresh();
       toast({ title: "Back to live time", description: "The clock follows real time again — billing was settled up to now." });

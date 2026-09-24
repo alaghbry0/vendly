@@ -26,6 +26,7 @@ export async function GET(req: Request) {
       number: i.number,
       description: i.description,
       amountCents: i.amountCents,
+      refundedCents: i.refundedCents ?? 0,
       discountCents: i.discountCents ?? 0,
       promoCode: i.promoCode ?? null,
       status: i.status,

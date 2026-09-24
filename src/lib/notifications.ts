@@ -1,8 +1,14 @@
 import { db } from "@/lib/db";
+import { getNow } from "@/lib/clock";
 
 // ============ In-app notification center ============
 // Events that matter to a user land here in addition to webhook fan-out.
 // Types drive the bell UI (icon + colour + optional deep link).
+//
+// Timestamps: every notification is stamped on the PLATFORM clock
+// (getNow()), so during simulated time the feed stays consistent with the
+// time machine — callers inside the billing engine pass the engine's `now`
+// explicitly to avoid extra reads.
 
 export type NotificationIcon =
   | "receipt"
@@ -26,8 +32,10 @@ export async function notify(opts: {
   body?: string;
   icon?: NotificationIcon;
   productId?: string; // optional deep-link context (e.g. question_answered → product page)
+  at?: Date; // platform-clock timestamp (defaults to getNow())
 }): Promise<void> {
   try {
+    const at = opts.at ?? (await getNow());
     await db.notification.create({
       data: {
         userId: opts.userId,
@@ -36,6 +44,7 @@ export async function notify(opts: {
         body: opts.body ?? null,
         icon: opts.icon ?? "bell",
         productId: opts.productId ?? null,
+        createdAt: at,
       },
     });
   } catch {
@@ -80,6 +89,10 @@ export function notificationTarget(type: string, n?: { productId?: string | null
     case "giveaway_entered":
     case "giveaway_ended":
       return { view: "creator", tab: "giveaways" };
+    case "bundle_sold":
+      return { view: "creator", tab: "bundles" };
+    case "bundle_purchased":
+      return { view: "portal", tab: "subscriptions" };
     case "question_asked":
       return { view: "creator", tab: "questions" };
     case "question_answered":

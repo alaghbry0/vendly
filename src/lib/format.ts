@@ -36,10 +36,14 @@ export function fmtBytes(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
-export function timeAgo(iso: string | null | undefined): string {
+// `nowMs` anchors relative time to the PLATFORM clock (see use-now.ts).
+// Omit it only for pure real-time contexts — inside the app, always pass
+// usePlatformNowMs() so simulated time renders consistently.
+export function timeAgo(iso: string | null | undefined, nowMs?: number): string {
   if (!iso) return "—";
-  const diff = Date.now() - new Date(iso).getTime();
-  if (diff < 0) return "in " + timeUntil(iso);
+  const now = nowMs ?? Date.now();
+  const diff = now - new Date(iso).getTime();
+  if (diff < 0) return "in " + timeUntil(iso, nowMs);
   const mins = Math.floor(diff / 60000);
   if (mins < 1) return "just now";
   if (mins < 60) return `${mins}m ago`;
@@ -50,15 +54,16 @@ export function timeAgo(iso: string | null | undefined): string {
   return fmtDate(iso);
 }
 
-export function timeUntil(iso: string | null | undefined): string {
+export function timeUntil(iso: string | null | undefined, nowMs?: number): string {
   if (!iso) return "—";
-  const diff = new Date(iso).getTime() - Date.now();
+  const now = nowMs ?? Date.now();
+  const diff = new Date(iso).getTime() - now;
   if (diff <= 0) return "now";
   const days = Math.floor(diff / 86400000);
   if (days >= 1) return `${days}d`;
   const hours = Math.floor(diff / 3600000);
   if (hours >= 1) return `${hours}h`;
-  return `${Math.floor(diff / 60000)}m`;
+  return `${Math.max(1, Math.floor(diff / 60000))}m`;
 }
 
 // Themable gradient covers for products (no external images needed)

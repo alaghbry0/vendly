@@ -52,6 +52,3 @@ prompt
 server.log
 # Skills directory
 /skills/
-# local database & agent artifacts
-db/*.db
-tool-results/

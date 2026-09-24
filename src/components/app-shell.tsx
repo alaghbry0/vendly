@@ -25,8 +25,9 @@ import {
   Receipt, RefreshCw, Search, Star, Store, Sun, Tag, Timer, UserPlus, X, XCircle, AlertTriangle,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import type { NotificationDTO, SessionUser } from "@/lib/types";
+import type { ClockDTO, NotificationDTO, SessionUser } from "@/lib/types";
 import { timeAgo } from "@/lib/format";
+import { usePlatformNowMs } from "@/lib/use-now";
 import { useToast } from "@/hooks/use-toast";
 
 // ---------------------------------------------------------------------------
@@ -60,6 +61,7 @@ function NotifIcon({ icon, cls }: { icon: string; cls?: string }) {
 
 function NotificationBell() {
   const { user, nonce, navigate } = useAppStore();
+  const nowMs = usePlatformNowMs();
   const [items, setItems] = useState<NotificationDTO[] | null>(null);
   const [unread, setUnread] = useState(0);
   const [open, setOpen] = useState(false);
@@ -69,9 +71,14 @@ function NotificationBell() {
   const load = useCallback(async () => {
     if (!user) return;
     try {
-      const res = await api<{ notifications: NotificationDTO[]; unread: number }>("/api/notifications");
+      const res = await api<{ notifications: NotificationDTO[]; unread: number; clock?: ClockDTO }>(
+        "/api/notifications"
+      );
       setItems(res.notifications);
       setUnread(res.unread);
+      // Keep the platform-clock anchor fresh — after a time-machine advance
+      // (even from another tab) relative times re-anchor within one poll.
+      if (res.clock) useAppStore.getState().setClock(res.clock);
     } catch {
       // silent — the bell must never break the shell
     }
@@ -206,7 +213,7 @@ function NotificationBell() {
                       {n.body}
                     </span>
                   )}
-                  <span className="mt-1 block text-[11px] text-muted-foreground/80">{timeAgo(n.createdAt)}</span>
+                  <span className="mt-1 block text-[11px] text-muted-foreground/80">{timeAgo(n.createdAt, nowMs)}</span>
                 </span>
                 {!n.read && <span className="mt-1.5 h-2 w-2 shrink-0 rounded-full bg-emerald-500" aria-label="unread" />}
               </DropdownMenuItem>

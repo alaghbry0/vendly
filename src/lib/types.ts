@@ -78,12 +78,16 @@ export interface ProductDetailDTO extends ProductCardDTO {
   description: string;
   discordRoleName: string | null;
   telegramChannel: string | null;
+  /** Default access policy for full refunds on this product
+   *  (REVOKE = close access immediately, KEEP_ACCESS = goodwill until period end). */
+  refundPolicy: "REVOKE" | "KEEP_ACCESS";
   createdAt: string;
   assets: AssetDTO[];
   reviews: ReviewDTO[];
   creator: { id: string; name: string | null; avatarColor: string; bio: string | null };
   hasAccess: boolean;
   affiliateBps: number | null; // active affiliate program commission (null = no program)
+  bundleOffer?: { id: string; title: string; discountPct: number; productCount: number } | null; // first active bundle containing this product
 }
 
 export interface SubscriptionDTO {
@@ -122,6 +126,7 @@ export interface InvoiceDTO {
   number: string;
   description: string;
   amountCents: number;
+  refundedCents?: number;
   discountCents?: number;
   promoCode?: string | null;
   status: string;
@@ -131,6 +136,44 @@ export interface InvoiceDTO {
   periodStart: string | null;
   periodEnd: string | null;
   product: { id: string; title: string; coverTheme: string } | null;
+}
+
+// ============ Money-event audit trail (creator view) ============
+export interface AuditEventDTO {
+  id: string;
+  at: string; // platform-clock ISO
+  action: string; // charge.succeeded | refund.created | … (AUDIT_ACTIONS)
+  actorId: string;
+  actorLabel: string; // "You" | "Billing worker" | "Whop webhook" | user name…
+  gateway: string | null;
+  amountCents: number;
+  invoiceId: string | null;
+  invoiceNumber: string | null;
+  subscriptionId: string | null;
+  whopRef: string | null; // pay_… for Whop-routed money events
+  productTitle: string | null;
+  buyer: { name: string | null; email: string | null } | null;
+  detail: Record<string, unknown>;
+}
+
+// Whop → Vendly ingestion feed (WhopEvent rows) as surfaced in the creator
+// studio. `payloadVisible` encodes scope discipline: unmatched platform-level
+// rows expose refs/outcome only, never the raw payload.
+export interface WhopIngestionEventDTO {
+  id: string;
+  eventId: string; // evt_…
+  type: string; // payment.succeeded | payment.refunded | …
+  at: string; // platform-clock ISO when ingested
+  outcome: "received" | "reconciled" | "noop" | "unmatched" | "no-rule" | "error";
+  outcomeDetail: string;
+  paymentId: string | null; // pay_… carried in the payload
+  amountCents: number | null;
+  payloadVisible: boolean;
+  payload: string | null; // raw JSON (only when payloadVisible)
+  invoiceNumber: string | null;
+  invoiceStatus: string | null;
+  productTitle: string | null;
+  buyer: { name: string | null; email: string | null } | null;
 }
 
 export interface LicenseDTO {
@@ -332,6 +375,8 @@ export interface BillingRunResult {
   trialsConverted: number;
   invoicesCreated: number;
   events: string[];
+  /** Fresh clock state returned by /api/billing/advance and /api/billing/reset. */
+  clock?: ClockDTO;
 }
 
 export const CATEGORIES = [
@@ -397,6 +442,62 @@ export interface MyGiveawayEntryDTO {
   won: boolean;
   createdAt: string;
   giveaway: GiveawayDTO;
+}
+
+// ============ Bundles ============
+export interface BundleItemDTO {
+  productId: string;
+  productTitle: string;
+  productSlug: string;
+  coverTheme: string;
+  category: string;
+  planId: string;
+  planName: string;
+  priceCents: number;
+  discountedCents: number;
+  interval: string;
+}
+
+export interface BundleDTO {
+  id: string;
+  slug: string;
+  title: string;
+  description: string | null;
+  discountPct: number;
+  coverTheme: string;
+  active: boolean;
+  creatorId: string;
+  creatorName: string | null;
+  createdAt: string; // ISO
+  items: BundleItemDTO[];
+  subtotalCents: number;
+  discountCents: number;
+  totalCents: number;
+  salesCount: number;
+  revenueCents: number;
+  membersCount: number;
+}
+
+// ============ Creator activity feed ============
+export type ActivityType =
+  | "subscriber_new"
+  | "payment_failed"
+  | "review_new"
+  | "question_new"
+  | "question_answered"
+  | "giveaway_entry"
+  | "bundle_sold"
+  | "payout";
+
+export interface ActivityDTO {
+  id: string; // source-prefixed row id (e.g. "sub-ckx…")
+  type: ActivityType | string;
+  title: string;
+  body: string | null;
+  at: string; // ISO — event timestamp
+  productId: string | null; // enables deep-links to the product page
+  productTitle: string | null;
+  questionId?: string | null; // deep-link to the product Q&A (question/answer events)
 }
 
 // ============ Product Q&A ============

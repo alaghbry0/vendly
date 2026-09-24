@@ -77,6 +77,8 @@ export async function POST(req: Request) {
         category,
         coverTheme: themes[slug.length % themes.length],
         accessType,
+        // Full-refund default policy — pre-selects the Orders refund dialog.
+        refundPolicy: body.refundPolicy === "KEEP_ACCESS" ? "KEEP_ACCESS" : "REVOKE",
         discordRoleName: body.discordRoleName ? String(body.discordRoleName) : null,
         telegramChannel: body.telegramChannel ? String(body.telegramChannel) : null,
         status: "ACTIVE",

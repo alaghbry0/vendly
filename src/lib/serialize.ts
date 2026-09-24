@@ -64,13 +64,15 @@ export function serializeProductDetail(
     reviews: { id: string; authorName: string; rating: number; comment: string; createdAt: Date }[];
     affiliateProgram?: { commissionBps: number; active: boolean } | null;
   },
-  hasAccess: boolean
+  hasAccess: boolean,
+  bundleOffer?: { id: string; title: string; discountPct: number; productCount: number } | null
 ): ProductDetailDTO {
   return {
     ...serializeProductCard(p),
     description: p.description,
     discordRoleName: p.discordRoleName,
     telegramChannel: p.telegramChannel,
+    refundPolicy: p.refundPolicy === "KEEP_ACCESS" ? "KEEP_ACCESS" : "REVOKE",
     createdAt: p.createdAt.toISOString(),
     assets: p.assets.map((a: any) => ({
       id: a.id,
@@ -97,6 +99,7 @@ export function serializeProductDetail(
     },
     hasAccess,
     affiliateBps: p.affiliateProgram?.active ? p.affiliateProgram.commissionBps : null,
+    bundleOffer: bundleOffer ?? null,
   };
 }
 

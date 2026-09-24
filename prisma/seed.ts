@@ -24,6 +24,11 @@ async function main() {
   await db.licenseKey.deleteMany();
   await db.invoice.deleteMany();
   await db.subscription.deleteMany();
+  // bundle rows reference plans/products/users — clear them (in this order)
+  // before the catalog is wiped
+  await db.bundlePurchase.deleteMany();
+  await db.bundleItem.deleteMany();
+  await db.bundle.deleteMany();
   await db.paymentMethod.deleteMany();
   await db.review.deleteMany();
   await db.digitalAsset.deleteMany();
@@ -44,6 +49,10 @@ async function main() {
   await db.product.deleteMany();
   await db.user.deleteMany();
   await db.systemClock.deleteMany();
+  await db.advisoryLock.deleteMany(); // release any stale engine/checkout locks
+  await db.counter.deleteMany(); // reset the atomic invoice-number counter
+  await db.whopEvent.deleteMany(); // clear webhook event dedupe history
+  await db.auditLog.deleteMany(); // clear the money-event audit trail
 
   // ============ Users ============
   const bob = await db.user.create({
@@ -958,6 +967,179 @@ async function main() {
     },
   });
 
+  // ============ Bundle offers ============
+  // Marcus bundles his two flagship trading products at 25% off.
+  const tradingMastery = await db.bundle.create({
+    data: {
+      creatorId: bob.id,
+      slug: "trading-mastery-bundle",
+      title: "Trading Mastery Bundle",
+      description:
+        "The full desk: real-time trading signals plus on-chain crypto alpha — 25% off buying both separately.",
+      discountPct: 25,
+      coverTheme: "amber",
+      active: true,
+      createdAt: daysAgo(45),
+      items: {
+        create: [
+          { productId: tradeSignals.id, planId: plans.tspPro!.id, sortOrder: 0 },
+          { productId: cryptoAlpha.id, planId: plans.cagAnalyst!.id, sortOrder: 1 },
+        ],
+      },
+    },
+  });
+  // Aisha bundles her fitness coaching + design vault at 20% off.
+  await db.bundle.create({
+    data: {
+      creatorId: carol.id,
+      slug: "fit-design-bundle",
+      title: "Fit & Design Bundle",
+      description:
+        "Ship beautiful work and stay healthy doing it — coaching plus the full design vault, 20% off.",
+      discountPct: 20,
+      coverTheme: "rose",
+      active: true,
+      createdAt: daysAgo(20),
+      items: {
+        create: [
+          { productId: fitcore.id, planId: plans.fcCoached!.id, sortOrder: 0 },
+          { productId: designVault.id, planId: plans.dvPersonal!.id, sortOrder: 1 },
+        ],
+      },
+    },
+  });
+
+  // Historical bundle purchase — Gina Park bought the Trading Mastery Bundle
+  // 12 days ago via Stripe: two discounted subs + invoices + the purchase row
+  // (same shape provisionBundle writes at checkout).
+  const ginaBundleTsp = await db.subscription.create({
+    data: {
+      userId: grace.id,
+      planId: plans.tspPro!.id,
+      productId: tradeSignals.id,
+      status: "ACTIVE",
+      gateway: "STRIPE",
+      paymentMethodId: pmGraceCard.id,
+      currentPeriodStart: daysAgo(12),
+      currentPeriodEnd: daysAhead(18),
+      bundleId: tradingMastery.id,
+      bundleTitle: "Trading Mastery Bundle",
+      bundleDiscountPct: 25,
+      createdAt: daysAgo(12),
+    },
+  });
+  const ginaBundleCag = await db.subscription.create({
+    data: {
+      userId: grace.id,
+      planId: plans.cagAnalyst!.id,
+      productId: cryptoAlpha.id,
+      status: "ACTIVE",
+      gateway: "STRIPE",
+      paymentMethodId: pmGraceCard.id,
+      currentPeriodStart: daysAgo(12),
+      currentPeriodEnd: daysAhead(18),
+      bundleId: tradingMastery.id,
+      bundleTitle: "Trading Mastery Bundle",
+      bundleDiscountPct: 25,
+      createdAt: daysAgo(12),
+    },
+  });
+  await db.invoice.create({
+    data: {
+      number: await nextInv(),
+      userId: grace.id,
+      subscriptionId: ginaBundleTsp.id,
+      productId: tradeSignals.id,
+      description: "Trade Signals Pro — Pro (monthly) · Trading Mastery Bundle",
+      amountCents: 3675,
+      discountCents: 1225,
+      status: "PAID",
+      gateway: "STRIPE",
+      periodStart: daysAgo(12),
+      periodEnd: daysAhead(18),
+      paidAt: daysAgo(12),
+      createdAt: daysAgo(12),
+    },
+  });
+  await db.invoice.create({
+    data: {
+      number: await nextInv(),
+      userId: grace.id,
+      subscriptionId: ginaBundleCag.id,
+      productId: cryptoAlpha.id,
+      description: "Crypto Alpha Group — Analyst (monthly) · Trading Mastery Bundle",
+      amountCents: 7425,
+      discountCents: 2475,
+      status: "PAID",
+      gateway: "STRIPE",
+      periodStart: daysAgo(12),
+      periodEnd: daysAhead(18),
+      paidAt: daysAgo(12),
+      createdAt: daysAgo(12),
+    },
+  });
+  await db.bundlePurchase.create({
+    data: {
+      bundleId: tradingMastery.id,
+      userId: grace.id,
+      subtotalCents: 14800,
+      discountCents: 3700,
+      totalCents: 11100,
+      gateway: "STRIPE",
+      createdAt: daysAgo(12),
+    },
+  });
+  // access grants + license key for the bundle's products (same pattern as
+  // the other seeded subscriptions)
+  await db.accessGrant.create({
+    data: {
+      userId: grace.id,
+      productId: tradeSignals.id,
+      provider: "DISCORD",
+      role: "@VIP Trader",
+      status: "SYNCED",
+      grantedAt: daysAgo(12),
+      createdAt: daysAgo(12),
+    },
+  });
+  await db.accessGrant.create({
+    data: {
+      userId: grace.id,
+      productId: cryptoAlpha.id,
+      provider: "DISCORD",
+      role: "@Alpha Whale",
+      status: "SYNCED",
+      grantedAt: daysAgo(12),
+      createdAt: daysAgo(12),
+    },
+  });
+  await db.accessGrant.create({
+    data: {
+      userId: grace.id,
+      productId: cryptoAlpha.id,
+      provider: "LICENSE",
+      status: "SYNCED",
+      grantedAt: daysAgo(12),
+      createdAt: daysAgo(12),
+    },
+  });
+  await db.licenseKey.create({
+    data: {
+      key: "WHPL-5D8N-R3T7-X6Q2",
+      userId: grace.id,
+      productId: cryptoAlpha.id,
+      subscriptionId: ginaBundleCag.id,
+      status: "ACTIVE",
+      planName: "Analyst",
+      activations: 1,
+      activatedAt: daysAgo(12),
+      lastUsedAt: daysAgo(2),
+      createdAt: daysAgo(12),
+    },
+  });
+  await notif(bob.id, "bundle_sold", "Bundle sold — Trading Mastery Bundle", "Gina Park · 2 products · $111.00 · save 25%", "gift", true, 12);
+  await notif(grace.id, "bundle_purchased", "Bundle purchased — Trading Mastery Bundle", "You now have access to 2 products — manage them from My Hub → Memberships.", "gift", true, 12);
+
   console.log("✅ Seed complete:", {
     users: await db.user.count(),
     products: await db.product.count(),
@@ -981,6 +1163,9 @@ async function main() {
     questions: await db.question.count(),
     answers: await db.answer.count(),
     questionVotes: await db.questionVote.count(),
+    bundles: await db.bundle.count(),
+    bundleItems: await db.bundleItem.count(),
+    bundlePurchases: await db.bundlePurchase.count(),
   });
 }
 

@@ -1,6 +1,7 @@
 import { db } from "@/lib/db";
 import { errorResponse, HttpError, requireUser } from "@/lib/session";
 import { notify } from "@/lib/notifications";
+import { getNow } from "@/lib/clock";
 
 // POST /api/products/[id]/reviews — leave a review (requires access)
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -16,7 +17,8 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     if (comment.length < 4) throw new HttpError(400, "Review comment must be at least 4 characters.");
 
     const review = await db.review.create({
-      data: { productId: id, userId: user.id, authorName: user.name || user.email, rating, comment },
+      // Platform-clock stamp — relative times stay consistent in simulated time.
+      data: { productId: id, userId: user.id, authorName: user.name || user.email, rating, comment, createdAt: await getNow() },
     });
 
     // recompute rating
